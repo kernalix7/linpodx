@@ -2490,7 +2490,6 @@ mod tests {
         let scratch = tempfile::tempdir().expect("scratch");
         let bin = scratch.path().join("podman-fake");
         let body = "#!/bin/sh\n\
-            ref=\"${@: -1}\"\n\
             for arg in \"$@\"; do :; done\n\
             case \"$*\" in\n\
               *image*inspect*RootFS*image-a*) echo '{\"Type\":\"layers\",\"Layers\":[\"sha256:l1\",\"sha256:l2\"]}' ;;\n\
