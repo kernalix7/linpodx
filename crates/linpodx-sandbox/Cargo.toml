@@ -1,0 +1,39 @@
+[package]
+name = "linpodx-sandbox"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+authors.workspace = true
+description = "AI agent sandbox profiles, policy engine, audit log (hash chain), and SandboxManager for linpodx"
+
+[dependencies]
+linpodx-common = { workspace = true }
+linpodx-runtime = { workspace = true }
+linpodx-plugin = { workspace = true }
+linpodx-cluster = { workspace = true }
+serde = { workspace = true }
+serde_json = { workspace = true }
+serde_yml = { workspace = true }
+sha2 = { workspace = true }
+chrono = { workspace = true }
+sqlx = { workspace = true }
+tokio = { workspace = true }
+thiserror = { workspace = true }
+tracing = { workspace = true }
+# Phase 11: seccomp profile validation. We emit OCI/Docker-style seccomp JSON for
+# podman to consume; the `json` feature is used to parse our own output back as a
+# sanity check during compile so a malformed profile fails fast on the daemon side.
+seccompiler = { workspace = true, features = ["json"] }
+
+[dev-dependencies]
+tempfile = { workspace = true }
+tokio = { workspace = true, features = ["macros", "rt-multi-thread"] }
+# wat compiles inline WebAssembly Text into wasm bytes; used by Phase 7 plugin v2 hook
+# integration tests so we don't need a separate wasm32 toolchain in CI.
+wat = "1.0"
+# Phase 15 — plugin signature install-path tests: synthesize a keypair, sign the test
+# wasm bytes, and feed the result back through PluginStore::install.
+ed25519-dalek = { workspace = true }
+base64 = { workspace = true }

@@ -1,0 +1,33 @@
+[package]
+name = "linpodx-netfilter"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+authors.workspace = true
+description = "linpodx — privileged L4 egress firewall helper + client (Phase 5)"
+
+[lib]
+name = "linpodx_netfilter"
+path = "src/lib.rs"
+
+[[bin]]
+name = "linpodx-netfilter-helper"
+path = "src/bin/helper.rs"
+
+[dependencies]
+linpodx-common = { workspace = true }
+serde = { workspace = true }
+serde_json = { workspace = true }
+tokio = { workspace = true }
+tracing = { workspace = true }
+tracing-subscriber = { workspace = true }
+thiserror = { workspace = true }
+anyhow = { workspace = true }
+hickory-resolver = { workspace = true }
+clap = { workspace = true }
+
+[dev-dependencies]
+tempfile = { workspace = true }
+tokio = { workspace = true, features = ["macros", "rt-multi-thread"] }

@@ -1,0 +1,4 @@
+name = "audit-egress"
+version = "0.1.0"
+hooks = ["network_trace"]
+wasm = "audit_egress.wasm"

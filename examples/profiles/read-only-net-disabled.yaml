@@ -1,0 +1,13 @@
+version: 1
+name: read-only-net-disabled
+description: Strictest baseline. Read-only rootfs, network disabled, all caps dropped.
+network:
+  kind: none
+mounts: []
+limits:
+  cpu: 1.0
+  memory_mb: 256
+capabilities:
+  drop: ["ALL"]
+  add: []
+read_only_rootfs: true

@@ -1,0 +1,60 @@
+[package]
+name = "linpodx-runtime"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+authors.workspace = true
+description = "Podman adapter and OCI runtime layer for linpodx"
+
+[dependencies]
+linpodx-common = { workspace = true }
+linpodx-netfilter = { workspace = true }
+# Phase 13 — plugin v3 hooks: optional `network_trace` chain inside the egress filter
+# + `runtime_injector` payload type re-exposed by callers.
+linpodx-plugin = { workspace = true }
+tokio = { workspace = true }
+tokio-stream = { workspace = true }
+futures = { workspace = true }
+serde = { workspace = true }
+serde_json = { workspace = true }
+thiserror = { workspace = true }
+tracing = { workspace = true }
+chrono = { workspace = true }
+sqlx = { workspace = true }
+sha2 = { workspace = true }
+base64 = { workspace = true }
+hickory-server = { workspace = true }
+hickory-proto = { workspace = true }
+hickory-resolver = { workspace = true }
+async-trait = "0.1"
+tar = { workspace = true }
+flate2 = "1"
+tempfile = { workspace = true }
+# Phase 12: interactive PTY proxy (`exec_pty`).
+portable-pty = { workspace = true }
+# Phase 16 Stream B: snapshot at-rest encryption.
+aes-gcm = { workspace = true }
+rand = { workspace = true }
+# Phase 17 Stream A: argon2id KDF for snapshot key derivation.
+argon2 = { workspace = true }
+
+[dev-dependencies]
+tempfile = { workspace = true }
+tokio = { workspace = true, features = ["macros", "rt-multi-thread"] }
+hickory-proto = { workspace = true }
+criterion = { workspace = true }
+chrono = { workspace = true }
+
+[[bench]]
+name = "snapshot"
+harness = false
+
+[[bench]]
+name = "container"
+harness = false
+
+[[bench]]
+name = "cgroup"
+harness = false

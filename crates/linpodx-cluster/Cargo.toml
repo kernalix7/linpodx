@@ -1,0 +1,36 @@
+[package]
+name = "linpodx-cluster"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+authors.workspace = true
+description = "linpodx — peer-to-peer cluster gossip + multi-node container view (Phase 9)"
+
+[dependencies]
+linpodx-common = { workspace = true }
+serde = { workspace = true }
+serde_json = { workspace = true }
+tokio = { workspace = true }
+tracing = { workspace = true }
+thiserror = { workspace = true }
+anyhow = { workspace = true }
+chrono = { workspace = true }
+reqwest = { workspace = true }
+
+# Phase 10 Stream C: read-only Kubernetes adapter
+kube = { workspace = true }
+k8s-openapi = { workspace = true }
+# Phase 13 Stream A: K8s write-side parses inline pod-spec YAML.
+serde_yml = { workspace = true }
+
+# Phase 14 Stream C: Raft leader election (openraft 0.9 with serde for HTTP transport).
+openraft = { version = "0.9", features = ["serde"] }
+async-trait = "0.1"
+axum = { workspace = true, features = ["json"] }
+sqlx = { workspace = true }
+
+[dev-dependencies]
+tempfile = { workspace = true }
+tokio = { workspace = true, features = ["test-util"] }

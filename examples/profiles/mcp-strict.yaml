@@ -1,0 +1,20 @@
+version: 1
+name: mcp-strict
+description: |
+  Strict MCP profile — every tools/call goes through the approval gateway with a
+  short 15-second timeout. Pair with `linpodx mcp policy set` to wire per-method
+  decisions (auto_allow / prompt / deny / audit_only); this profile is the
+  fallback safety net for anything not covered by an explicit rule.
+network:
+  kind: none
+mounts: []
+limits:
+  cpu: 1.0
+  memory_mb: 512
+capabilities:
+  drop: ["ALL"]
+  add: []
+read_only_rootfs: true
+approval_gates:
+  - mcp_tool
+approval_timeout_secs: 15

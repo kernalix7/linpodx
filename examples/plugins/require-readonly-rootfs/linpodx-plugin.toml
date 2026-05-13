@@ -1,0 +1,4 @@
+name = "require-readonly-rootfs"
+version = "0.1.0"
+hooks = ["profile_validator"]
+wasm = "require_readonly_rootfs.wasm"

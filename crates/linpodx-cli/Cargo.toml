@@ -1,0 +1,44 @@
+[package]
+name = "linpodx-cli"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+authors.workspace = true
+description = "linpodx CLI — talk to the linpodx daemon"
+
+[[bin]]
+name = "linpodx"
+path = "src/main.rs"
+
+[dependencies]
+linpodx-common = { workspace = true }
+# Phase 11: `sandbox profile compile` runs SecProfileCompiler locally.
+linpodx-sandbox = { workspace = true }
+tokio = { workspace = true, features = ["io-std"] }
+serde = { workspace = true }
+serde_json = { workspace = true }
+serde_yml = { workspace = true }
+anyhow = { workspace = true }
+clap = { workspace = true }
+comfy-table = { workspace = true }
+tracing = { workspace = true }
+tracing-subscriber = { workspace = true }
+# Phase 7: remote daemon transport (WebSocket)
+tokio-tungstenite = { workspace = true }
+futures = { workspace = true }
+# Phase 8: mTLS for the remote daemon transport (wss://)
+rustls = { workspace = true }
+rustls-pemfile = { workspace = true }
+rustls-pki-types = { workspace = true }
+tokio-rustls = { workspace = true }
+# Phase 10: `linpodx daemon cert generate` self-signs a CA + server + client leaf.
+rcgen = { workspace = true }
+chrono = { workspace = true }
+# Phase 12: interactive `linpodx exec -it` raw mode + terminal-size detection.
+crossterm = { workspace = true }
+
+[dev-dependencies]
+# Phase 14: `image push --cert-dir` arg parser tests need a real existing dir.
+tempfile = { workspace = true }

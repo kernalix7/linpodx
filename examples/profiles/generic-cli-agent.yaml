@@ -1,0 +1,27 @@
+version: 1
+name: generic-cli-agent
+description: |
+  Generic shell-running AI-agent baseline.
+  Mounts the user's project directory only; no host paths outside it. Network is allowlisted
+  to common package mirrors. Read-only rootfs; agent writes only inside /project.
+network:
+  kind: allowlist
+  domains:
+    - registry.npmjs.org
+    - pypi.org
+    - github.com
+    - crates.io
+    - static.crates.io
+mounts:
+  - source:
+      kind: named
+      name: project
+    destination: /project
+    read_only: false
+limits:
+  cpu: 2.0
+  memory_mb: 2048
+capabilities:
+  drop: ["ALL"]
+  add: []
+read_only_rootfs: true

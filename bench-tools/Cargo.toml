@@ -1,0 +1,26 @@
+[package]
+name = "linpodx-bench-tools"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+authors.workspace = true
+description = "Workspace-level criterion harnesses for linpodx (Phase 17 crypto benches)"
+publish = false
+
+[lib]
+path = "src/lib.rs"
+
+[dependencies]
+
+[dev-dependencies]
+criterion = { workspace = true }
+aes-gcm = { workspace = true }
+rand = { workspace = true }
+sha2 = { workspace = true }
+argon2 = { workspace = true }
+
+[[bench]]
+name = "phase17_crypto"
+harness = false

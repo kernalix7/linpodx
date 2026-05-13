@@ -1,0 +1,61 @@
+[package]
+name = "linpodx-webui"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+authors.workspace = true
+description = "linpodx — leptos-based browser SPA (Phase 9). Targets wasm32-unknown-unknown."
+
+[lib]
+name = "linpodx_webui"
+crate-type = ["rlib", "cdylib"]
+path = "src/lib.rs"
+
+# Phase 14: build.rs vendors xterm.js + addon-fit from jsDelivr when
+# LINPODX_VENDOR_XTERM=1. ureq 2's default features pull in rustls TLS so
+# vendoring works without a system OpenSSL. Default builds (env unset) never
+# invoke ureq's network code — the dep cost is just compile time.
+[build-dependencies]
+ureq = "2"
+
+# Host-side deps stay minimal so `cargo build --workspace` on a host without
+# the wasm32 toolchain stays cheap (no leptos compile, no wasm-bindgen pulled
+# in). `serde_json` is the only host-side dep — it backs the pure-Rust
+# `helpers` module that the leptos modal components delegate parsing to. The
+# leptos stack only loads when targeting `wasm32-unknown-unknown`.
+[dependencies]
+serde_json = "1"
+
+[target.'cfg(target_arch = "wasm32")'.dependencies]
+leptos = { version = "0.7", features = ["csr"] }
+wasm-bindgen = "0.2"
+wasm-bindgen-futures = "0.4"
+console_error_panic_hook = "0.1"
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+serde-wasm-bindgen = "0.6"
+gloo-net = { version = "0.6", default-features = false, features = ["http", "websocket"] }
+gloo-storage = "0.3"
+futures = "0.3"
+js-sys = "0.3"
+
+[target.'cfg(target_arch = "wasm32")'.dependencies.web-sys]
+version = "0.3"
+features = [
+    "Window",
+    "Storage",
+    "Location",
+    "Document",
+    "Element",
+    "HtmlElement",
+    "WebSocket",
+    "BinaryType",
+    "MessageEvent",
+    "Event",
+    "CloseEvent",
+    "Blob",
+    "FileReader",
+    "console",
+]

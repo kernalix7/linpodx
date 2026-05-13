@@ -1,0 +1,50 @@
+# AI config (actual files in .priv-storage/, root has symlinks)
+.priv-storage/
+CLAUDE.md
+.cursorrules
+.claude
+.vscode
+WORK_STATUS.md
+
+# Backup toolkit temp files
+tmp-igbkp/.work/
+tmp-igbkp/output/
+
+# Rust build artifacts
+target/
+**/*.rs.bk
+Cargo.lock.bak
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Editors
+*.swp
+*.swo
+.idea/
+*.iml
+
+# Tauri build
+crates/linpodx-gui/src-tauri/target/
+crates/linpodx-gui/dist/
+node_modules/
+
+# Logs
+*.log
+AGENTS.md
+CLAUDE.local.md
+.mcp.json
+tmp-igbkp/
+CLAUDE.md.bak
+AGENTS.md.bak
+.cursorrules.bak
+WORK_STATUS.md.bak
+.gitignore.bak
+.codex/
+.aider*
+.continue/
+.cline/
+.roo/
+uninstall-backup-*/
+.priv-storage/.allow-setup-reread

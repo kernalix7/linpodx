@@ -1,0 +1,17 @@
+[package]
+name = "auto-allow-mount"
+version = "0.1.0"
+edition = "2021"
+license = "MIT"
+description = "Sample linpodx approval-rule plugin: auto-allow approvals whose category contains 'mount'"
+publish = false
+
+[lib]
+crate-type = ["cdylib"]
+
+[profile.release]
+opt-level = "s"
+lto = true
+strip = true
+codegen-units = 1
+panic = "abort"

@@ -1,0 +1,18 @@
+version: 1
+name: distro-alpine-cli
+description: |
+  Lightweight Alpine distro template for CLI work. No systemd, no GUI passthrough.
+  Pair with `linpodx distro create --kind alpine` for a quick, throwaway shell
+  environment.
+network:
+  kind: full
+mounts: []
+limits:
+  cpu: 1.0
+  memory_mb: 512
+capabilities:
+  drop: ["ALL"]
+  add: []
+read_only_rootfs: false
+distro_kind: alpine
+systemd: false

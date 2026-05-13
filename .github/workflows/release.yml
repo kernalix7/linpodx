@@ -1,0 +1,202 @@
+name: Release
+
+on:
+  push:
+    tags:
+      # Public version tags stay clean (`v0.1.0`, `v0.2.0-rc.1`).
+      # `REL-*` marker tags create/update GitHub Releases and upload artifacts.
+      - "REL-*"
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: "Version tag to build (e.g. v0.1.0 or v0.2.0-rc.1)"
+        required: true
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  validate:
+    name: validate release ref
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    outputs:
+      version: ${{ steps.version.outputs.value }}
+      version_tag: ${{ steps.version.outputs.tag }}
+      checkout_ref: ${{ steps.version.outputs.checkout_ref }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ needs.validate.outputs.checkout_ref }}
+          fetch-depth: 0
+
+      - name: Resolve version
+        id: version
+        run: |
+          if [ "${{ github.event_name }}" = "workflow_dispatch" ]; then
+            ref="${{ inputs.tag }}"
+          else
+            ref="${GITHUB_REF_NAME#REL-}"
+          fi
+          ref="${ref#REL-}"
+          version="${ref#v}"
+          tag="v$version"
+          if ! git rev-parse --verify --quiet "$tag^{}" >/dev/null; then
+            echo "Public version tag $tag does not exist" >&2
+            exit 1
+          fi
+          if [ "${{ github.event_name }}" != "workflow_dispatch" ]; then
+            marker_commit=$(git rev-parse "${GITHUB_REF_NAME}^{}")
+            public_commit=$(git rev-parse "$tag^{}")
+            if [ "$marker_commit" != "$public_commit" ]; then
+              echo "Release marker ${GITHUB_REF_NAME} does not point at $tag" >&2
+              exit 1
+            fi
+          fi
+          git checkout --detach "$tag"
+          cargo_version=$(awk -F'"' '/^version = / { print $2; exit }' Cargo.toml)
+          if [ "$version" != "$cargo_version" ]; then
+            echo "Tag version ($version) does not match Cargo.toml version ($cargo_version)" >&2
+            exit 1
+          fi
+          echo "value=$version" >> "$GITHUB_OUTPUT"
+          echo "tag=$tag" >> "$GITHUB_OUTPUT"
+          echo "checkout_ref=$tag" >> "$GITHUB_OUTPUT"
+
+      - uses: dtolnay/rust-toolchain@master
+        with:
+          toolchain: "1.85"
+          components: rustfmt, clippy
+      - uses: Swatinem/rust-cache@v2
+        with:
+          key: release-validate
+
+      - name: cargo fmt --check
+        run: cargo fmt --all -- --check
+
+      - name: cargo clippy
+        run: cargo clippy --workspace --all-targets --all-features -- -D warnings
+
+      - name: cargo test
+        run: cargo test --workspace --all-features
+
+      - name: cargo doc
+        env:
+          RUSTDOCFLAGS: "-D rustdoc::broken-intra-doc-links -D warnings"
+        run: cargo doc --workspace --no-deps
+
+  build:
+    name: build linux artifacts
+    needs: validate
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ needs.validate.outputs.checkout_ref }}
+
+      - uses: dtolnay/rust-toolchain@master
+        with:
+          toolchain: "1.85"
+      - uses: Swatinem/rust-cache@v2
+        with:
+          key: release-build
+
+      - name: install packaging tools
+        run: |
+          cargo install cargo-deb --locked || true
+          cargo install cargo-generate-rpm --locked || true
+
+      - name: cargo build --release
+        run: cargo build --workspace --release --bins
+
+      - name: cargo deb (linpodx-cli)
+        run: cargo deb -p linpodx-cli --no-build --output target/debian/linpodx-cli.deb || true
+
+      - name: cargo deb (linpodx-daemon)
+        run: cargo deb -p linpodx-daemon --no-build --output target/debian/linpodx-daemon.deb || true
+
+      - name: cargo generate-rpm (linpodx-cli)
+        run: cargo generate-rpm -p crates/linpodx-cli --output target/generate-rpm/linpodx-cli.rpm || true
+
+      - name: cargo generate-rpm (linpodx-daemon)
+        run: cargo generate-rpm -p crates/linpodx-daemon --output target/generate-rpm/linpodx-daemon.rpm || true
+
+      # AppImage scaffold — left as a placeholder for v0.2; linuxdeploy chain is heavy
+      # enough that we ship the raw release binaries today and expand to AppImage once
+      # we have a stable GUI launcher.
+      - name: stage release tarballs
+        run: |
+          mkdir -p dist
+          tar czf dist/linpodx-${{ needs.validate.outputs.version_tag }}-linux-x86_64.tar.gz \
+            -C target/release linpodx linpodx-daemon linpodx-gui || \
+          tar czf dist/linpodx-${{ needs.validate.outputs.version_tag }}-linux-x86_64.tar.gz \
+            -C target/release linpodx linpodx-daemon
+
+      - name: collect artifacts
+        run: |
+          mkdir -p artifacts
+          cp -v dist/*.tar.gz artifacts/ 2>/dev/null || true
+          cp -v target/debian/*.deb artifacts/ 2>/dev/null || true
+          cp -v target/generate-rpm/*.rpm artifacts/ 2>/dev/null || true
+          ls -la artifacts/
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: release-artifacts
+          path: artifacts/
+
+  release:
+    name: create github release
+    needs: [validate, build]
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - uses: actions/download-artifact@v4
+        with:
+          name: release-artifacts
+          path: artifacts/
+
+      - name: Extract changelog section
+        id: changelog
+        run: |
+          version="${{ needs.validate.outputs.version }}"
+          notes=$(awk -v ver="$version" '
+            $0 ~ "^## \\[" ver "\\]" { flag=1 }
+            flag && /^## \\[/ && $0 !~ "^## \\[" ver "\\]" { exit }
+            flag { print }
+          ' CHANGELOG.md)
+          if [ -z "$(echo "$notes" | tr -d '[:space:]')" ]; then
+            notes="See CHANGELOG.md for details."
+          fi
+          {
+            echo "notes<<CHANGELOG_EOF"
+            echo "$notes"
+            echo "CHANGELOG_EOF"
+          } >> "$GITHUB_OUTPUT"
+
+      - name: Detect prerelease
+        id: prerelease
+        run: |
+          version="${{ needs.validate.outputs.version }}"
+          if echo "$version" | grep -q -- '-'; then
+            echo "value=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "value=false" >> "$GITHUB_OUTPUT"
+          fi
+
+      - uses: softprops/action-gh-release@v2
+        with:
+          tag_name: ${{ needs.validate.outputs.version_tag }}
+          name: ${{ needs.validate.outputs.version_tag }}
+          prerelease: ${{ steps.prerelease.outputs.value }}
+          body: ${{ steps.changelog.outputs.notes }}
+          files: |
+            artifacts/*

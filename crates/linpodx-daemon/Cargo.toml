@@ -1,0 +1,57 @@
+[package]
+name = "linpodx-daemon"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+authors.workspace = true
+description = "linpodx daemon — Unix socket API server"
+build = "build.rs"
+
+[[bin]]
+name = "linpodx-daemon"
+path = "src/main.rs"
+
+[dependencies]
+linpodx-common = { workspace = true }
+linpodx-runtime = { workspace = true }
+linpodx-sandbox = { workspace = true }
+linpodx-mcp = { workspace = true }
+linpodx-distro = { workspace = true }
+linpodx-plugin = { workspace = true }
+linpodx-cluster = { workspace = true }
+tokio = { workspace = true }
+tokio-util = { workspace = true }
+tracing = { workspace = true }
+tracing-subscriber = { workspace = true }
+serde = { workspace = true }
+serde_json = { workspace = true }
+chrono = { workspace = true }
+thiserror = { workspace = true }
+anyhow = { workspace = true }
+clap = { workspace = true }
+# Phase 7: Remote daemon (WebSocket transport)
+# Phase 8 adds the `query` + `json` features for the Web UI handlers.
+axum = { workspace = true, features = ["query", "json"] }
+tokio-tungstenite = { workspace = true }
+tower = { workspace = true }
+futures = { workspace = true }
+# Phase 8: Web UI static asset content-type detection
+mime_guess = { workspace = true }
+# Phase 8: mTLS termination on the remote WebSocket listener
+rustls = { workspace = true }
+rustls-pemfile = { workspace = true }
+rustls-pki-types = { workspace = true }
+axum-server = { workspace = true }
+tokio-rustls = { workspace = true }
+x509-parser = { workspace = true }
+# Phase 15 — sha-256 fingerprint of pinned client certs + persistence
+sha2 = { workspace = true }
+sqlx = { workspace = true }
+
+[dev-dependencies]
+tempfile = { workspace = true }
+assert_cmd = { workspace = true }
+tokio = { workspace = true, features = ["macros", "rt-multi-thread"] }
+rcgen = { workspace = true }

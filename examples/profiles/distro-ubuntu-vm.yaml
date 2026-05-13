@@ -1,0 +1,28 @@
+version: 1
+name: distro-ubuntu-vm
+description: |
+  Ubuntu distro template tuned for VM-mode usage (long-lived persistent
+  environment). systemd is enabled inside the container so user services and
+  socket-activated daemons work as expected. Pair with `linpodx distro create
+  --vm-mode --kind ubuntu` to get the persistent home volume + auto-restart +
+  keep-user-id treatment.
+network:
+  kind: full
+mounts: []
+limits:
+  cpu: 4.0
+  memory_mb: 4096
+capabilities:
+  drop: ["ALL"]
+  add: ["CHOWN", "SETUID", "SETGID", "DAC_OVERRIDE", "SYS_ADMIN"]
+read_only_rootfs: false
+distro_kind: ubuntu
+systemd: true
+passthrough:
+  wayland: true
+  x11: true
+  audio: pipe_wire
+  gpu: true
+  dbus_session: true
+  clipboard: true
+  hidpi_inherit: true

@@ -1,0 +1,25 @@
+version: 1
+name: gui-full
+description: |
+  Full desktop passthrough preset for containerized GUI applications.
+  Wayland + X11 sockets, audio (PipeWire), GPU / DRI, DBus session bus, clipboard
+  and HiDPI / theme env-var inheritance are all granted. Use for trusted GUI apps
+  that need a native desktop experience.
+network:
+  kind: full
+mounts: []
+limits:
+  cpu: 4.0
+  memory_mb: 4096
+capabilities:
+  drop: ["ALL"]
+  add: []
+read_only_rootfs: false
+passthrough:
+  wayland: true
+  x11: true
+  audio: pipe_wire
+  gpu: true
+  dbus_session: true
+  clipboard: true
+  hidpi_inherit: true

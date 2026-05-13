@@ -1,0 +1,103 @@
+name: Bench
+
+on:
+  pull_request:
+    branches: [main]
+  push:
+    branches: [main]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+  pull-requests: write
+
+env:
+  CARGO_TERM_COLOR: always
+  RUST_BACKTRACE: 1
+
+jobs:
+  quick-bench:
+    name: criterion --quick vs baseline (${{ matrix.platform }})
+    runs-on: ${{ matrix.runner }}
+    timeout-minutes: 30
+    strategy:
+      fail-fast: false
+      matrix:
+        # Per-platform baselines live at bench-results/<platform>.json. Add a
+        # matrix row when introducing a new baseline file (e.g. linux-aarch64).
+        # Phase 16 Stream C — added linux-aarch64 via the GitHub-hosted ARM64
+        # runner image. As of 2026-05 the label is `ubuntu-24.04-arm`; if
+        # GitHub renames it, update here. The job soft-fails (no baseline
+        # entry) until bench-results/linux-aarch64.json is committed.
+        include:
+          - platform: linux-x86_64
+            runner: ubuntu-latest
+          - platform: linux-aarch64
+            runner: ubuntu-24.04-arm
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: dtolnay/rust-toolchain@stable
+
+      - uses: Swatinem/rust-cache@v2
+        with:
+          # Bench artifacts go in target/release/deps; reuse the lint/test cache
+          # but key on a separate prefix so concurrent jobs don't fight for the lock.
+          prefix-key: bench-v1-${{ matrix.platform }}
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      # Build all bench harnesses up front so the timed run only measures execution.
+      - name: cargo bench --no-run
+        run: cargo bench --workspace --no-run
+
+      # `--quick` is criterion's fast path (~1 sample per bench, no CI/HTML).
+      # We only target crates that actually have criterion harnesses, otherwise
+      # the workspace runs `--quick` against the default test harness, which
+      # rejects the flag.
+      - name: cargo bench --quick
+        id: bench
+        run: |
+          set -o pipefail
+          mkdir -p bench-results
+          cargo bench \
+              -p linpodx-runtime --bench cgroup \
+              -p linpodx-runtime --bench container \
+              -p linpodx-runtime --bench snapshot \
+              -p linpodx-mcp --bench policy \
+              -p linpodx-plugin --bench invoke \
+              -- --quick 2>&1 | tee bench-results/raw-${{ matrix.platform }}.log
+
+      - name: Compare against ${{ matrix.platform }} baseline
+        id: compare
+        run: |
+          BASELINE=bench-results/${{ matrix.platform }}.json
+          if [ ! -f "$BASELINE" ]; then
+            echo "no baseline at $BASELINE — skipping comparison" \
+                > bench-results/comment-${{ matrix.platform }}.md
+          else
+            python3 bench-tools/compare.py \
+                --baseline "$BASELINE" \
+                --new-log  bench-results/raw-${{ matrix.platform }}.log \
+                --threshold 20 \
+                > bench-results/comment-${{ matrix.platform }}.md
+          fi
+          echo "--- bench comment (${{ matrix.platform }}) ---"
+          cat bench-results/comment-${{ matrix.platform }}.md
+
+      - name: Upload bench artifacts (${{ matrix.platform }})
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: bench-results-${{ matrix.platform }}
+          path: bench-results/
+
+      - name: Comment on PR (${{ matrix.platform }})
+        if: github.event_name == 'pull_request'
+        uses: marocchino/sticky-pull-request-comment@v2
+        with:
+          header: linpodx-bench-${{ matrix.platform }}
+          path: bench-results/comment-${{ matrix.platform }}.md

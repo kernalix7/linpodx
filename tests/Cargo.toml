@@ -1,0 +1,34 @@
+[package]
+name = "linpodx-phase17-integration"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+authors.workspace = true
+description = "Cross-crate Phase 17 integration tests (argon2id rotation, sandbox auto-trigger, TOFU expiry, Raft revocation)"
+publish = false
+
+[lib]
+path = "src/lib.rs"
+
+# Phase 17 cross-crate integration tests. File lives at `tests/phase17_integration.rs`
+# (workspace root) rather than the default `tests/tests/` location so the path matches
+# the Phase 17 plan exactly.
+[[test]]
+name = "phase17_integration"
+path = "phase17_integration.rs"
+harness = true
+
+[dependencies]
+
+[dev-dependencies]
+linpodx-common = { workspace = true }
+linpodx-runtime = { workspace = true }
+tokio = { workspace = true, features = ["macros", "rt-multi-thread"] }
+serde_json = { workspace = true }
+sqlx = { workspace = true }
+tempfile = { workspace = true }
+sha2 = { workspace = true }
+argon2 = { workspace = true }
+chrono = { workspace = true }

@@ -1,0 +1,8 @@
+name = "signed-noop"
+version = "0.1.0"
+hooks = ["approval"]
+wasm = "noop.wasm"
+publisher = "linpodx-test"
+# `signature_b64` is intentionally omitted here — this example demonstrates the
+# *detached* signature path (the daemon picks up `signature.b64` next to the
+# manifest). Set this field if you'd rather inline the signature.

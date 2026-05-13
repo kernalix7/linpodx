@@ -1,0 +1,30 @@
+version: 1
+name: ai-agent
+description: |
+  Sandbox profile for a shell-running AI-agent CLI. Workspace is mounted
+  read-write under /workspace. Network egress is allowlisted to common package
+  and source registries. Capabilities are minimal: filesystem and process work
+  happen inside the container.
+network:
+  kind: allowlist
+  domains:
+    - registry.npmjs.org
+    - pypi.org
+    - crates.io
+    - static.crates.io
+    - github.com
+mounts:
+  - source:
+      kind: named
+      name: workspace
+    destination: /workspace
+    read_only: false
+limits:
+  cpu: 4.0
+  memory_mb: 4096
+  disk_mb: 8192
+  time_secs: 3600
+capabilities:
+  drop: ["ALL"]
+  add: []
+read_only_rootfs: true

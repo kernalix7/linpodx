@@ -1,0 +1,24 @@
+version: 1
+name: gui-no-gpu
+description: |
+  GUI passthrough preset without GPU access. Same as gui-full minus /dev/dri —
+  use for software-rendered GUI apps (Qt/GTK without GL acceleration) where
+  exposing the GPU would be unnecessary attack surface.
+network:
+  kind: full
+mounts: []
+limits:
+  cpu: 2.0
+  memory_mb: 2048
+capabilities:
+  drop: ["ALL"]
+  add: []
+read_only_rootfs: false
+passthrough:
+  wayland: true
+  x11: true
+  audio: pipe_wire
+  gpu: false
+  dbus_session: true
+  clipboard: true
+  hidpi_inherit: true

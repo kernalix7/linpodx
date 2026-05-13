@@ -1,0 +1,4 @@
+name = "auto-allow-mount"
+version = "0.1.0"
+hooks = ["approval"]
+wasm = "auto_allow_mount.wasm"

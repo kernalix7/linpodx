@@ -1,0 +1,35 @@
+[package]
+name = "linpodx-plugin"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+authors.workspace = true
+description = "linpodx — WASM plugin SDK + host runtime (Phase 6)"
+
+[dependencies]
+linpodx-common = { workspace = true }
+serde = { workspace = true }
+serde_json = { workspace = true }
+toml = { workspace = true }
+tokio = { workspace = true }
+tracing = { workspace = true }
+thiserror = { workspace = true }
+anyhow = { workspace = true }
+wasmtime = { workspace = true }
+ed25519-dalek = { workspace = true }
+base64 = { workspace = true }
+sha2 = { workspace = true }
+chrono = { workspace = true }
+
+[dev-dependencies]
+tempfile = { workspace = true }
+# wat compiles inline WebAssembly Text into wasm bytes; used by the chain-evaluation
+# integration tests so we don't need a separate wasm32 toolchain in CI.
+wat = "1.0"
+criterion = { workspace = true }
+
+[[bench]]
+name = "invoke"
+harness = false

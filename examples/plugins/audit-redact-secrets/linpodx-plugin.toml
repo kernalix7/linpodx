@@ -1,0 +1,4 @@
+name = "audit-redact-secrets"
+version = "0.1.0"
+hooks = ["audit_filter"]
+wasm = "audit_redact_secrets.wasm"

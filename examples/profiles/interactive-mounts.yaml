@@ -1,0 +1,21 @@
+version: 1
+name: interactive-mounts
+description: |
+  Demonstrates Phase 2A approval gates. The profile blocks all host-path mounts by
+  default, but instead of immediate deny it surfaces an approval request — a CLI listener
+  (`linpodx approvals --follow`) prompts the user Y/N. CapAdd is similarly gated.
+
+  Pair with: linpodx approvals --follow   (separate terminal)
+  Then run:  linpodx run --sandbox interactive-mounts -v /tmp/notes:/notes alpine sh -c 'ls /notes'
+network:
+  kind: full   # network is open here — focus is on mount/cap gates, not network isolation
+mounts: []     # no pre-approved mounts; everything goes through the gate
+limits: {}
+capabilities:
+  drop: ["ALL"]
+  add: []
+read_only_rootfs: false
+approval_gates:
+  - mount_host_path
+  - cap_add
+approval_timeout_secs: 60

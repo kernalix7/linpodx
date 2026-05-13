@@ -1,0 +1,44 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>linpodx — Web UI</title>
+<link rel="stylesheet" href="app.css">
+</head>
+<body>
+<header>
+  <div class="brand">linpodx</div>
+  <div class="status">
+    <span id="status-dot" class="dot offline" title="connection status"></span>
+    <span id="status-text">disconnected</span>
+    <button id="token-btn" type="button">Set token</button>
+  </div>
+</header>
+<nav id="tabs">
+  <button class="tab" data-tab="containers">Containers</button>
+  <button class="tab" data-tab="images">Images</button>
+  <button class="tab" data-tab="volumes">Volumes</button>
+  <button class="tab" data-tab="networks">Networks</button>
+  <button class="tab" data-tab="snapshots">Snapshots</button>
+  <button class="tab" data-tab="sessions">Sessions</button>
+  <button class="tab" data-tab="sandbox">Sandbox</button>
+  <button class="tab" data-tab="audit">Audit</button>
+</nav>
+<main>
+  <section id="panel-containers" class="panel"><div class="grid" id="grid-containers"></div></section>
+  <section id="panel-images" class="panel hidden"><div class="grid" id="grid-images"></div></section>
+  <section id="panel-volumes" class="panel hidden"><div class="grid" id="grid-volumes"></div></section>
+  <section id="panel-networks" class="panel hidden"><div class="grid" id="grid-networks"></div></section>
+  <section id="panel-snapshots" class="panel hidden"><div class="grid" id="grid-snapshots"></div></section>
+  <section id="panel-sessions" class="panel hidden"><div class="grid" id="grid-sessions"></div></section>
+  <section id="panel-sandbox" class="panel hidden"><div class="grid" id="grid-sandbox"></div></section>
+  <section id="panel-audit" class="panel hidden"><div class="grid" id="grid-audit"></div></section>
+</main>
+<footer>
+  <span>read-only views &mdash; use the CLI for mutations</span>
+  <span id="last-update"></span>
+</footer>
+<script src="app.js"></script>
+</body>
+</html>

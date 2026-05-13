@@ -1,0 +1,19 @@
+{
+  "schema_version": 1,
+  "platform": "linux-x86_64",
+  "captured_at": "2026-05-10",
+  "captured_via": "cargo bench --workspace -- --quick (criterion 0.5)",
+  "notes": "Initial Phase 10 baseline. Means are nanoseconds (criterion default). Update via bench-tools/compare.py --update on the same hardware.",
+  "benches": {
+    "mcp/policy/evaluate/allow":      { "mean_ns": 8.06 },
+    "mcp/policy/evaluate/deny":       { "mean_ns": 7.99 },
+    "mcp/policy/evaluate/fallback":   { "mean_ns": 12.71 },
+    "plugin/registry/new":            { "mean_ns": 1637.7 },
+    "cgroup/parse_usage_usec":        { "mean_ns": 28.73 },
+    "cgroup/parse_v2_path":           { "mean_ns": 40.23 },
+    "container/serialize":            { "mean_ns": 690.53 },
+    "container/deserialize":          { "mean_ns": 472.94 },
+    "snapshot/parse_diff/small":      { "mean_ns": 3227.1 },
+    "snapshot/parse_diff/large":      { "mean_ns": 118930.0 }
+  }
+}

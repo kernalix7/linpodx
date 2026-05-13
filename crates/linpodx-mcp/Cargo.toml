@@ -1,0 +1,29 @@
+[package]
+name = "linpodx-mcp"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+authors.workspace = true
+description = "MCP (Model Context Protocol) bridge — host stdio <-> sandboxed container with audit hooks"
+
+[dependencies]
+linpodx-common = { workspace = true }
+tokio = { workspace = true }
+serde = { workspace = true }
+serde_json = { workspace = true }
+tracing = { workspace = true }
+anyhow = { workspace = true }
+chrono = { workspace = true }
+
+[dev-dependencies]
+tempfile = { workspace = true }
+tokio = { workspace = true, features = ["macros", "rt-multi-thread"] }
+tracing-subscriber = { workspace = true }
+criterion = { workspace = true }
+linpodx-common = { workspace = true }
+
+[[bench]]
+name = "policy"
+harness = false

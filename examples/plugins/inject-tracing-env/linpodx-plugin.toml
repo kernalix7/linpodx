@@ -1,0 +1,4 @@
+name = "inject-tracing-env"
+version = "0.1.0"
+hooks = ["runtime_injector"]
+wasm = "inject_tracing_env.wasm"
