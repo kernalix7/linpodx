@@ -28,7 +28,6 @@ jobs:
     steps:
       - uses: actions/checkout@v4
         with:
-          ref: ${{ needs.validate.outputs.checkout_ref }}
           fetch-depth: 0
 
       - name: Resolve version
@@ -157,6 +156,7 @@ jobs:
     steps:
       - uses: actions/checkout@v4
         with:
+          ref: ${{ needs.validate.outputs.checkout_ref }}
           fetch-depth: 0
 
       - uses: actions/download-artifact@v4
@@ -168,9 +168,9 @@ jobs:
         id: changelog
         run: |
           version="${{ needs.validate.outputs.version }}"
-          notes=$(awk -v ver="$version" '
-            $0 ~ "^## \\[" ver "\\]" { flag=1 }
-            flag && /^## \\[/ && $0 !~ "^## \\[" ver "\\]" { exit }
+          notes=$(awk -v header="## [$version]" '
+            index($0, header) == 1 { flag=1 }
+            flag && /^## / && index($0, header) != 1 { exit }
             flag { print }
           ' CHANGELOG.md)
           if [ -z "$(echo "$notes" | tr -d '[:space:]')" ]; then
