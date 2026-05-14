@@ -12,6 +12,13 @@ description = "linpodx CLI — talk to the linpodx daemon"
 name = "linpodx"
 path = "src/main.rs"
 
+[package.metadata.generate-rpm]
+assets = [
+    { source = "target/release/linpodx", dest = "/usr/bin/linpodx", mode = "755" },
+    { source = "README.md", dest = "/usr/share/doc/linpodx-cli/README.md", mode = "644", doc = true },
+    { source = "LICENSE", dest = "/usr/share/doc/linpodx-cli/LICENSE", mode = "644", doc = true },
+]
+
 [dependencies]
 linpodx-common = { workspace = true }
 # Phase 11: `sandbox profile compile` runs SecProfileCompiler locally.

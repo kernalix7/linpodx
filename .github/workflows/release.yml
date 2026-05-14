@@ -112,16 +112,16 @@ jobs:
         run: cargo build --workspace --release --bins
 
       - name: cargo deb (linpodx-cli)
-        run: cargo deb -p linpodx-cli --no-build --output target/debian/linpodx-cli.deb || true
+        run: cargo deb -p linpodx-cli --no-build --output target/debian/linpodx-cli.deb
 
       - name: cargo deb (linpodx-daemon)
-        run: cargo deb -p linpodx-daemon --no-build --output target/debian/linpodx-daemon.deb || true
+        run: cargo deb -p linpodx-daemon --no-build --output target/debian/linpodx-daemon.deb
 
       - name: cargo generate-rpm (linpodx-cli)
-        run: cargo generate-rpm -p crates/linpodx-cli --output target/generate-rpm/linpodx-cli.rpm || true
+        run: cargo generate-rpm -p crates/linpodx-cli --output target/generate-rpm/linpodx-cli.rpm
 
       - name: cargo generate-rpm (linpodx-daemon)
-        run: cargo generate-rpm -p crates/linpodx-daemon --output target/generate-rpm/linpodx-daemon.rpm || true
+        run: cargo generate-rpm -p crates/linpodx-daemon --output target/generate-rpm/linpodx-daemon.rpm
 
       # AppImage scaffold — left as a placeholder for v0.2; linuxdeploy chain is heavy
       # enough that we ship the raw release binaries today and expand to AppImage once
@@ -198,5 +198,6 @@ jobs:
           name: ${{ needs.validate.outputs.version_tag }}
           prerelease: ${{ steps.prerelease.outputs.value }}
           body: ${{ steps.changelog.outputs.notes }}
+          overwrite_files: true
           files: |
             artifacts/*
