@@ -4033,7 +4033,7 @@ checksum = "bfae20f6b19ad527b550c223fddc3077a547fc70cda94b9b566575423fd303ee"
 
 [[package]]
 name = "linpodx-bench-tools"
-version = "0.1.0"
+version = "0.1.1"
 dependencies = [
  "aes-gcm",
  "argon2",
@@ -4044,7 +4044,7 @@ dependencies = [
 
 [[package]]
 name = "linpodx-cli"
-version = "0.1.0"
+version = "0.1.1"
 dependencies = [
  "anyhow",
  "chrono",
@@ -4071,7 +4071,7 @@ dependencies = [
 
 [[package]]
 name = "linpodx-cluster"
-version = "0.1.0"
+version = "0.1.1"
 dependencies = [
  "anyhow",
  "async-trait",
@@ -4094,7 +4094,7 @@ dependencies = [
 
 [[package]]
 name = "linpodx-common"
-version = "0.1.0"
+version = "0.1.1"
 dependencies = [
  "chrono",
  "serde",
@@ -4108,7 +4108,7 @@ dependencies = [
 
 [[package]]
 name = "linpodx-daemon"
-version = "0.1.0"
+version = "0.1.1"
 dependencies = [
  "anyhow",
  "assert_cmd",
@@ -4147,7 +4147,7 @@ dependencies = [
 
 [[package]]
 name = "linpodx-distro"
-version = "0.1.0"
+version = "0.1.1"
 dependencies = [
  "chrono",
  "linpodx-common",
@@ -4165,7 +4165,7 @@ dependencies = [
 
 [[package]]
 name = "linpodx-gui"
-version = "0.1.0"
+version = "0.1.1"
 dependencies = [
  "anyhow",
  "chrono",
@@ -4180,7 +4180,7 @@ dependencies = [
 
 [[package]]
 name = "linpodx-mcp"
-version = "0.1.0"
+version = "0.1.1"
 dependencies = [
  "anyhow",
  "chrono",
@@ -4196,7 +4196,7 @@ dependencies = [
 
 [[package]]
 name = "linpodx-netfilter"
-version = "0.1.0"
+version = "0.1.1"
 dependencies = [
  "anyhow",
  "clap",
@@ -4213,7 +4213,7 @@ dependencies = [
 
 [[package]]
 name = "linpodx-phase17-integration"
-version = "0.1.0"
+version = "0.1.1"
 dependencies = [
  "argon2",
  "chrono",
@@ -4228,7 +4228,7 @@ dependencies = [
 
 [[package]]
 name = "linpodx-plugin"
-version = "0.1.0"
+version = "0.1.1"
 dependencies = [
  "anyhow",
  "base64",
@@ -4250,7 +4250,7 @@ dependencies = [
 
 [[package]]
 name = "linpodx-runtime"
-version = "0.1.0"
+version = "0.1.1"
 dependencies = [
  "aes-gcm",
  "argon2",
@@ -4282,7 +4282,7 @@ dependencies = [
 
 [[package]]
 name = "linpodx-sandbox"
-version = "0.1.0"
+version = "0.1.1"
 dependencies = [
  "base64",
  "chrono",
@@ -4306,7 +4306,7 @@ dependencies = [
 
 [[package]]
 name = "linpodx-webui"
-version = "0.1.0"
+version = "0.1.1"
 dependencies = [
  "console_error_panic_hook",
  "futures",

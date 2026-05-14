@@ -3,7 +3,7 @@ resolver = "2"
 members = ["crates/*", "bench-tools", "tests"]
 
 [workspace.package]
-version = "0.1.0"
+version = "0.1.1"
 edition = "2021"
 rust-version = "1.85"
 license = "MIT"
@@ -13,15 +13,15 @@ authors = ["Kim DaeHyun <kernalix7@kodenet.io>"]
 
 [workspace.dependencies]
 # Internal crates
-linpodx-common = { path = "crates/linpodx-common", version = "0.1.0" }
-linpodx-runtime = { path = "crates/linpodx-runtime", version = "0.1.0" }
-linpodx-sandbox = { path = "crates/linpodx-sandbox", version = "0.1.0" }
-linpodx-mcp = { path = "crates/linpodx-mcp", version = "0.1.0" }
-linpodx-distro = { path = "crates/linpodx-distro", version = "0.1.0" }
-linpodx-netfilter = { path = "crates/linpodx-netfilter", version = "0.1.0" }
-linpodx-plugin = { path = "crates/linpodx-plugin", version = "0.1.0" }
-linpodx-cluster = { path = "crates/linpodx-cluster", version = "0.1.0" }
-linpodx-webui = { path = "crates/linpodx-webui", version = "0.1.0" }
+linpodx-common = { path = "crates/linpodx-common", version = "0.1.1" }
+linpodx-runtime = { path = "crates/linpodx-runtime", version = "0.1.1" }
+linpodx-sandbox = { path = "crates/linpodx-sandbox", version = "0.1.1" }
+linpodx-mcp = { path = "crates/linpodx-mcp", version = "0.1.1" }
+linpodx-distro = { path = "crates/linpodx-distro", version = "0.1.1" }
+linpodx-netfilter = { path = "crates/linpodx-netfilter", version = "0.1.1" }
+linpodx-plugin = { path = "crates/linpodx-plugin", version = "0.1.1" }
+linpodx-cluster = { path = "crates/linpodx-cluster", version = "0.1.1" }
+linpodx-webui = { path = "crates/linpodx-webui", version = "0.1.1" }
 
 # Phase 2E: DNS-based egress allowlist filter
 # Bumped 0.24→0.25 to address RUSTSEC-2026-0119 (O(n^2) name compression CPU exhaustion).

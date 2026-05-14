@@ -26,6 +26,50 @@ workflow extracts the whole section for the GitHub Release body.
 ### Fixed
 -->
 
+## [0.1.1] - 2026-05-14
+
+### Highlights
+
+**Security-fix patch.** Closes 14 advisories against `wasmtime` (incl. CRITICAL
+sandbox-escape RUSTSEC-2026-0095 / -0096), the `hickory-proto` baseline DoS
+RUSTSEC-2026-0119, `time` stack-exhaustion RUSTSEC-2026-0009, and the `serde_yml`
+unsoundness RUSTSEC-2025-0068 / -0067. No public API changes.
+
+- `wasmtime 26.0.1 → 43.0.2` — drop the WebAssembly plugin sandbox onto a CVE-free
+  release line. The 24 LTS branch lacks backports for 6 Winch / pooling-allocator
+  advisories; 43.x is API-compatible with linpodx-plugin and required zero source
+  changes downstream.
+- `hickory-{resolver,server,proto} 0.24 → 0.25` — closes the message-encoding CPU
+  exhaustion in the egress DNS filter. Adapted `linpodx-netfilter::resolver` and
+  `linpodx-runtime::network_filter` for the new `TokioResolver` builder API.
+- `serde_yml → serde_norway` — `serde_yml` was archived upstream (RUSTSEC-2025-0068)
+  and pulled the unsound `libyml` (RUSTSEC-2025-0067). `serde_norway` is the
+  maintained drop-in fork of `serde_yaml`; touches workspace dep + 4 crate manifests
+  + 6 source files (cli/main.rs, sandbox/{profile,schema,snapshot_trigger}.rs,
+  cluster/k8s.rs).
+- `time 0.3.45 → 0.3.47` — transitive bump via `cargo update -p time` closes the
+  stack-exhaustion DoS in x509-parser / rcgen.
+
+### Changed
+
+- `.cargo/audit.toml` (new) mirrors `deny.toml [advisories].ignore` so
+  `rustsec/audit-check` exits 0 on CI. Nine well-rationalized waivers cover
+  hickory NSEC3 (we never validate DNSSEC), the hickory encoder DoS (loopback-only
+  forwarder), the rsa Marvin advisory (sqlx-mysql is in `Cargo.lock` only, not in
+  the compiled graph — workspace `sqlx` uses `default-features = false` with only
+  `runtime-tokio,sqlite,macros,migrate`), and the transitive unmaintained crates
+  (`backoff`, `instant`, `paste`, `rustls-pemfile`, `serial`, `lru` GUI-only).
+- `deny.toml` adds `BSL-1.0` and `CDLA-Permissive-2.0` to the license allow-list
+  (Boost-licensed `ryu` / `clipboard-win` / `error-code` / `xxhash-rust` and the
+  Mozilla CA-trust-store data crate `webpki-roots`), removes the now-unused
+  `Unicode-DFS-2016`, and pins `jsonpath-rust` to MIT via `[[licenses.clarify]]`
+  (LICENSE file ships MIT; upstream Cargo.toml omits the `license =` field).
+
+### Fixed
+
+- 14 `wasmtime` advisories closed in full via the 43.x bump, including the two
+  CRITICAL sandbox-escape paths that initially demoted v0.1.0 to prerelease.
+
 ## [0.1.0] - 2026-05-13
 
 ### Highlights
