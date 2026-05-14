@@ -355,7 +355,10 @@ spec:
     fn parse_pod_spec_yaml_invalid_returns_error() {
         let bogus = "not: a: pod\nthis: [is not yaml";
         let res: std::result::Result<Pod, _> = serde_norway::from_str(bogus);
-        assert!(res.is_err(), "expected serde_norway to reject malformed input");
+        assert!(
+            res.is_err(),
+            "expected serde_norway to reject malformed input"
+        );
     }
 
     /// Real-cluster smoke test: create a throwaway namespace, scale a fixture

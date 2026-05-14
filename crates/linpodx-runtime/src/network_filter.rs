@@ -315,8 +315,7 @@ pub async fn start_on_with_plugins(
                 bind_addr: None,
             });
             Some(
-                TokioResolver::builder_with_config(cfg, TokioConnectionProvider::default())
-                    .build(),
+                TokioResolver::builder_with_config(cfg, TokioConnectionProvider::default()).build(),
             )
         }
         None => match TokioResolver::builder_tokio() {
