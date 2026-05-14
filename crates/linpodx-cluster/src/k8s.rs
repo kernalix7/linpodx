@@ -97,7 +97,7 @@ impl K8sAdapter {
         namespace: &str,
         pod_spec_yaml: &str,
     ) -> Result<K8sPodCreateResponse> {
-        let pod: Pod = serde_yml::from_str(pod_spec_yaml)
+        let pod: Pod = serde_norway::from_str(pod_spec_yaml)
             .map_err(|e| ClusterError::Http(format!("invalid pod yaml: {e}")))?;
         let api: Api<Pod> = Api::namespaced(self.client.clone(), namespace);
         let created = api
@@ -328,7 +328,7 @@ mod tests {
 
     /// The pod-spec YAML path is the only piece of the write API we can exercise
     /// without a live cluster. Confirm that a typical `kubectl create -f` style
-    /// document round-trips through `serde_yml` into the strongly-typed Pod the
+    /// document round-trips through `serde_norway` into the strongly-typed Pod the
     /// adapter would hand to `Api::create`.
     #[test]
     fn parse_pod_spec_yaml_round_trip() {
@@ -343,7 +343,7 @@ spec:
       image: alpine:3.20
       command: ["sh", "-c", "echo hi"]
 "#;
-        let pod: Pod = serde_yml::from_str(yaml).expect("parse pod yaml");
+        let pod: Pod = serde_norway::from_str(yaml).expect("parse pod yaml");
         assert_eq!(pod.metadata.name.as_deref(), Some("hello"));
         let spec = pod.spec.expect("pod has spec");
         assert_eq!(spec.containers.len(), 1);
@@ -354,8 +354,8 @@ spec:
     #[test]
     fn parse_pod_spec_yaml_invalid_returns_error() {
         let bogus = "not: a: pod\nthis: [is not yaml";
-        let res: std::result::Result<Pod, _> = serde_yml::from_str(bogus);
-        assert!(res.is_err(), "expected serde_yml to reject malformed input");
+        let res: std::result::Result<Pod, _> = serde_norway::from_str(bogus);
+        assert!(res.is_err(), "expected serde_norway to reject malformed input");
     }
 
     /// Real-cluster smoke test: create a throwaway namespace, scale a fixture

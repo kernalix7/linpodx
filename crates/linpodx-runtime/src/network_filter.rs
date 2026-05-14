@@ -8,14 +8,16 @@
 //! `api.openai.com`, but does NOT match `evil-openai.com`.
 //!
 //! Allowed queries are forwarded to an upstream resolver (defaults to system resolv.conf
-//! via [`hickory_resolver::TokioAsyncResolver::tokio_from_system_conf`]).
+//! via [`hickory_resolver::TokioResolver::builder_tokio`]).
 //!
 //! Drop the [`FilterHandle`] to stop the server.
 
 use hickory_proto::op::{Header, MessageType, OpCode, ResponseCode};
-use hickory_proto::rr::{LowerName, Name, RData, Record};
-use hickory_resolver::config::{ResolverConfig, ResolverOpts};
-use hickory_resolver::TokioAsyncResolver;
+use hickory_proto::rr::{LowerName, Name, Record};
+use hickory_proto::xfer::Protocol;
+use hickory_resolver::config::{NameServerConfig, ResolverConfig};
+use hickory_resolver::name_server::TokioConnectionProvider;
+use hickory_resolver::TokioResolver;
 use hickory_server::authority::MessageResponseBuilder;
 use hickory_server::server::{
     Request, RequestHandler, ResponseHandler, ResponseInfo, ServerFuture,
@@ -66,7 +68,7 @@ pub fn is_allowed(host: &str, allowlist: &[String]) -> bool {
 /// Per-server state shared with the [`RequestHandler`].
 struct FilterHandler {
     allowlist: Vec<String>,
-    upstream: Option<TokioAsyncResolver>,
+    upstream: Option<TokioResolver>,
     /// Optional plugin chain. When present, every DNS query first runs through
     /// `evaluate_network_trace` — `Deny` overrides the allowlist (returns NXDOMAIN),
     /// `AuditOnly`/`Allow` fall through to the existing allowlist gate. Each call also
@@ -92,7 +94,16 @@ impl RequestHandler for FilterHandler {
             return send_empty(&mut response_handle, request, response_header).await;
         }
 
-        let query = request.query();
+        // hickory 0.25: Request no longer exposes `.query()` directly — pull via request_info.
+        let info = match request.request_info() {
+            Ok(i) => i,
+            Err(e) => {
+                warn!(error = %e, "DNS request_info failed (likely malformed query)");
+                response_header.set_response_code(ResponseCode::FormErr);
+                return send_empty(&mut response_handle, request, response_header).await;
+            }
+        };
+        let query = info.query;
         let host_name: LowerName = query.name().clone();
         let host_str = host_name.to_string();
 
@@ -143,10 +154,7 @@ impl RequestHandler for FilterHandler {
         let answers: Vec<Record> = match resolver.lookup(lookup_name, qtype).await {
             Ok(lookup) => lookup
                 .record_iter()
-                .filter_map(|r| {
-                    let rdata: RData = r.data()?.clone();
-                    Some(Record::from_rdata(r.name().clone(), r.ttl(), rdata))
-                })
+                .map(|r| Record::from_rdata(r.name().clone(), r.ttl(), r.data().clone()))
                 .collect(),
             Err(e) => {
                 warn!(host = %host_str, error = %e, "upstream resolver lookup failed");
@@ -298,17 +306,21 @@ pub async fn start_on_with_plugins(
     let resolver = match upstream {
         Some(addr) => {
             let mut cfg = ResolverConfig::new();
-            cfg.add_name_server(hickory_resolver::config::NameServerConfig {
+            cfg.add_name_server(NameServerConfig {
                 socket_addr: addr,
-                protocol: hickory_resolver::config::Protocol::Udp,
+                protocol: Protocol::Udp,
                 tls_dns_name: None,
+                http_endpoint: None,
                 trust_negative_responses: true,
                 bind_addr: None,
             });
-            Some(TokioAsyncResolver::tokio(cfg, ResolverOpts::default()))
+            Some(
+                TokioResolver::builder_with_config(cfg, TokioConnectionProvider::default())
+                    .build(),
+            )
         }
-        None => match TokioAsyncResolver::tokio_from_system_conf() {
-            Ok(r) => Some(r),
+        None => match TokioResolver::builder_tokio() {
+            Ok(b) => Some(b.build()),
             Err(e) => {
                 warn!(error = %e, "could not load system resolver; allowed queries will SERVFAIL");
                 None

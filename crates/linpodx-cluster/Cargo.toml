@@ -23,7 +23,8 @@ reqwest = { workspace = true }
 kube = { workspace = true }
 k8s-openapi = { workspace = true }
 # Phase 13 Stream A: K8s write-side parses inline pod-spec YAML.
-serde_yml = { workspace = true }
+# Migrated 2026-05-14: serde_yml → serde_norway (RUSTSEC-2025-0068 unsound).
+serde_norway = { workspace = true }
 
 # Phase 14 Stream C: Raft leader election (openraft 0.9 with serde for HTTP transport).
 openraft = { version = "0.9", features = ["serde"] }

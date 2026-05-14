@@ -762,7 +762,7 @@ pub struct DaemonPinClientRemoveParams {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct K8sPodCreateParams {
     pub namespace: String,
-    /// Inline pod spec YAML. The cluster adapter parses it via serde_yml into a
+    /// Inline pod spec YAML. The cluster adapter parses it via serde_norway into a
     /// `k8s_openapi::api::core::v1::Pod` and submits via `Api<Pod>::create`.
     pub pod_spec_yaml: String,
 }

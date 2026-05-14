@@ -26,7 +26,7 @@ linpodx-sandbox = { workspace = true }
 tokio = { workspace = true, features = ["io-std"] }
 serde = { workspace = true }
 serde_json = { workspace = true }
-serde_yml = { workspace = true }
+serde_norway = { workspace = true }
 anyhow = { workspace = true }
 clap = { workspace = true }
 comfy-table = { workspace = true }

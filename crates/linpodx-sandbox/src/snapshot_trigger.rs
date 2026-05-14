@@ -341,7 +341,7 @@ mod tests {
     #[tokio::test]
     async fn yaml_default_auto_encrypt_is_true_when_absent() {
         let yaml = "version: 1\nname: minimal";
-        let parsed: SandboxProfile = serde_yml::from_str(yaml).expect("parse");
+        let parsed: SandboxProfile = serde_norway::from_str(yaml).expect("parse");
         assert!(parsed.auto_encrypt_snapshots);
     }
 

@@ -1600,7 +1600,7 @@ async fn handle_sandbox_profile_compile(
             name: name.clone(),
         }))
         .await?;
-    let profile: linpodx_sandbox::SandboxProfile = serde_yml::from_str(&resp.yaml)
+    let profile: linpodx_sandbox::SandboxProfile = serde_norway::from_str(&resp.yaml)
         .map_err(|e| anyhow::anyhow!("parse profile YAML for '{}': {e}", resp.name))?;
 
     let cache_dir = match secprofile_out {
@@ -2580,23 +2580,23 @@ async fn handle_network_egress_set(
     let mapping = value
         .as_mapping_mut()
         .ok_or_else(|| anyhow!("profile YAML root must be a mapping"))?;
-    let mut net_map = serde_yml::Mapping::new();
+    let mut net_map = serde_norway::Mapping::new();
     net_map.insert(
-        serde_yml::Value::String("kind".into()),
-        serde_yml::Value::String("allowlist".into()),
+        serde_norway::Value::String("kind".into()),
+        serde_norway::Value::String("allowlist".into()),
     );
     net_map.insert(
-        serde_yml::Value::String("domains".into()),
-        serde_yml::Value::Sequence(
+        serde_norway::Value::String("domains".into()),
+        serde_norway::Value::Sequence(
             domains_clean
                 .iter()
-                .map(|d| serde_yml::Value::String(d.clone()))
+                .map(|d| serde_norway::Value::String(d.clone()))
                 .collect(),
         ),
     );
     mapping.insert(
-        serde_yml::Value::String("network".into()),
-        serde_yml::Value::Mapping(net_map),
+        serde_norway::Value::String("network".into()),
+        serde_norway::Value::Mapping(net_map),
     );
     persist_profile_and_reload(client, profile, cli_profiles_dir.as_deref(), &value).await?;
     println!(
@@ -2614,15 +2614,15 @@ async fn handle_network_egress_status(client: &mut Client, profile: &str) -> Res
     let value = fetch_profile_yaml(client, profile).await?;
     let net = value.get("network");
     match net {
-        Some(serde_yml::Value::Mapping(m)) => {
+        Some(serde_norway::Value::Mapping(m)) => {
             let kind = m
-                .get(serde_yml::Value::String("kind".into()))
+                .get(serde_norway::Value::String("kind".into()))
                 .and_then(|v| v.as_str())
                 .unwrap_or("none");
             println!("{profile}: network.kind = {kind}");
             if kind == "allowlist" {
-                if let Some(serde_yml::Value::Sequence(seq)) =
-                    m.get(serde_yml::Value::String("domains".into()))
+                if let Some(serde_norway::Value::Sequence(seq)) =
+                    m.get(serde_norway::Value::String("domains".into()))
                 {
                     println!("  domains ({}):", seq.len());
                     for d in seq {
@@ -2640,7 +2640,7 @@ async fn handle_network_egress_status(client: &mut Client, profile: &str) -> Res
     Ok(())
 }
 
-async fn fetch_profile_yaml(client: &mut Client, profile: &str) -> Result<serde_yml::Value> {
+async fn fetch_profile_yaml(client: &mut Client, profile: &str) -> Result<serde_norway::Value> {
     use linpodx_common::ipc::responses::SandboxProfileGetResponse;
     let resp: SandboxProfileGetResponse = client
         .call(Method::SandboxProfileGet(SandboxProfileNameParams {
@@ -2648,27 +2648,27 @@ async fn fetch_profile_yaml(client: &mut Client, profile: &str) -> Result<serde_
         }))
         .await
         .with_context(|| format!("fetching profile '{profile}'"))?;
-    let value: serde_yml::Value = serde_yml::from_str(&resp.yaml)
+    let value: serde_norway::Value = serde_norway::from_str(&resp.yaml)
         .with_context(|| format!("parsing profile '{profile}' as YAML"))?;
     Ok(value)
 }
 
-fn read_passthrough_field(value: &serde_yml::Value) -> PassthroughSpec {
+fn read_passthrough_field(value: &serde_norway::Value) -> PassthroughSpec {
     value
         .get("passthrough")
-        .and_then(|v| serde_yml::from_value::<PassthroughSpec>(v.clone()).ok())
+        .and_then(|v| serde_norway::from_value::<PassthroughSpec>(v.clone()).ok())
         .unwrap_or_default()
 }
 
-fn write_passthrough_field(value: &mut serde_yml::Value, spec: Option<&PassthroughSpec>) {
+fn write_passthrough_field(value: &mut serde_norway::Value, spec: Option<&PassthroughSpec>) {
     let mapping = match value.as_mapping_mut() {
         Some(m) => m,
         None => return,
     };
-    let key = serde_yml::Value::String("passthrough".into());
+    let key = serde_norway::Value::String("passthrough".into());
     match spec {
         Some(s) => {
-            if let Ok(v) = serde_yml::to_value(s) {
+            if let Ok(v) = serde_norway::to_value(s) {
                 mapping.insert(key, v);
             }
         }
@@ -2695,7 +2695,7 @@ async fn persist_profile_and_reload(
     client: &mut Client,
     profile: &str,
     profiles_dir_override: Option<&Path>,
-    value: &serde_yml::Value,
+    value: &serde_norway::Value,
 ) -> Result<()> {
     let dir = profiles_dir_override
         .map(PathBuf::from)
@@ -2703,7 +2703,7 @@ async fn persist_profile_and_reload(
     std::fs::create_dir_all(&dir)
         .with_context(|| format!("creating profiles dir {}", dir.display()))?;
 
-    let yaml = serde_yml::to_string(value).context("re-serializing profile YAML")?;
+    let yaml = serde_norway::to_string(value).context("re-serializing profile YAML")?;
     let target = pick_profile_path(&dir, profile);
     std::fs::write(&target, yaml).with_context(|| format!("writing {}", target.display()))?;
 

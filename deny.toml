@@ -7,7 +7,51 @@ all-features = true
 [advisories]
 version = 2
 yanked = "deny"
-ignore = []
+# Documented waivers — each entry MUST carry a rationale comment explaining why
+# the advisory does not apply to linpodx's deployment model. Re-evaluate at every
+# release: drop a waiver as soon as an upstream fix lands in our dep graph.
+ignore = [
+    # hickory-proto 0.25.2 — NSEC3 closest-encloser proof DoS on cross-zone responses.
+    # The DNSSEC validation path is the only attack surface; linpodx never enables
+    # the validating-resolver feature. The egress filter (linpodx-runtime::network_filter)
+    # only serves outbound queries from sandbox containers and never returns NSEC3
+    # records. Fixed upstream in 0.26.1 but that release rewrites NameServerConfig +
+    # removes ResolveError — migration deferred to a future minor.
+    "RUSTSEC-2026-0118",
+    # hickory-proto 0.25.2 — O(n^2) name compression CPU exhaustion during message
+    # ENCODING. Our DNS server only encodes responses to queries coming from sandbox
+    # containers (loopback / Podman network), not internet-facing traffic. A malicious
+    # container can already exhaust its own egress budget; the attacker would need
+    # local container compromise first, after which DoS on the resolver is the least
+    # interesting capability. Fix requires 0.26.1.
+    "RUSTSEC-2026-0119",
+    # rsa 0.9.10 — Marvin Attack timing sidechannel via sqlx-mysql. Workspace sqlx
+    # uses `default-features = false, features = ["runtime-tokio","sqlite","macros",
+    # "migrate"]` — sqlx-mysql is in Cargo.lock as a vestigial dep but NOT in any
+    # compiled artifact (`cargo tree -i rsa --target all` returns empty). Zero
+    # runtime exposure. Upstream has no fix.
+    "RUSTSEC-2023-0071",
+    # lru 0.12.5 — `IterMut` Stacked-Borrows violation in iced_glyphon's GUI font
+    # cache. GUI-only, never invoked in the security path (daemon, sandbox, runtime).
+    # Wait for iced to bump glyphon.
+    "RUSTSEC-2026-0002",
+    # backoff 0.4.0 — unmaintained, transitive via kube-runtime. Will resolve when
+    # kube bumps to ≥0.99 (drops backoff).
+    "RUSTSEC-2025-0012",
+    # instant 0.1.13 — unmaintained, transitive via parking_lot 0.11 + backoff. Same
+    # resolution path as RUSTSEC-2025-0012.
+    "RUSTSEC-2024-0384",
+    # paste 1.0.15 — unmaintained, transitive via wasmtime + leptos. Both upstreams
+    # are tracking replacement; not in linpodx's direct surface.
+    "RUSTSEC-2024-0436",
+    # rustls-pemfile 2.2.0 — folded into rustls-pki-types upstream. Migration is
+    # mechanical; deferred until kube + axum-server bump.
+    "RUSTSEC-2025-0134",
+    # serial 0.4.0 — unmaintained since 2017, transitive via portable-pty 0.8.1
+    # (interactive `linpodx exec -it`). portable-pty upstream is tracking serialport
+    # migration; only the PTY proxy path is affected.
+    "RUSTSEC-2017-0008",
+]
 
 [licenses]
 version = 2
@@ -19,7 +63,6 @@ allow = [
     "BSD-3-Clause",
     "BSL-1.0",
     "ISC",
-    "Unicode-DFS-2016",
     "Unicode-3.0",
     "Zlib",
     "CC0-1.0",
@@ -51,6 +94,16 @@ crate = "linpodx-cli"
 [[licenses.exceptions]]
 allow = ["MIT"]
 crate = "linpodx-gui"
+
+# jsonpath-rust 0.5.1 ships an MIT LICENSE file but never set `license =` in its
+# Cargo.toml. Pin the SPDX expression so cargo-deny does not emit a
+# `license-not-encountered` warning for it. Upstream PR pending.
+[[licenses.clarify]]
+crate = "jsonpath-rust"
+expression = "MIT"
+license-files = [
+    { path = "LICENSE", hash = 0x001c7e6e },
+]
 
 [bans]
 multiple-versions = "warn"

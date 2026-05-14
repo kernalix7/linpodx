@@ -212,7 +212,7 @@ read_only_rootfs: true
 
     #[test]
     fn yaml_roundtrip() {
-        let parsed: SandboxProfile = serde_yml::from_str(sample_yaml()).expect("parse");
+        let parsed: SandboxProfile = serde_norway::from_str(sample_yaml()).expect("parse");
         assert_eq!(parsed.version, 1);
         assert_eq!(parsed.name, "ai-agent");
         assert!(parsed.read_only_rootfs);
@@ -220,15 +220,15 @@ read_only_rootfs: true
         assert_eq!(parsed.capabilities.drop, vec!["ALL"]);
         assert_eq!(parsed.capabilities.add, vec!["NET_BIND_SERVICE"]);
         assert_eq!(parsed.mounts.len(), 2);
-        let serialized = serde_yml::to_string(&parsed).unwrap();
-        let reparsed: SandboxProfile = serde_yml::from_str(&serialized).unwrap();
+        let serialized = serde_norway::to_string(&parsed).unwrap();
+        let reparsed: SandboxProfile = serde_norway::from_str(&serialized).unwrap();
         assert_eq!(parsed, reparsed);
     }
 
     #[test]
     fn defaults_to_strictest_network_and_caps() {
         let yaml = "version: 1\nname: minimal";
-        let parsed: SandboxProfile = serde_yml::from_str(yaml).expect("parse minimal");
+        let parsed: SandboxProfile = serde_norway::from_str(yaml).expect("parse minimal");
         assert!(matches!(parsed.network, NetworkPolicy::None));
         assert_eq!(parsed.capabilities.drop, vec!["ALL"]);
         assert!(parsed.capabilities.add.is_empty());
@@ -244,7 +244,7 @@ network:
   kind: allowlist
   domains: [api.example.com, registry.example.com]
 "#;
-        let parsed: SandboxProfile = serde_yml::from_str(yaml).expect("parse");
+        let parsed: SandboxProfile = serde_norway::from_str(yaml).expect("parse");
         match parsed.network {
             NetworkPolicy::Allowlist { domains, l4_rules } => {
                 assert_eq!(domains.len(), 2);

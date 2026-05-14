@@ -1,0 +1,31 @@
+# cargo-audit configuration — waivers MUST mirror deny.toml [advisories].ignore.
+# Used by the GitHub Actions `rustsec/audit-check` workflow (.github/workflows/audit.yml)
+# and by anyone running `cargo audit` from the project root. Update both files
+# together when adding or removing a waiver.
+
+[advisories]
+ignore = [
+    # hickory-proto 0.25 NSEC3 DNSSEC DoS — linpodx never enables DNSSEC validation.
+    "RUSTSEC-2026-0118",
+    # hickory-proto 0.25 O(n^2) message-encoding CPU exhaustion — egress filter only
+    # serves queries from sandbox containers (loopback / Podman network).
+    "RUSTSEC-2026-0119",
+    # rsa 0.9 Marvin timing sidechannel — pulled by sqlx-mysql in Cargo.lock only;
+    # workspace sqlx disables all default features so sqlx-mysql is not compiled.
+    "RUSTSEC-2023-0071",
+    # lru 0.12 IterMut Stacked-Borrows violation — GUI font cache only, not in
+    # the security path.
+    "RUSTSEC-2026-0002",
+    # backoff unmaintained — transitive via kube-runtime; will drop at kube ≥0.99.
+    "RUSTSEC-2025-0012",
+    # instant unmaintained — transitive via parking_lot 0.11 + backoff.
+    "RUSTSEC-2024-0384",
+    # paste unmaintained — transitive via wasmtime + leptos.
+    "RUSTSEC-2024-0436",
+    # rustls-pemfile unmaintained — folded into rustls-pki-types; mechanical bump
+    # pending kube + axum-server.
+    "RUSTSEC-2025-0134",
+    # serial unmaintained since 2017 — transitive via portable-pty (interactive
+    # `linpodx exec -it` only).
+    "RUSTSEC-2017-0008",
+]

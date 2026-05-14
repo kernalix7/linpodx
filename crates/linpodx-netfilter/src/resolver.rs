@@ -7,14 +7,15 @@
 //!
 //! Literal and CIDR strings are returned verbatim so the nftables rule builder can
 //! pass them through to `nft` (which accepts both single addrs and CIDR ranges).
-//! FQDNs are resolved once via [`hickory_resolver::TokioAsyncResolver`] using the
-//! system `/etc/resolv.conf`. The L4 filter is intentionally a snapshot; long-lived
-//! DNS rotation is the upstream DNS-only filter's job (see
+//! FQDNs are resolved once via [`hickory_resolver::TokioResolver`] using the system
+//! `/etc/resolv.conf`. The L4 filter is intentionally a snapshot; long-lived DNS
+//! rotation is the upstream DNS-only filter's job (see
 //! `linpodx-runtime::network_filter`).
 
 use crate::{NetfilterError, Result};
-use hickory_resolver::config::{ResolverConfig, ResolverOpts};
-use hickory_resolver::TokioAsyncResolver;
+use hickory_resolver::config::ResolverConfig;
+use hickory_resolver::name_server::TokioConnectionProvider;
+use hickory_resolver::TokioResolver;
 use std::net::IpAddr;
 use std::str::FromStr;
 
@@ -101,14 +102,14 @@ pub async fn resolve_addr(addr: &str) -> Result<ResolvedAddr> {
     Ok(ResolvedAddr::Ips(ips))
 }
 
-fn system_resolver(
-) -> std::result::Result<TokioAsyncResolver, hickory_resolver::error::ResolveError> {
-    match TokioAsyncResolver::tokio_from_system_conf() {
-        Ok(r) => Ok(r),
-        Err(_) => Ok(TokioAsyncResolver::tokio(
+fn system_resolver() -> std::result::Result<TokioResolver, hickory_resolver::ResolveError> {
+    match TokioResolver::builder_tokio() {
+        Ok(builder) => Ok(builder.build()),
+        Err(_) => Ok(TokioResolver::builder_with_config(
             ResolverConfig::default(),
-            ResolverOpts::default(),
-        )),
+            TokioConnectionProvider::default(),
+        )
+        .build()),
     }
 }
 

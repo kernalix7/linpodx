@@ -24,12 +24,22 @@ linpodx-cluster = { path = "crates/linpodx-cluster", version = "0.1.0" }
 linpodx-webui = { path = "crates/linpodx-webui", version = "0.1.0" }
 
 # Phase 2E: DNS-based egress allowlist filter
-hickory-resolver = "0.24"
-hickory-server = "0.24"
-hickory-proto = "0.24"
+# Bumped 0.24→0.25 to address RUSTSEC-2026-0119 (O(n^2) name compression CPU exhaustion).
+# 0.25 has a residual advisory RUSTSEC-2026-0118 (NSEC3 closest-encloser proof loop on
+# cross-zone responses) which is waived in deny.toml — that path requires DNSSEC
+# validation which linpodx never enables (the egress filter is a forwarder, not a
+# validating resolver). 0.26 fixes 0118 but rewrites NameServerConfig and removes
+# ResolveError; deferring that migration to a future release.
+hickory-resolver = "0.25"
+hickory-server = "0.25"
+hickory-proto = "0.25"
 
 # Phase 6: WASM plugin runtime
-wasmtime = { version = "26", default-features = false, features = ["runtime", "cranelift"] }
+# Bumped 26→43.0.1 to address sandbox-escape CRITICALs RUSTSEC-2026-0095 / -0096
+# and 12 other wasmtime advisories. The 24 LTS branch was tried first but lacks
+# backports for 6 winch/pooling-allocator advisories; 43.0.1 is the lowest stable
+# line that closes every wasmtime CVE in the current dep graph.
+wasmtime = { version = "43.0.1", default-features = false, features = ["runtime", "cranelift"] }
 toml = "0.8"
 
 # Phase 7: Remote daemon (WebSocket transport)
@@ -93,7 +103,10 @@ comfy-table = "7"
 sqlx = { version = "0.8", default-features = false, features = ["runtime-tokio", "sqlite", "macros", "migrate"] }
 
 # Sandbox / config
-serde_yml = "0.0.12"
+# Migrated serde_yml -> serde_norway: serde_yml was archived upstream and is
+# RUSTSEC-2025-0068 (unsound) + pulls libyml RUSTSEC-2025-0067. serde_norway is
+# a maintained drop-in fork of serde_yaml with the same API surface.
+serde_norway = "0.9"
 sha2 = "0.10"
 
 # Phase 15 — plugin signature verification (ed25519)

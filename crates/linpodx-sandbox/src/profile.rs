@@ -21,7 +21,7 @@ pub async fn load_profile(path: &Path) -> Result<SandboxProfile> {
 
 /// Synchronous parse helper used by the loader and tests.
 pub fn parse_profile(content: &str, source: &Path) -> Result<SandboxProfile> {
-    let profile: SandboxProfile = serde_yml::from_str(content).map_err(|e| Error::Runtime {
+    let profile: SandboxProfile = serde_norway::from_str(content).map_err(|e| Error::Runtime {
         message: format!("invalid sandbox profile {}: {e}", source.display()),
     })?;
     validate(&profile, source)?;
