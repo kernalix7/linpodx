@@ -85,6 +85,13 @@ crate = "linpodx-cli"
 allow = ["MIT"]
 crate = "linpodx-gui"
 
+# option-ext 1.x — MPL-2.0, pulled via dirs -> dirs-sys (tauri tree). File-level
+# weak copyleft used unmodified as a dependency, so it imposes nothing on the
+# MIT app code (MPL-2.0 §3.3 permits Larger Works under other licenses).
+[[licenses.exceptions]]
+allow = ["MPL-2.0"]
+crate = "option-ext"
+
 # jsonpath-rust 0.5.1 ships an MIT LICENSE file but never set `license =` in its
 # Cargo.toml. Pin the SPDX expression so cargo-deny does not emit a
 # `license-not-encountered` warning for it. Upstream PR pending.
