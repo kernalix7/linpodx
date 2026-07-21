@@ -20,6 +20,14 @@ name = "phase17_integration"
 path = "phase17_integration.rs"
 harness = true
 
+# Phase 18 — first-run reliability end-to-end smoke tests. Stream E fills
+# `phase18_e2e_smoke.rs` with seven scenarios (installer + doctor + daemon
+# start/stop/status + CLI alias + docs presence + GUI graceful-launch).
+[[test]]
+name = "phase18_e2e_smoke"
+path = "phase18_e2e_smoke.rs"
+harness = true
+
 [dependencies]
 
 [dev-dependencies]
@@ -32,3 +40,6 @@ tempfile = { workspace = true }
 sha2 = { workspace = true }
 argon2 = { workspace = true }
 chrono = { workspace = true }
+# Phase 18 — Stream E uses `assert_cmd` to drive `linpodx` and `linpodx-daemon`
+# binaries as subprocesses inside the e2e smoke harness.
+assert_cmd = { workspace = true }

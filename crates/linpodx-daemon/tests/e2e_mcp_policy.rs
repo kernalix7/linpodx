@@ -1,7 +1,13 @@
 //! Phase 2E live integration test for the MCP policy CRUD CLI.
-//! `#[ignore]`-gated. Verifies that `linpodx mcp policy set` upserts a rule that
-//! `mcp policy list` can then echo back. Treats `not yet implemented` from the
-//! mcp-team placeholder as a soft skip.
+//! `#[ignore]`-gated. Verifies that `linpodx mcp policy set` upserts a rule
+//! that `mcp policy list` can then echo back.
+//!
+//! Phase 18 Stream E note: the legacy `skipped_for_placeholder` helper is kept
+//! as a fallback (still fires on older daemon builds where the placeholder
+//! Error::Runtime path is reached), but the test now carries an explicit
+//! `#[ignore = "<reason>"]` attribute so the silent-skip case is documented in
+//! `cargo test --workspace -- --list --ignored` output instead of being
+//! invisible.
 
 use assert_cmd::Command as AssertCommand;
 use std::path::Path;
@@ -79,7 +85,7 @@ fn skipped_for_placeholder(stderr: &str) -> bool {
 }
 
 #[test]
-#[ignore]
+#[ignore = "Phase 2E — requires mcp-team `mcp policy set/list` IPC + Podman ≥ 4.6.0; soft-skips when placeholder Error::Runtime is returned"]
 fn mcp_policy_set_then_list_roundtrip() {
     let workdir = tempfile::tempdir().expect("workdir");
     let (_guard, socket) = spawn_daemon(&workdir);
