@@ -12,7 +12,7 @@ linpodx에 기여해 주셔서 감사합니다.
 - Podman ≥ 4.6.0 (rootless 권장)
 - Rust stable 툴체인 (≥ 1.85). 저장소 루트의 `rust-toolchain.toml` 가 자동으로 stable 을 핀합니다.
 - `rustfmt`, `clippy` 컴포넌트 — `rust-toolchain.toml` 가 자동으로 요청
-- GUI 개발 (Phase 1+) 시: 별도 시스템 의존성 없음 — iced 는 순수 Rust 렌더링이라 Wayland/X11 세션만 있으면 됨
+- GUI 개발 시: `linpodx-gui` 는 시스템 WebKitGTK 4.1 + GTK 3 을 동적 링크하는 Tauri 2 셸입니다 — 빌드 의존성은 Debian/Ubuntu `libwebkit2gtk-4.1-dev libgtk-3-dev librsvg2-dev`, Fedora `webkit2gtk4.1-devel`, openSUSE Tumbleweed `webkitgtk3-devel`
 
 ### 빌드
 

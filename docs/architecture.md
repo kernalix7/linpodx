@@ -35,7 +35,8 @@ flowchart TB
     end
 
     cli -- JSON-RPC over Unix socket --> daemon
-    gui -- JSON-RPC over Unix socket --> daemon
+    gui -- JSON-RPC over Unix socket, WebUiEnsure bootstrap --> daemon
+    gui -- embedded webview over HTTP + one-shot token --> daemon
     webui -- WebSocket / mTLS --> daemon
 
     daemon --> common
@@ -68,8 +69,8 @@ flowchart TB
 | `linpodx-common` | IPC schema (JSON-RPC params + responses), error taxonomy, newtype IDs (`ContainerId`, `ImageId`, …), `AuditSink` / `EventPublisher` / `ApprovalGateway` / `PluginRevocationSink` traits, `MetricsSample`, passthrough spec. |
 | `linpodx-daemon` | Long-running server. Owns the Unix socket, JSON-RPC dispatcher, SQLite migrations, the broadcast event bus, the approval registry, the WebSocket remote transport (token / mTLS / cert-pinning / TOFU), and the embedded Web UI. |
 | `linpodx-cli` | `linpodx` binary. Dumb client over the Unix socket or the WebSocket remote; rendering only. |
-| `linpodx-gui` | iced 0.13 desktop app. Read-mostly dashboard subscribed to the event stream; 11 tabs including PinnedClients and Plugins. |
-| `linpodx-webui` | Leptos SPA served by the daemon over the WebSocket transport. Optional `LINPODX_VENDOR_XTERM=1` air-gapped xterm.js bundle. |
+| `linpodx-gui` | Tauri 2 desktop shell. No native UI of its own: it auto-spawns/connects to the daemon over the Unix socket, calls `WebUiEnsure` for a loopback URL + one-shot token, and points its webview at the daemon-served web UI. |
+| `linpodx-webui` | Leptos SPA served by the daemon — over the local loopback listener (`WebUiEnsure`, used by `linpodx-gui`) or the remote WebSocket/mTLS transport. Optional `LINPODX_VENDOR_XTERM=1` air-gapped xterm.js bundle. |
 | `linpodx-runtime` | Podman wrapper. Container/image/volume/network CRUD, port mapping, snapshot backends (`PodmanCommitBackend`, `OverlayfsBackend`, `BtrfsBackend`), AES-256-GCM snapshot encryption with Argon2id / SHA-256 KDF and key rotation, OCI tar diff, cgroup-v2 metrics collector, egress enforcer hook. |
 | `linpodx-sandbox` | YAML profile parsing, capability / seccomp / AppArmor / SELinux policy engine, tamper-evident audit log (SHA-256 hash chain), auto-encrypt snapshot trigger. |
 | `linpodx-mcp` | Host-stdio ↔ container MCP bridge with audit hooks and per-method `PolicyEngine`. |

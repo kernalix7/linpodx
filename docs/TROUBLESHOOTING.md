@@ -86,24 +86,36 @@ DNS-only filtering is applied. `network egress apply` reports
 
 ## Desktop GUI
 
-### `linpodx-gui` panics on startup with `wgpu` / `wayland` / `EGL` in the message
+### `linpodx-gui` exits immediately with a `libwebkit2gtk` / `libgtk-3` / `librsvg2` error
 
-The iced renderer is failing to find a runtime library. Install the basics:
+`linpodx-gui` is a Tauri 2 shell whose webview links dynamically against the
+system WebKitGTK 4.1 + GTK 3 stack; the OS couldn't find the runtime library.
+Install it:
 
 | Distro family | Install command |
 |---------------|-----------------|
-| Debian / Ubuntu | `sudo apt install libwayland-client0 libxkbcommon0 libegl1 libgl1 libxcb1` |
-| Fedora / RHEL | `sudo dnf install libwayland-client libxkbcommon mesa-libEGL mesa-libGL libxcb` |
-| openSUSE | `sudo zypper install libwayland-client0 libxkbcommon0 libEGL1 libGL1 libxcb1` |
-| Arch | `sudo pacman -S wayland libxkbcommon mesa libxcb` |
+| Debian / Ubuntu | `sudo apt install libwebkit2gtk-4.1-0 libgtk-3-0 librsvg2-2` |
+| Fedora | `sudo dnf install webkit2gtk4.1 gtk3 librsvg2` |
+| openSUSE Tumbleweed | `sudo zypper install webkitgtk3-devel gtk3 librsvg2` (the `-devel` package pulls in the runtime library) |
 
-A graceful-error path that explains the missing library is planned (Phase 18).
+Other distros: install your package manager's WebKitGTK 4.1, GTK 3, and
+librsvg2 runtime packages.
 
-### GUI dashboard stays empty
+### GUI splash screen shows a connection error
 
-Confirm the daemon is the one the GUI connected to. If the daemon is running on
-a non-default socket, start the GUI with the same `--socket` argument
-(`linpodx-gui --socket /tmp/linpodx-$UID.sock`).
+`linpodx-gui` shows a small splash page while it auto-spawns `linpodx-daemon`
+(if it isn't already running) and requests a one-shot web-UI token from it. If
+the splash's error banner persists:
+
+- Confirm the daemon can start on its own in the foreground (`linpodx-daemon`)
+  and check its logs for the failure.
+- `linpodx-gui` resolves the socket the same way `linpodx-daemon` does:
+  `LINPODX_SOCKET` env var, else `$XDG_RUNTIME_DIR/linpodx.sock`, else
+  `/tmp/linpodx-$UID.sock`. If a daemon is already running on a different
+  socket, export `LINPODX_SOCKET` before launching `linpodx-gui`, or stop the
+  other instance first.
+- Use the splash's **Retry** button once the underlying issue is fixed; it
+  re-runs the connect flow without restarting the app.
 
 ## Snapshots & encryption
 

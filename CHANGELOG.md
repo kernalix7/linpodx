@@ -33,6 +33,45 @@ workflow extracts the whole section for the GitHub Release body.
 > are preserved below as historical milestones; everything in them first ships
 > as part of the next tagged release.
 
+## [0.2.0] - 2026-07-21
+
+### Highlights
+
+**New desktop app, new look, hardened core.** The desktop GUI is now a Tauri 2 shell over the daemon-served leptos web UI — one UI codebase for browser and desktop, MIT/Apache-licensed end to end (system WebKitGTK is dynamically linked, so the Qt LGPLv3 obligations are gone). The web UI itself got a ground-up dark-first design system. Under the hood, a security wave closed seven audit findings across the sandbox, MCP bridge, plugin runtime, and cluster, and the two largest source files in the project (daemon dispatch, CLI main) were broken into domain modules. This release also folds in the previously untagged 0.1.2–0.1.4 milestones below.
+
+### Security
+
+- **Audit log hash chain v2** — the tamper-evident chain now authenticates every row field (kind, timestamp, profile, container id, payload), not just the payload; existing v1 rows keep verifying (migration 0018).
+- **Sandbox profile names are sanitized** before being used in seccomp/AppArmor cache paths, closing a path-traversal → arbitrary-file-write vector.
+- **Compiled seccomp/AppArmor caches are content-addressed** — tightening a profile can no longer silently re-serve the older, looser artifact.
+- **`read_only` mount rules are enforced** — a profile pinning a mount RO now downgrades RW requests (audited as `(ro-enforced)`).
+- **MCP bridge fails closed** — unparseable frames are denied whenever a policy is configured (closing a parser-differential bypass of `Deny` rules), and profiles with any `Deny` rule default unmatched messages to deny.
+- **WASM plugins are resource-bounded** — fuel metering plus a 64 MiB memory cap on every hook; a runaway plugin traps instead of hanging the daemon. `runtime_injector` output is validated: confinement-weakening injections (`seccomp=unconfined`, `--privileged`, …) are rejected and audited.
+- **Raft RPC is authenticated** — `/cluster/raft/*` now requires the shared remote bearer token (constant-time compare, audited failures).
+
+### Added
+
+- `linpodx-gui`: Tauri 2 desktop shell — connects to the daemon socket, auto-spawns the daemon when absent, and opens the web UI with a one-shot token handoff. Splash screen with retry on failure.
+- Daemon `WebUiEnsure` IPC: on-demand loopback web-UI listener (ephemeral port, per-daemon-lifetime token), independent of `--remote-listen`.
+- Typed IPC error taxonomy: `PERMISSION_DENIED`, `CONFLICT`, `TIMEOUT`, `UNSUPPORTED`, `UNAVAILABLE`, `INTERNAL` codes join the original four (wire-compatible); CLI prints `daemon error [NAME] (code n): …`.
+- Cluster: gossip health loop actually runs (peers transition alive → stale → dead), and `ClusterJoin`/`Leave` register/remove Raft learners.
+- Distro instances stay alive: non-systemd templates get a keep-alive command instead of exiting immediately after create.
+
+### Changed
+
+- **BREAKING (GUI)**: the never-shipped cxx-qt/Qt 6 shell is replaced by Tauri 2 + system WebKitGTK; deb/rpm packages now require `webkit2gtk-4.1` runtime instead of Qt 6. `THIRD-PARTY-LICENSES.md` covers the new stack.
+- Web UI design system v4: dark-first OKLCH tokens, collapsible-sidebar app shell, professional data tables (sticky headers, status chips, skeletons, empty states), 18 inline SVG icons, theme bootstrap honoring `localStorage`/`?theme=`.
+- `linpodx-daemon` dispatch (3,103 lines) split into 16 domain modules behind a thin router; `Dispatcher::new` (12 args) replaced by `DispatcherBuilder`. `linpodx-cli` main.rs (4,688 lines) split into 18 `commands/` modules. Zero behavior change; breaking only for code embedding these crates directly.
+- CI: the GUI crate builds on hosted runners (webkit deps installed), the MSRV lane matches the workspace `rust-version` (1.92), and release daemon artifacts embed the real leptos SPA (`LINPODX_WASM=1`).
+- `cargo-deny`: scoped MPL-2.0 exceptions for `option-ext` and the Servo CSS crates the tauri stack pulls in (unmodified weak-copyleft; no effect on MIT code).
+
+### Fixed
+
+- CLI test binary no longer hangs on some hosts — a test signaled PID 0, which POSIX `kill(1)` delivers to the caller's own process group.
+- Desktop shell ↔ SPA token handoff: the shell navigated to `/ui/` (404; the router serves `/ui`) and the SPA never ingested `?token=` — both ends fixed, so the desktop app signs in seamlessly.
+- Netfilter helper logs a warning when an egress rule is dropped due to failed address resolution (was a silent skip).
+- Distro `enter` no longer carries a dead UID heuristic that read the daemon's environment.
+
 ## [0.1.4] - 2026-05-15
 
 ### Highlights

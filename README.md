@@ -40,7 +40,7 @@ curl -fsSL https://raw.githubusercontent.com/kernalix7/linpodx/main/uninstall.sh
 ---
 
 > ### Status: Pre-alpha
-> linpodx is preparing its first `v0.1.0` release. Phase 0..17 implementation is in-tree: local daemon, CLI, iced GUI, AI-agent sandbox, audit log, snapshots, host-stdio bridge, GUI passthrough, multi-distro templates, remote daemon, plugin hooks, cluster scaffolding, and snapshot encryption hardening. The current release gate is conservative: 829 unit tests pass, 54 host/runtime-dependent integration tests are ignored by default, and the project still expects sharp edges outside development workstations.
+> linpodx is preparing its first `v0.1.0` release. Phase 0..17 implementation is in-tree: local daemon, CLI, Tauri-based desktop GUI, AI-agent sandbox, audit log, snapshots, host-stdio bridge, GUI passthrough, multi-distro templates, remote daemon, plugin hooks, cluster scaffolding, and snapshot encryption hardening. The current release gate is conservative: 829 unit tests pass, 54 host/runtime-dependent integration tests are ignored by default, and the project still expects sharp edges outside development workstations.
 
 **No Docker Desktop VM.** linpodx talks to rootless Podman on Linux, keeps the daemon local by default, and exposes the same container state through CLI, GUI, and event subscriptions.
 
@@ -137,11 +137,12 @@ Environment variables mirror the flags: `LINPODX_SOURCE`, `LINPODX_REF`, `LINPOD
 - Podman 4.6.0 or newer, rootless preferred.
 - Rust 1.85+ for source builds. `rust-toolchain.toml` pins the workspace baseline.
 - `rustfmt` and `clippy` for development.
-- Runtime libraries for the iced GUI (most distros ship these by default — see
+- Build-time dependencies for the `linpodx-gui` desktop shell (Tauri 2 over the
+  system WebKitGTK 4.1 + GTK 3 stack — see
   [Troubleshooting](#troubleshooting) if `linpodx-gui` fails to start):
-  - `libwayland-client0` and `libxkbcommon0` on Wayland sessions
-  - `libx11-6` and `libxcb1` on X11 sessions
-  - `libegl1` and `libgl1` for wgpu rendering
+  - Debian/Ubuntu: `libwebkit2gtk-4.1-dev libgtk-3-dev librsvg2-dev`
+  - Fedora: `webkit2gtk4.1-devel`
+  - openSUSE Tumbleweed: `webkitgtk3-devel`
 - Optional: `nftables`, `util-linux` / `nsenter`, and `setcap` for the privileged L4 egress helper.
 
 The helper is intentionally opt-in because it needs `CAP_NET_ADMIN` and `CAP_SYS_ADMIN`:
@@ -164,6 +165,11 @@ linpodx-gui                    # Open the desktop dashboard
 
 The daemon binds `$XDG_RUNTIME_DIR/linpodx.sock` by default, falling back to `/tmp/linpodx-$UID.sock`.
 
+`linpodx-gui` is a thin Tauri 2 shell: it auto-starts `linpodx-daemon` if it isn't already
+running, then opens the same web UI the daemon serves locally on `127.0.0.1` with a
+one-shot token (see [Web UI](#web-ui)). The identical UI is reachable from any browser by
+starting the daemon with `--remote-listen` and opening `/ui?token=<token>`.
+
 ## Key features
 
 <table>
@@ -173,7 +179,7 @@ The daemon binds `$XDG_RUNTIME_DIR/linpodx.sock` by default, falling back to `/t
 - Container lifecycle: create, start, stop, restart, pause, remove
 - Image, volume, and network management through one CLI/API surface
 - Live event stream for daemon state changes
-- iced desktop GUI with containers, images, volumes, networks, audit, snapshots, sessions, plugins, and cluster views
+- Tauri 2 desktop shell displaying the daemon's web UI — containers, images, volumes, networks, audit, snapshots, sessions, plugins, and cluster views, also reachable from a browser
 - JSON/table output for shell-friendly workflows
 
 </td><td width="50%">
@@ -347,6 +353,8 @@ linpodx-daemon \
 
 Open `http://127.0.0.1:8443/ui/` and provide the bearer token. The Web UI shares the remote listener's security posture, so use mTLS for untrusted networks.
 
+This is the same UI `linpodx-gui` opens locally: the desktop shell calls the daemon's `WebUiEnsure` IPC method to bind an ephemeral loopback listener and mint a one-shot token, then points its webview at it — no separate GUI codebase to maintain.
+
 The Leptos/WASM UI is opt-in at build time:
 
 ```bash
@@ -449,14 +457,14 @@ Rootless Podman + Linux desktop integrations
 |-------|---------|
 | `linpodx-cli` | `linpodx` command-line client |
 | `linpodx-daemon` | Unix-socket API server, dispatcher, event bus, remote transport |
-| `linpodx-gui` | iced desktop dashboard |
+| `linpodx-gui` | Tauri 2 desktop shell for the daemon-served web UI |
 | `linpodx-runtime` | Podman wrapper, images, volumes, networks, snapshots, passthrough |
 | `linpodx-sandbox` | profiles, approvals, audit, sessions, snapshot triggers |
 | `linpodx-common` | shared IPC, state, errors, database migrations |
 | `linpodx-distro` | distro templates and VM-mode helpers |
 | `linpodx-plugin` | Wasmtime plugin loading, manifests, signing, registry |
 | `linpodx-cluster` | gossip, Raft, Kubernetes adapter |
-| `linpodx-webui` | browser UI bundle for the remote daemon |
+| `linpodx-webui` | browser UI bundle, served by the daemon both locally (`linpodx-gui`) and to the remote listener |
 
 ## Documentation
 
@@ -547,8 +555,9 @@ Common first-run snags:
 - **`daemon: connection refused`** — start the daemon (`linpodx-daemon &`).
 - **`podman: command not found` / version too old** — install Podman 4.6.0+
   for your distro.
-- **`linpodx-gui` panics with `wgpu` / `wayland` / `EGL`** — install the
-  runtime libraries listed under [Prerequisites](#prerequisites).
+- **`linpodx-gui` exits with a `libwebkit2gtk` / `libgtk-3` error** — install
+  the WebKitGTK 4.1 + GTK 3 runtime libraries listed under
+  [Prerequisites](#prerequisites).
 - **`snapshot decryption failed`** — match the same
   `LINPODX_SNAPSHOT_ENCRYPT_PASSPHRASE` / `LINPODX_SNAPSHOT_KEY` /
   `LINPODX_SNAPSHOT_KDF` the snapshot was created with.

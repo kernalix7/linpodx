@@ -15,7 +15,7 @@ curl -fsSL https://raw.githubusercontent.com/kernalix7/linpodx/main/install.sh |
 curl -fsSL https://raw.githubusercontent.com/kernalix7/linpodx/main/uninstall.sh | bash -s -- --confirm
 ```
 
-> **상태 (v0.1.0 pre-alpha, 2026-05-13):** Phase 0..17 구현이 저장소에 포함되어 있습니다. 컨테이너 / 이미지 / 볼륨 / 네트워크 CRUD, 데몬 이벤트 버스, iced GUI, YAML 샌드박스 정책, 승인 게이트, 스냅샷, 세션 타임라인, host-stdio 브리지, GUI 패스스루, 멀티 디스트로 템플릿, 원격 데몬, 플러그인, 클러스터 기반, 스냅샷 암호화까지 포함합니다. `cargo test --workspace` 기준 829 passed / 0 failed / 54 ignored 입니다.
+> **상태 (v0.1.0 pre-alpha, 2026-05-13):** Phase 0..17 구현이 저장소에 포함되어 있습니다. 컨테이너 / 이미지 / 볼륨 / 네트워크 CRUD, 데몬 이벤트 버스, Tauri 기반 데스크톱 GUI, YAML 샌드박스 정책, 승인 게이트, 스냅샷, 세션 타임라인, host-stdio 브리지, GUI 패스스루, 멀티 디스트로 템플릿, 원격 데몬, 플러그인, 클러스터 기반, 스냅샷 암호화까지 포함합니다. `cargo test --workspace` 기준 829 passed / 0 failed / 54 ignored 입니다.
 
 ---
 
@@ -202,7 +202,7 @@ Ubuntu, Fedora, Arch, Debian, Alpine, NixOS 등을 컨테이너로 띄워 풀 VM
 - 데몬 / API: Rust + `tokio` (멀티 스레드), JSON-RPC 2.0 over Unix socket (NDJSON)
 - 로컬 상태: SQLite (`sqlx` async, Public Domain)
 - CLI: 동일 워크스페이스의 단일 바이너리, `clap` derive
-- GUI: **iced** (순수 Rust, MIT 라이선스) — Phase 1 에서 도입
+- GUI: **Tauri 2** 데스크톱 셸(시스템 WebKitGTK 4.1 동적 링크) + 데몬이 서빙하는 **Leptos** 웹 UI — 브라우저와 데스크톱이 코드베이스를 공유, 전 구간 MIT/Apache 라이선스
 
 ---
 

@@ -14,6 +14,100 @@
 CHANGELOG.md 의 해당 버전 섹션을 그대로 사용합니다.
 -->
 
+> **0.1.2 – 0.1.4 에 대한 참고**: 영어판 [CHANGELOG.md](../CHANGELOG.md) 에는
+> `[0.1.2]` ~ `[0.1.4]` 섹션이 존재하지만, 이 세 섹션은 아직 병합되지 않은
+> 작업 트리 상태에서 작성된 것으로 **git 태그나 GitHub 릴리스가 존재하지
+> 않습니다**. 해당 섹션의 GUI 관련 내용(iced → egui → re_ui 폴리싱)은 데스크톱
+> 셸이 Tauri 로 재작성되며 정식 출시 전에 대체되었습니다. 이 문서는 태그된
+> 릴리스만 번역하므로 별도 섹션으로 옮기지 않으며, 그 안에 담겼던 변경 사항은
+> 아래 `[0.2.0]` 하이라이트에 통합되어 있습니다. 세부 내용이 필요하면 영어판을
+> 참고하십시오.
+
+## [0.2.0] - 2026-07-21
+
+### Highlights
+
+**새로운 데스크톱 앱, 새로운 모습, 강화된 코어.** 데스크톱 GUI 가 이제 데몬이
+서빙하는 leptos 웹 UI 위에 얹힌 Tauri 2 셸로 바뀌었습니다 — 브라우저와
+데스크톱이 하나의 UI 코드베이스를 공유하며, 전 구간 MIT/Apache 라이선스입니다
+(시스템 WebKitGTK 를 동적 링크하므로 Qt LGPLv3 의무 사항이 사라졌습니다). 웹
+UI 자체도 처음부터 다시 설계한 dark-first 디자인 시스템을 갖췄습니다.
+내부적으로는 샌드박스, MCP 브리지, 플러그인 런타임, 클러스터 전반에 걸친 감사
+결과 7건을 닫는 보안 보강이 있었고, 프로젝트에서 가장 큰 두 소스
+파일(데몬 dispatch, CLI main)이 도메인별 모듈로 분리되었습니다. 이번 릴리스는
+태그되지 않았던 0.1.2–0.1.4 마일스톤의 내용도 함께 포함합니다 (위 참고 참조).
+
+### 보안
+
+- **감사 로그 해시 체인 v2** — 변조 감지 체인이 이제 payload 뿐 아니라 모든
+  행 필드(kind, timestamp, profile, container id, payload)를 인증합니다;
+  기존 v1 행은 계속 검증됩니다 (마이그레이션 0018).
+- **샌드박스 프로필 이름 sanitize** — seccomp/AppArmor 캐시 경로에 사용되기
+  전에 sanitize 되어, 경로 순회(path-traversal) → 임의 파일 쓰기 취약점을
+  닫습니다.
+- **컴파일된 seccomp/AppArmor 캐시가 content-addressed 로 변경** — 프로필을
+  더 엄격하게 조정해도 더 오래되고 느슨한 아티팩트가 조용히 재사용되는 일이
+  없습니다.
+- **`read_only` 마운트 규칙이 강제됨** — 프로필이 마운트를 RO 로 고정하면
+  RW 요청이 다운그레이드됩니다 (`(ro-enforced)` 로 감사 기록).
+- **MCP 브리지 fail-closed** — 정책이 설정된 경우 파싱 불가능한 프레임은
+  거부됩니다 (`Deny` 규칙을 우회하는 파서 차이 악용을 차단), 그리고 `Deny`
+  규칙이 하나라도 있는 프로필은 매칭되지 않는 메시지를 기본적으로 거부합니다.
+- **WASM 플러그인 리소스 제한** — 모든 훅에 fuel metering 과 64 MiB 메모리
+  캡을 적용; 폭주하는 플러그인은 데몬을 멈추게 하는 대신 trap 됩니다.
+  `runtime_injector` 출력도 검증되어 (`seccomp=unconfined`, `--privileged`
+  등) 격리를 약화시키는 인젝션은 거부되고 감사 기록됩니다.
+- **Raft RPC 인증** — `/cluster/raft/*` 가 이제 공유 원격 bearer 토큰을
+  요구합니다 (상수 시간 비교, 실패 시 감사 기록).
+
+### 추가됨
+
+- `linpodx-gui`: Tauri 2 데스크톱 셸 — 데몬 소켓에 연결하고, 데몬이 없으면
+  자동으로 기동하며, 원샷 토큰 핸드오프로 웹 UI 를 엽니다. 실패 시 재시도
+  가능한 스플래시 화면.
+- 데몬 `WebUiEnsure` IPC: 온디맨드 로컬(loopback) 웹 UI 리스너 (임시 포트,
+  데몬 생명주기 동안 유효한 토큰), `--remote-listen` 과 독립적으로 동작.
+- 타입이 지정된 IPC 에러 taxonomy: `PERMISSION_DENIED`, `CONFLICT`,
+  `TIMEOUT`, `UNSUPPORTED`, `UNAVAILABLE`, `INTERNAL` 코드가 기존 4개에 합류
+  (wire 호환); CLI 는 `daemon error [NAME] (code n): …` 형식으로 출력.
+- 클러스터: gossip 헬스 루프가 실제로 동작 (peer 가 alive → stale → dead 로
+  전이), `ClusterJoin`/`Leave` 가 Raft learner 를 등록/제거.
+- 디스트로 인스턴스가 살아있음: non-systemd 템플릿이 create 직후 종료되는
+  대신 keep-alive 명령을 받습니다.
+
+### 변경됨
+
+- **BREAKING (GUI)**: 출시된 적 없는 cxx-qt/Qt 6 셸이 Tauri 2 + 시스템
+  WebKitGTK 로 교체되었습니다; deb/rpm 패키지는 이제 Qt 6 대신
+  `webkit2gtk-4.1` 런타임을 요구합니다. `THIRD-PARTY-LICENSES.md` 가 새
+  스택을 다룹니다.
+- 웹 UI 디자인 시스템 v4: dark-first OKLCH 토큰, 접이식 사이드바 앱 셸,
+  프로페셔널 데이터 테이블(고정 헤더, 상태 칩, 스켈레톤, 빈 상태), 인라인
+  SVG 아이콘 18개, `localStorage`/`?theme=` 를 존중하는 테마 부트스트랩.
+- `linpodx-daemon` dispatch (3,103줄)가 얇은 라우터 뒤의 16개 도메인
+  모듈로 분리; `Dispatcher::new` (인자 12개) 가 `DispatcherBuilder` 로
+  대체. `linpodx-cli` main.rs (4,688줄)가 18개 `commands/` 모듈로 분리.
+  동작 변화 없음; 이 크레이트를 직접 embed 하는 코드에만 breaking.
+- CI: GUI 크레이트가 호스팅 러너에서 빌드됨 (webkit 의존성 설치), MSRV
+  레인이 워크스페이스 `rust-version` (1.92) 과 일치, 릴리스 데몬 아티팩트가
+  실제 leptos SPA 를 임베드 (`LINPODX_WASM=1`).
+- `cargo-deny`: tauri 스택이 끌어오는 `option-ext` 와 Servo CSS 크레이트에
+  대해 범위가 지정된 MPL-2.0 예외 추가 (수정되지 않은 weak-copyleft; MIT
+  코드에 영향 없음).
+
+### 수정됨
+
+- CLI 테스트 바이너리가 일부 호스트에서 더 이상 멈추지 않음 — 테스트가
+  PID 0 에 시그널을 보냈는데, POSIX `kill(1)` 이 이를 호출자 자신의 프로세스
+  그룹에 전달했습니다.
+- 데스크톱 셸 ↔ SPA 토큰 핸드오프: 셸이 `/ui/` (404; 라우터는 `/ui` 를
+  서빙) 로 이동했고 SPA 가 `?token=` 을 받아들이지 않았습니다 — 양쪽 모두
+  수정되어 데스크톱 앱이 매끄럽게 로그인됩니다.
+- Netfilter 헬퍼가 주소 확인 실패로 egress 규칙이 드롭될 때 경고를
+  기록합니다 (이전에는 조용히 스킵).
+- 디스트로 `enter` 가 데몬의 환경 변수를 읽는 죽은 UID 휴리스틱을 더 이상
+  갖지 않습니다.
+
 ## [0.1.1] - 2026-05-14
 
 ### Highlights

@@ -78,7 +78,9 @@ Supported environment variables:
 - Podman 4.6.0 or newer, rootless preferred.
 - Rust 1.85+ for source builds.
 - `rustfmt` and `clippy` for development checks.
-- Optional GUI dependencies for iced/wgpu.
+- Optional GUI dependencies for the `linpodx-gui` desktop shell (Tauri 2 over
+  the system WebKitGTK 4.1 + GTK 3 stack; see
+  [Troubleshooting](TROUBLESHOOTING.md#desktop-gui)).
 - Optional `nftables`, `nsenter`, and `setcap` for the L4 egress helper.
 
 The installer can install common build dependencies on Debian/Ubuntu, Fedora,
