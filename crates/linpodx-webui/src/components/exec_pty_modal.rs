@@ -233,6 +233,7 @@ pub fn ExecPtyModal(open: RwSignal<Option<String>>) -> impl IntoView {
                         <label>
                             "Command (argv, space-separated)"
                             <input
+                                class="input"
                                 type="text"
                                 placeholder="/bin/sh"
                                 prop:value=move || command.get()
@@ -243,6 +244,7 @@ pub fn ExecPtyModal(open: RwSignal<Option<String>>) -> impl IntoView {
                         <label class="modal-inline">
                             "cols "
                             <input
+                                class="input"
                                 type="text"
                                 style="width: 5em"
                                 prop:value=move || cols_input.get()
@@ -251,6 +253,7 @@ pub fn ExecPtyModal(open: RwSignal<Option<String>>) -> impl IntoView {
                             />
                             " rows "
                             <input
+                                class="input"
                                 type="text"
                                 style="width: 5em"
                                 prop:value=move || rows_input.get()
@@ -267,7 +270,7 @@ pub fn ExecPtyModal(open: RwSignal<Option<String>>) -> impl IntoView {
                     <div class="modal-actions">
                         <button
                             type="button"
-                            class="primary"
+                            class="btn btn--primary"
                             prop:disabled=move || busy.get() || attached.get()
                             on:click=submit
                         >
@@ -275,12 +278,13 @@ pub fn ExecPtyModal(open: RwSignal<Option<String>>) -> impl IntoView {
                         </button>
                         <button
                             type="button"
+                            class="btn"
                             prop:disabled=move || !attached.get()
                             on:click=detach
                         >
                             "Detach"
                         </button>
-                        <button type="button" on:click=close>"Close"</button>
+                        <button type="button" class="btn" on:click=close>"Close"</button>
                     </div>
                 </div>
             </div>

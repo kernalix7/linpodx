@@ -88,6 +88,7 @@ pub fn ExecModal(open: RwSignal<Option<String>>) -> impl IntoView {
                         <label>
                             "Command (argv, space-separated)"
                             <textarea
+                                class="textarea"
                                 rows="3"
                                 placeholder="ls -la /etc"
                                 prop:value=move || command.get()
@@ -99,13 +100,13 @@ pub fn ExecModal(open: RwSignal<Option<String>>) -> impl IntoView {
                     <div class="modal-actions">
                         <button
                             type="button"
-                            class="primary"
+                            class="btn btn--primary"
                             prop:disabled=move || busy.get()
                             on:click=submit
                         >
                             {move || if busy.get() { "Running…" } else { "Run" }}
                         </button>
-                        <button type="button" on:click=close>"Close"</button>
+                        <button type="button" class="btn" on:click=close>"Close"</button>
                     </div>
                 </div>
             </div>

@@ -67,6 +67,7 @@ pub fn PushModal(open: RwSignal<Option<String>>) -> impl IntoView {
                         <label>
                             "Reference"
                             <input
+                                class="input"
                                 type="text"
                                 placeholder="docker.io/me/app:1.0"
                                 prop:value=move || reference.get()
@@ -76,6 +77,7 @@ pub fn PushModal(open: RwSignal<Option<String>>) -> impl IntoView {
                         <label>
                             "Registry override (optional)"
                             <input
+                                class="input"
                                 type="text"
                                 placeholder="registry.example.com"
                                 prop:value=move || registry.get()
@@ -85,6 +87,7 @@ pub fn PushModal(open: RwSignal<Option<String>>) -> impl IntoView {
                         <label>
                             "base64(user:password) auth (optional)"
                             <input
+                                class="input"
                                 type="password"
                                 prop:value=move || auth.get()
                                 on:input=move |ev| auth.set(event_target_value(&ev))
@@ -95,13 +98,13 @@ pub fn PushModal(open: RwSignal<Option<String>>) -> impl IntoView {
                     <div class="modal-actions">
                         <button
                             type="button"
-                            class="primary"
+                            class="btn btn--primary"
                             prop:disabled=move || busy.get()
                             on:click=submit
                         >
                             {move || if busy.get() { "Pushing…" } else { "Push" }}
                         </button>
-                        <button type="button" on:click=close>"Close"</button>
+                        <button type="button" class="btn" on:click=close>"Close"</button>
                     </div>
                 </div>
             </div>

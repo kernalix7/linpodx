@@ -2,6 +2,7 @@ use leptos::prelude::*;
 use serde_json::{json, Value};
 use wasm_bindgen_futures::spawn_local;
 
+use super::icons::Icon;
 use super::list_table::{row_actions, ListTable, PanelSpec};
 use crate::api_client::paths;
 use crate::helpers::snapshot_kdf_badge;
@@ -187,25 +188,28 @@ pub fn SnapshotTree() -> impl IntoView {
                         </p>
                         {rest_path.map(|p| view! { <p class="rest-hint">{p}</p> })}
                         {needs_pass.then(|| view! {
-                            <input
-                                type="password"
-                                class="modal-input"
-                                placeholder="new passphrase"
-                                prop:value=move || passphrase.get()
-                                on:input=move |ev| passphrase.set(event_target_value(&ev))
-                            />
+                            <div class="field-group">
+                                <label class="label">"New passphrase"</label>
+                                <input
+                                    type="password"
+                                    class="input modal-input"
+                                    placeholder="new passphrase"
+                                    prop:value=move || passphrase.get()
+                                    on:input=move |ev| passphrase.set(event_target_value(&ev))
+                                />
+                            </div>
                         })}
                         {st.map(|m| view! { <p class="status">{m}</p> })}
                         <div class="modal-actions">
                             <button
                                 type="button"
-                                class="primary"
+                                class="btn btn--primary"
                                 prop:disabled=move || busy.get()
                                 on:click=confirm
                             >
                                 {move || if busy.get() { "Working…" } else { "Confirm" }}
                             </button>
-                            <button type="button" on:click=cancel>"Cancel"</button>
+                            <button type="button" class="btn" on:click=cancel>"Cancel"</button>
                         </div>
                     </div>
                 </div>
@@ -215,8 +219,17 @@ pub fn SnapshotTree() -> impl IntoView {
 
     view! {
         <div class="snapshots-panel">
-            <div class="panel-toolbar phase17-toolbar">
-                <button type="button" class="primary" on:click=open_re_encrypt>"Re-encrypt all"</button>
+            <div class="page-header">
+                <div class="page-header__titles">
+                    <div class="page-title">"Snapshots"</div>
+                    <div class="page-subtitle">"branch, rollback, and manage encryption keys"</div>
+                </div>
+                <div class="page-actions">
+                    <button type="button" class="btn btn--primary" on:click=open_re_encrypt>
+                        <Icon name="snapshot"/>
+                        " Re-encrypt all"
+                    </button>
+                </div>
             </div>
             <ListTable spec=spec actions_for_row=actions/>
             {modal_view}

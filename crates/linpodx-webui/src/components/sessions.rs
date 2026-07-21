@@ -81,7 +81,7 @@ pub fn SessionTimeline() -> impl IntoView {
                 })
                 .collect();
             let joined = lines.join("\n");
-            view! { <pre class="modal-result">{joined}</pre> }.into_any()
+            view! { <pre class="modal-result modal-logs">{joined}</pre> }.into_any()
         }
     };
 
@@ -92,6 +92,12 @@ pub fn SessionTimeline() -> impl IntoView {
 
     view! {
         <div class="sessions-panel">
+            <div class="page-header">
+                <div class="page-header__titles">
+                    <div class="page-title">"Sessions"</div>
+                    <div class="page-subtitle">"per-container sandbox session timeline"</div>
+                </div>
+            </div>
             <ListTable spec=spec actions_for_row=actions/>
             <Show when=move || timeline_open.get().is_some() fallback=|| view! { <></> }>
                 <div class="modal-backdrop">
@@ -101,7 +107,7 @@ pub fn SessionTimeline() -> impl IntoView {
                             {body_view}
                         </div>
                         <div class="modal-actions">
-                            <button type="button" on:click=close>"Close"</button>
+                            <button type="button" class="btn" on:click=close>"Close"</button>
                         </div>
                     </div>
                 </div>

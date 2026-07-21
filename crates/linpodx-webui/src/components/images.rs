@@ -39,10 +39,10 @@ pub fn ImageList() -> impl IntoView {
 
     view! {
         <div class="images-panel">
-            <div class="panel-toolbar push-toolbar">
+            <div class="toolbar push-toolbar">
                 <button
                     type="button"
-                    class="primary"
+                    class="btn btn--primary"
                     on:click=move |_| push_open.set(Some(String::new()))
                 >
                     "Push image"

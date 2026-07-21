@@ -10,12 +10,20 @@
 <script src="https://cdn.jsdelivr.net/npm/@xterm/xterm@5/lib/xterm.js"></script>
 <script src="https://cdn.jsdelivr.net/npm/@xterm/addon-fit@0.10/lib/addon-fit.js"></script>
 <script>
-  // Phase 18 Stream H — honour `?theme=dark` / `?theme=light` query (operators
-  // testing dark mode) and fall back to OS preference via `prefers-color-scheme`.
+  // Honour `?theme=dark` / `?theme=light` query (operators testing a mode)
+  // first, then a previously-toggled choice persisted in localStorage, and
+  // otherwise fall back to the OS preference via `prefers-color-scheme` (the
+  // design system is dark-first). Applied before paint to avoid a theme flash.
   (function () {
     try {
       var p = new URLSearchParams(window.location.search);
       var t = p.get("theme");
+      if (t !== "dark" && t !== "light") {
+        var saved = window.localStorage.getItem("linpodx_theme");
+        if (saved === "dark" || saved === "light") {
+          t = saved;
+        }
+      }
       if (t === "dark" || t === "light") {
         document.documentElement.dataset.theme = t;
       }

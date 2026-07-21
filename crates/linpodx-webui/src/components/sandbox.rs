@@ -2,6 +2,7 @@ use leptos::prelude::*;
 use serde_json::{json, Value};
 use wasm_bindgen_futures::spawn_local;
 
+use super::icons::Icon;
 use super::list_table::{ListTable, PanelSpec};
 use crate::api_client::{build_auto_encrypt_body, paths};
 use crate::app::AuthToken;
@@ -17,6 +18,12 @@ pub fn SandboxList() -> impl IntoView {
     };
     view! {
         <div class="sandbox-panel">
+            <div class="page-header">
+                <div class="page-header__titles">
+                    <div class="page-title">"Sandbox profiles"</div>
+                    <div class="page-subtitle">"policy engine profiles + MCP allowlist"</div>
+                </div>
+            </div>
             <AutoEncryptCard/>
             <ListTable spec=spec/>
         </div>
@@ -81,27 +88,34 @@ fn AutoEncryptCard() -> impl IntoView {
     };
 
     view! {
-        <section class="auto-encrypt-card">
-            <h3>"Sandbox auto-encrypt snapshots"</h3>
+        <section class="auto-encrypt-card surface-card">
+            <div class="section-title">"Sandbox auto-encrypt snapshots"</div>
             <p class="rest-hint">{format!("REST: PUT {}", paths::SANDBOX_AUTO_ENCRYPT)}</p>
             {move || match status.get() {
                 None => view! { <p class="status-empty">"status not yet loaded"</p> }.into_any(),
                 Some(s) => view! {
-                    <ul class="status-list">
-                        <li>{format!("enabled: {}", s.enabled)}</li>
-                        <li>{format!("trigger_count: {}", s.trigger_count)}</li>
-                        <li>{
+                    <div class="detail-grid">
+                        <span class="detail-grid__key">"Enabled"</span>
+                        <span class="detail-grid__val">
+                            <span class=move || if s.enabled { "chip chip--running" } else { "chip chip--stopped" }>
+                                {if s.enabled { "enabled" } else { "disabled" }}
+                            </span>
+                        </span>
+                        <span class="detail-grid__key">"Trigger count"</span>
+                        <span class="detail-grid__val mono">{s.trigger_count.to_string()}</span>
+                        <span class="detail-grid__key">"Last image ref"</span>
+                        <span class="detail-grid__val mono">{
                             match &s.last_image_ref {
-                                Some(r) => format!("last_image_ref: {r}"),
-                                None => "last_image_ref: (none)".to_string(),
+                                Some(r) => r.clone(),
+                                None => "(none)".to_string(),
                             }
-                        }</li>
-                    </ul>
+                        }</span>
+                    </div>
                 }.into_any(),
             }}
             <button
                 type="button"
-                class="primary"
+                class="btn btn--primary"
                 prop:disabled=move || busy.get()
                 on:click=toggle
             >
@@ -114,7 +128,9 @@ fn AutoEncryptCard() -> impl IntoView {
                     if busy.get() { "Working…" } else { label }
                 }}
             </button>
-            {move || error.get().map(|e| view! { <p class="error-state">{e}</p> })}
+            {move || error.get().map(|e| view! {
+                <div class="error-state"><Icon name="sandbox"/><span>{e}</span></div>
+            })}
         </section>
     }
 }

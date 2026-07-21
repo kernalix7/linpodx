@@ -10,6 +10,7 @@ use leptos::prelude::*;
 use serde_json::{json, Value};
 use wasm_bindgen_futures::spawn_local;
 
+use super::icons::Icon;
 use crate::api_client::{build_revoke_cluster_body, paths};
 use crate::app::AuthToken;
 use crate::helpers::plugin_propagation_label;
@@ -177,13 +178,13 @@ pub fn PluginsView() -> impl IntoView {
                         <div class="modal-actions">
                             <button
                                 type="button"
-                                class="primary danger"
+                                class="btn btn--danger"
                                 prop:disabled=move || busy.get()
                                 on:click=confirm
                             >
                                 {move || if busy.get() { "Working…" } else { "Confirm" }}
                             </button>
-                            <button type="button" on:click=cancel>"Cancel"</button>
+                            <button type="button" class="btn" on:click=cancel>"Cancel"</button>
                         </div>
                     </div>
                 </div>
@@ -194,7 +195,13 @@ pub fn PluginsView() -> impl IntoView {
     let body_view = move || {
         let items = rows.get();
         if items.is_empty() {
-            return view! { <div class="empty-state">"no plugin keys registered"</div> }.into_any();
+            return view! {
+                <div class="empty-state">
+                    <span class="empty-state__icon"><Icon name="plugin"/></span>
+                    <span class="empty-state__title">"No plugin keys registered"</span>
+                </div>
+            }
+            .into_any();
         }
         let map = propagation.get();
         items
@@ -206,6 +213,7 @@ pub fn PluginsView() -> impl IntoView {
                     .map(Propagation::label)
                     .unwrap_or_else(|| "this node".to_string());
                 let active = k.status == "active";
+                let status_chip_class = if active { "chip chip--running" } else { "chip chip--stopped" };
                 let publisher = k.publisher.clone();
                 let fingerprint = k.fingerprint.clone();
                 let open = move |_| {
@@ -215,9 +223,9 @@ pub fn PluginsView() -> impl IntoView {
                 view! {
                     <div class="card">
                         <div class="field"><span class="field-label">"publisher"</span><span class="field-value">{k.publisher}</span></div>
-                        <div class="field"><span class="field-label">"fingerprint"</span><span class="field-value">{k.fingerprint}</span></div>
-                        <div class="field"><span class="field-label">"status"</span><span class="field-value">{k.status}</span></div>
-                        <div class="field"><span class="field-label">"propagation"</span><span class="field-value">{prop_label}</span></div>
+                        <div class="field"><span class="field-label">"fingerprint"</span><span class="field-value mono">{k.fingerprint}</span></div>
+                        <div class="field"><span class="field-label">"status"</span><span class="field-value"><span class=status_chip_class>{k.status}</span></span></div>
+                        <div class="field"><span class="field-label">"propagation"</span><span class="field-value"><span class="badge badge--info">{prop_label}</span></span></div>
                         {k.revoked_at.map(|ts| view! {
                             <div class="field"><span class="field-label">"revoked_at"</span><span class="field-value">{ts}</span></div>
                         })}
@@ -226,7 +234,7 @@ pub fn PluginsView() -> impl IntoView {
                         })}
                         <div class="card-actions">
                             {active.then(|| view! {
-                                <button type="button" class="row-action danger" on:click=open>"Revoke cluster-wide"</button>
+                                <button type="button" class="btn btn--danger btn--sm" on:click=open>"Revoke cluster-wide"</button>
                             })}
                         </div>
                     </div>
@@ -237,13 +245,20 @@ pub fn PluginsView() -> impl IntoView {
     };
 
     view! {
-        <section class="plugins-panel">
-            <h3>"Plugin keys"</h3>
-            {move || error.get().map(|e| view! { <p class="error-state">{e}</p> })}
+        <div class="plugins-panel">
+            <div class="page-header">
+                <div class="page-header__titles">
+                    <div class="page-title">"Plugin keys"</div>
+                    <div class="page-subtitle">"key registry + cluster-wide revocation"</div>
+                </div>
+            </div>
+            {move || error.get().map(|e| view! {
+                <div class="error-state"><Icon name="plugin"/><span>{e}</span></div>
+            })}
             <div class="card-stack">
                 {body_view}
             </div>
             {modal_view}
-        </section>
+        </div>
     }
 }

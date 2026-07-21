@@ -1,19 +1,29 @@
-//! Top-level leptos component — tab strip + header + active panel.
+//! Top-level leptos component — app shell (sidebar + topbar + content).
 //!
 //! Tab state lives in a single `RwSignal<Tab>`; each panel component is
 //! responsible for its own data fetch + WebSocket subscription. The bearer
 //! token is read once from `localStorage` and shared down through a context
 //! so child components don't have to re-read it.
+//!
+//! Shell layout (Docker Desktop / Linear style):
+//!   ┌──────────┬─────────────────────────────┐
+//!   │ sidebar  │ topbar (title · status · ⚙) │
+//!   │ (nav)    ├─────────────────────────────┤
+//!   │          │ content (active panel)      │
+//!   │          ├─────────────────────────────┤
+//!   │          │ statusbar                   │
+//!   └──────────┴─────────────────────────────┘
 
 use gloo_storage::Storage;
 use leptos::prelude::*;
 
 use crate::components::{
-    AuditFeed, ClusterView, ContainerList, ImageList, NetworkList, PinnedClientsView, PluginsView,
-    SandboxList, SessionTimeline, SnapshotTree, VolumeList,
+    AuditFeed, ClusterView, ContainerList, Icon, ImageList, NetworkList, PinnedClientsView,
+    PluginsView, SandboxList, SessionTimeline, SnapshotTree, VolumeList,
 };
 
 const TOKEN_KEY: &str = "linpodx_token";
+const THEME_KEY: &str = "linpodx_theme";
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Tab {
@@ -49,6 +59,23 @@ impl Tab {
         }
     }
 
+    /// Icon name understood by [`crate::components::Icon`].
+    fn icon(self) -> &'static str {
+        match self {
+            Tab::Containers => "container",
+            Tab::Images => "image",
+            Tab::Volumes => "volume",
+            Tab::Networks => "network",
+            Tab::Snapshots => "snapshot",
+            Tab::Sessions => "event",
+            Tab::Sandbox => "sandbox",
+            Tab::Audit => "approval",
+            Tab::Cluster => "daemon",
+            Tab::PinnedClients => "pin",
+            Tab::Plugins => "plugin",
+        }
+    }
+
     const ALL: [Tab; 11] = [
         Tab::Containers,
         Tab::Images,
@@ -69,9 +96,42 @@ impl Tab {
 #[derive(Clone, Copy)]
 pub struct AuthToken(pub RwSignal<Option<String>>);
 
+/// Read the current theme from `<html data-theme>`; falls back to `"dark"`
+/// (the design system is dark-first) when no explicit choice is stored.
+fn current_theme() -> String {
+    web_sys::window()
+        .and_then(|w| w.document())
+        .and_then(|d| d.document_element())
+        .and_then(|el| el.get_attribute("data-theme"))
+        .filter(|t| t == "dark" || t == "light")
+        .unwrap_or_else(|| "dark".to_string())
+}
+
+/// Stamp `data-theme` on `<html>` and persist the choice to localStorage so it
+/// survives reloads (index.html only honours the `?theme=` query on first hit).
+fn apply_theme(theme: &str) {
+    if let Some(el) = web_sys::window()
+        .and_then(|w| w.document())
+        .and_then(|d| d.document_element())
+    {
+        let _ = el.set_attribute("data-theme", theme);
+    }
+    let _ = gloo_storage::LocalStorage::set(THEME_KEY, theme);
+}
+
 #[component]
 pub fn AppRoot() -> impl IntoView {
     let active = RwSignal::new(Tab::Containers);
+    let collapsed = RwSignal::new(false);
+    let theme = RwSignal::new(current_theme());
+
+    // Restore a previously-toggled theme if the query param didn't force one.
+    if let Ok(saved) = gloo_storage::LocalStorage::get::<String>(THEME_KEY) {
+        if (saved == "dark" || saved == "light") && saved != theme.get_untracked() {
+            apply_theme(&saved);
+            theme.set(saved);
+        }
+    }
 
     let initial_token = gloo_storage::LocalStorage::get::<String>(TOKEN_KEY)
         .ok()
@@ -101,48 +161,122 @@ pub fn AppRoot() -> impl IntoView {
         }
     };
 
+    let toggle_theme = move |_| {
+        let next = if theme.get_untracked() == "dark" {
+            "light"
+        } else {
+            "dark"
+        };
+        apply_theme(next);
+        theme.set(next.to_string());
+    };
+
+    let toggle_collapse = move |_| collapsed.update(|c| *c = !*c);
+
+    let shell_cls = move || {
+        if collapsed.get() {
+            "sidebar sidebar--collapsed"
+        } else {
+            "sidebar"
+        }
+    };
+
     view! {
-        <header>
-            <div class="brand">"linpodx"</div>
-            <div class="status">
-                <span class="token-indicator">
-                    {move || if token.get().is_some() { "token set" } else { "no token" }}
-                </span>
-                <button type="button" on:click=prompt_token>"Set token"</button>
-            </div>
-        </header>
-        <nav id="tabs">
-            {Tab::ALL.iter().copied().map(|t| {
-                let cls = move || if active.get() == t { "tab active" } else { "tab" };
-                view! {
+        <div class="app-shell">
+            <aside class=shell_cls>
+                <div class="sidebar-head">
+                    <div class="sidebar-brand">
+                        <span class="sidebar-brand__mark"><Icon name="container"/></span>
+                        <span class="sidebar-brand__label">"linpodx"</span>
+                    </div>
                     <button
                         type="button"
-                        class=cls
-                        on:click=move |_| active.set(t)
+                        class="sidebar-collapse"
+                        title="Collapse sidebar"
+                        aria-label="Collapse sidebar"
+                        on:click=toggle_collapse
                     >
-                        {t.label()}
+                        <Icon name="chevron-left"/>
                     </button>
-                }
-            }).collect_view()}
-        </nav>
-        <main>
-            {move || match active.get() {
-                Tab::Containers => view! { <ContainerList/> }.into_any(),
-                Tab::Images => view! { <ImageList/> }.into_any(),
-                Tab::Volumes => view! { <VolumeList/> }.into_any(),
-                Tab::Networks => view! { <NetworkList/> }.into_any(),
-                Tab::Snapshots => view! { <SnapshotTree/> }.into_any(),
-                Tab::Sessions => view! { <SessionTimeline/> }.into_any(),
-                Tab::Sandbox => view! { <SandboxList/> }.into_any(),
-                Tab::Audit => view! { <AuditFeed/> }.into_any(),
-                Tab::Cluster => view! { <ClusterView/> }.into_any(),
-                Tab::PinnedClients => view! { <PinnedClientsView/> }.into_any(),
-                Tab::Plugins => view! { <PluginsView/> }.into_any(),
-            }}
-        </main>
-        <footer>
-            <span>"read-only views — use the CLI for mutations"</span>
-            <span>"leptos SPA (Phase 9)"</span>
-        </footer>
+                </div>
+                <nav class="sidebar-nav">
+                    {Tab::ALL.iter().copied().map(|t| {
+                        let cls = move || if active.get() == t { "nav-item active" } else { "nav-item" };
+                        view! {
+                            <button
+                                type="button"
+                                class=cls
+                                title=t.label()
+                                on:click=move |_| active.set(t)
+                            >
+                                <span class="nav-item__icon"><Icon name=t.icon()/></span>
+                                <span class="nav-item__label">{t.label()}</span>
+                            </button>
+                        }
+                    }).collect_view()}
+                </nav>
+                <div class="sidebar-foot">
+                    <span class="sidebar-foot__text">"read-only · use CLI to mutate"</span>
+                </div>
+            </aside>
+
+            <div class="app-main">
+                <header class="topbar">
+                    <div class="topbar-title">{move || active.get().label()}</div>
+                    <div class="topbar-actions">
+                        <span
+                            class=move || if token.get().is_some() {
+                                "status-pill status-pill--ok"
+                            } else {
+                                "status-pill status-pill--warn"
+                            }
+                        >
+                            {move || if token.get().is_some() { "daemon · token set" } else { "no token" }}
+                        </span>
+                        <button
+                            type="button"
+                            class="btn btn--sm btn--secondary"
+                            on:click=prompt_token
+                        >
+                            "Set token"
+                        </button>
+                        <button
+                            type="button"
+                            class="theme-toggle"
+                            title="Toggle theme"
+                            aria-label="Toggle colour theme"
+                            on:click=toggle_theme
+                        >
+                            {move || if theme.get() == "dark" {
+                                view! { <Icon name="theme-light"/> }.into_any()
+                            } else {
+                                view! { <Icon name="theme-dark"/> }.into_any()
+                            }}
+                        </button>
+                    </div>
+                </header>
+
+                <main class="content">
+                    {move || match active.get() {
+                        Tab::Containers => view! { <ContainerList/> }.into_any(),
+                        Tab::Images => view! { <ImageList/> }.into_any(),
+                        Tab::Volumes => view! { <VolumeList/> }.into_any(),
+                        Tab::Networks => view! { <NetworkList/> }.into_any(),
+                        Tab::Snapshots => view! { <SnapshotTree/> }.into_any(),
+                        Tab::Sessions => view! { <SessionTimeline/> }.into_any(),
+                        Tab::Sandbox => view! { <SandboxList/> }.into_any(),
+                        Tab::Audit => view! { <AuditFeed/> }.into_any(),
+                        Tab::Cluster => view! { <ClusterView/> }.into_any(),
+                        Tab::PinnedClients => view! { <PinnedClientsView/> }.into_any(),
+                        Tab::Plugins => view! { <PluginsView/> }.into_any(),
+                    }}
+                </main>
+
+                <footer class="statusbar">
+                    <span>"linpodx web UI"</span>
+                    <span>"leptos SPA"</span>
+                </footer>
+            </div>
+        </div>
     }
 }

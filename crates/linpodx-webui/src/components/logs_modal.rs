@@ -182,6 +182,7 @@ pub fn LogsModal(open: RwSignal<Option<String>>) -> impl IntoView {
                     <div class="modal-form">
                         <label class="modal-inline">
                             <input
+                                class="checkbox"
                                 type="checkbox"
                                 prop:checked=move || follow.get()
                                 on:change=toggle_follow
@@ -195,8 +196,8 @@ pub fn LogsModal(open: RwSignal<Option<String>>) -> impl IntoView {
                         </p>
                     </div>
                     <div class="modal-actions">
-                        <button type="button" on:click=clear>"Clear"</button>
-                        <button type="button" on:click=close>"Close"</button>
+                        <button type="button" class="btn" on:click=clear>"Clear"</button>
+                        <button type="button" class="btn" on:click=close>"Close"</button>
                     </div>
                 </div>
             </div>

@@ -1,18 +1,20 @@
-//! Phase 10 — card-stack panel renderer.
+//! Phase 10 — shared data-table panel renderer (redesigned v4).
 //!
 //! Each panel declares its API path, event topic, and the column list to render
 //! per row. We then:
 //!
 //! * fetch the seed list from `/api/v1/<api_path>` once at mount,
 //! * resubscribe via `/ipc` and refetch the seed whenever a topic event arrives,
-//! * render every row as a hoverable `.card` with one labelled field per column,
-//! * expose a sort selector (column toggle, asc/desc) and a per-tab filter
-//!   textbox (case-insensitive substring match across visible columns).
+//! * render every row into a professional data table — sticky header, hover
+//!   rows, sortable columns (click a header), status chips for `status`/`state`
+//!   columns, monospace ellipsised IDs, and an optional trailing action cell.
+//! * expose a search box (case-insensitive substring across visible columns),
+//!   a row-count footer, a loading skeleton, an empty state and an error state.
 //!
-//! Phase 12 — added optional per-row action area. Callers pass a `RowActions`
-//! closure that receives the row JSON and returns an `AnyView` rendered after
-//! the card fields. Used for [Exec]/[Logs] (Containers), [Push] (Images),
-//! [Branch]/[Rollback]/[Remove] (Snapshots), [Timeline] (Sessions).
+//! The public API — [`PanelSpec`], [`RowActions`], [`row_actions`],
+//! [`ListTable`] — is unchanged so the per-tab view components (containers /
+//! images / snapshots / …) keep compiling untouched. Only the internal DOM the
+//! table emits changed (cards → `<table>`).
 //!
 //! Rendering goes through leptos `view!` so interpolated values are escaped —
 //! no `set_html` / `inner_html` anywhere.
@@ -23,6 +25,7 @@ use leptos::prelude::*;
 use serde_json::Value;
 use wasm_bindgen_futures::spawn_local;
 
+use super::icons::Icon;
 use crate::app::AuthToken;
 use crate::ws::{fetch_list, subscribe};
 
@@ -77,6 +80,7 @@ pub fn ListTable(
 ) -> impl IntoView {
     let auth = use_context::<AuthToken>().expect("AuthToken context provided by AppRoot");
     let rows: RwSignal<Result<Vec<Value>, String>> = RwSignal::new(Ok(Vec::new()));
+    let loading = RwSignal::new(true);
     let filter = RwSignal::new(String::new());
     let sort = RwSignal::new(SortState {
         column: None,
@@ -87,6 +91,8 @@ pub fn ListTable(
     let topic = spec.topic;
     let columns = spec.columns;
     let empty_msg = spec.empty_msg;
+    let empty_icon = topic_icon(topic);
+    let has_actions = actions_for_row.is_some();
 
     let reload = move || {
         let token = auth.0.get_untracked();
@@ -94,6 +100,7 @@ pub fn ListTable(
             Some(t) => t,
             None => {
                 rows.set(Err("set a bearer token to load data".into()));
+                loading.set(false);
                 return;
             }
         };
@@ -105,6 +112,7 @@ pub fn ListTable(
                 }
                 Err(e) => rows.set(Err(e)),
             }
+            loading.set(false);
         });
     };
 
@@ -123,143 +131,253 @@ pub fn ListTable(
         });
     });
 
-    // Sort buttons live in the toolbar above the card stack. Clicking the active
-    // column toggles direction; clicking a different column resets to ascending.
-    let sort_buttons = columns
-        .iter()
-        .enumerate()
-        .map(|(idx, col)| {
-            let label = *col;
-            let cls = move || {
+    let n_cols = columns.len() + if has_actions { 1 } else { 0 };
+
+    // Header cells are rebuilt on each reactive render (so the sort arrow
+    // tracks state) and live in the SAME `<table>` as the body so column widths
+    // stay aligned. Clicking the active column toggles direction; clicking a
+    // different column resets to ascending.
+    let build_header = move || {
+        let cells = columns
+            .iter()
+            .enumerate()
+            .map(|(idx, col)| {
+                let label = *col;
                 let s = sort.get();
-                if s.column == Some(idx) {
-                    "sort-button active"
-                } else {
-                    "sort-button"
-                }
-            };
-            let arrow = move || {
-                let s = sort.get();
-                if s.column == Some(idx) {
+                let arrow = if s.column == Some(idx) {
                     if s.ascending {
-                        " \u{25B2}"
+                        "\u{25B2}"
                     } else {
-                        " \u{25BC}"
+                        "\u{25BC}"
                     }
                 } else {
                     ""
+                };
+                view! {
+                    <th
+                        class="th-sortable"
+                        on:click=move |_| {
+                            let s = sort.get_untracked();
+                            let next = if s.column == Some(idx) {
+                                SortState { column: Some(idx), ascending: !s.ascending }
+                            } else {
+                                SortState { column: Some(idx), ascending: true }
+                            };
+                            sort.set(next);
+                        }
+                    >
+                        <span class="th-inner">
+                            {pretty_header(label)}
+                            <span class="sort-ind">{arrow}</span>
+                        </span>
+                    </th>
                 }
-            };
-            view! {
-                <button
-                    type="button"
-                    class=cls
-                    on:click=move |_| {
-                        let s = sort.get_untracked();
-                        let next = if s.column == Some(idx) {
-                            SortState { column: Some(idx), ascending: !s.ascending }
-                        } else {
-                            SortState { column: Some(idx), ascending: true }
-                        };
-                        sort.set(next);
-                    }
-                >
-                    {label}
-                    {arrow}
-                </button>
-            }
-        })
-        .collect_view();
+            })
+            .collect_view();
+        let action_header = has_actions.then(|| view! { <th class="cell-actions"></th> });
+        view! { <tr>{cells}{action_header}</tr> }
+    };
 
     let actions_for_row_clone = actions_for_row.clone();
-    let body_view = move || match rows.get() {
-        Err(msg) => view! { <div class="error-state">{msg}</div> }.into_any(),
-        Ok(items) if items.is_empty() => {
-            view! { <div class="empty-state">{empty_msg}</div> }.into_any()
+    let body_view = move || {
+        if loading.get() {
+            return skeleton_view(n_cols);
         }
-        Ok(items) => {
-            let needle = filter.get().trim().to_lowercase();
-            let mut filtered: Vec<Value> = if needle.is_empty() {
-                items
-            } else {
-                items
-                    .into_iter()
-                    .filter(|row| row_matches(row, columns, &needle))
-                    .collect()
-            };
-            let s = sort.get();
-            if let Some(idx) = s.column {
-                let key = columns[idx];
-                filtered.sort_by(|a, b| {
-                    let av = pick_field(a, key).to_lowercase();
-                    let bv = pick_field(b, key).to_lowercase();
-                    if s.ascending {
-                        av.cmp(&bv)
-                    } else {
-                        bv.cmp(&av)
-                    }
-                });
+        match rows.get() {
+            Err(msg) => view! {
+                <div class="error-state">
+                    <Icon name="approval"/>
+                    <span>{msg}</span>
+                </div>
             }
-            if filtered.is_empty() {
-                return view! { <div class="empty-state">"no rows match filter"</div> }.into_any();
-            }
-            let actions = actions_for_row_clone.clone();
-            filtered
-                .into_iter()
-                .map(|row| {
-                    let fields = columns
-                        .iter()
-                        .map(|col| {
-                            let raw = pick_field(&row, col);
-                            let is_empty = raw.is_empty();
-                            let value_cls = if is_empty {
-                                "field-value empty"
-                            } else {
-                                "field-value"
-                            };
-                            let display = if is_empty { "—".to_string() } else { raw };
-                            view! {
-                                <div class="field">
-                                    <span class="field-label">{*col}</span>
-                                    <span class=value_cls>{display}</span>
-                                </div>
-                            }
-                        })
-                        .collect_view();
-                    let action_view = actions.as_ref().map(|a| {
-                        let rendered = a.render(&row);
-                        view! { <div class="card-actions">{rendered}</div> }
+            .into_any(),
+            Ok(items) if items.is_empty() => empty_view(empty_icon, empty_msg),
+            Ok(items) => {
+                let needle = filter.get().trim().to_lowercase();
+                let mut filtered: Vec<Value> = if needle.is_empty() {
+                    items
+                } else {
+                    items
+                        .into_iter()
+                        .filter(|row| row_matches(row, columns, &needle))
+                        .collect()
+                };
+                let s = sort.get();
+                if let Some(idx) = s.column {
+                    let key = columns[idx];
+                    filtered.sort_by(|a, b| {
+                        let av = pick_field(a, key).to_lowercase();
+                        let bv = pick_field(b, key).to_lowercase();
+                        if s.ascending {
+                            av.cmp(&bv)
+                        } else {
+                            bv.cmp(&av)
+                        }
                     });
-                    view! {
-                        <div class="card">
-                            {fields}
-                            {action_view}
-                        </div>
-                    }
-                })
-                .collect_view()
+                }
+                if filtered.is_empty() {
+                    return empty_view(empty_icon, "no rows match your filter");
+                }
+                let count = filtered.len();
+                let actions = actions_for_row_clone.clone();
+                let body_rows = filtered
+                    .into_iter()
+                    .map(|row| {
+                        let cells = columns
+                            .iter()
+                            .map(|col| render_cell(&row, col))
+                            .collect_view();
+                        let action_cell = actions.as_ref().map(|a| {
+                            let rendered = a.render(&row);
+                            view! { <td class="cell-actions">{rendered}</td> }
+                        });
+                        view! { <tr>{cells}{action_cell}</tr> }
+                    })
+                    .collect_view();
+                view! {
+                    <div class="data-table-wrap">
+                        <table class="data-table">
+                            <thead>{build_header()}</thead>
+                            <tbody>{body_rows}</tbody>
+                        </table>
+                    </div>
+                    <div class="table-footer">
+                        <span class="row-count">{format!("{count} item(s)")}</span>
+                    </div>
+                }
                 .into_any()
+            }
         }
     };
 
     view! {
         <section class="panel">
             <div class="panel-toolbar">
-                <span class="sort-label">"sort:"</span>
-                {sort_buttons}
-                <input
-                    type="search"
-                    placeholder="filter…"
-                    on:input=move |ev| {
-                        let v = event_target_value(&ev);
-                        filter.set(v);
-                    }
-                />
+                <span class="search-box">
+                    <span class="search-box__icon"><Icon name="search"/></span>
+                    <input
+                        class="input"
+                        type="search"
+                        placeholder="Filter…"
+                        on:input=move |ev| filter.set(event_target_value(&ev))
+                    />
+                </span>
             </div>
-            <div class="card-stack">
-                {body_view}
-            </div>
+            {body_view}
         </section>
+    }
+}
+
+/// Skeleton placeholder shown until the first fetch resolves.
+fn skeleton_view(n_cols: usize) -> AnyView {
+    let rows = (0..6)
+        .map(|_| {
+            let cells = (0..n_cols)
+                .map(|_| view! { <td><span class="skeleton-line"></span></td> })
+                .collect_view();
+            view! { <tr>{cells}</tr> }
+        })
+        .collect_view();
+    view! {
+        <div class="data-table-wrap">
+            <table class="data-table">
+                <tbody>{rows}</tbody>
+            </table>
+        </div>
+    }
+    .into_any()
+}
+
+/// Rich empty state — icon disc + title + hint.
+fn empty_view(icon: &'static str, msg: &'static str) -> AnyView {
+    view! {
+        <div class="empty-state">
+            <span class="empty-state__icon"><Icon name=icon/></span>
+            <span class="empty-state__title">{msg}</span>
+            <span class="empty-state__hint">
+                "Nothing here yet — create one with the linpodx CLI, or adjust your filter."
+            </span>
+        </div>
+    }
+    .into_any()
+}
+
+/// Render one `<td>` for a row/column pair. `status`/`state` columns become a
+/// status chip, `id`-like columns render in monospace with ellipsis, everything
+/// else is plain text with an em-dash placeholder when empty.
+fn render_cell(row: &Value, col: &str) -> AnyView {
+    let raw = pick_field(row, col);
+    let is_status = matches!(col, "status" | "state" | "phase");
+    let is_id = col == "id" || col.ends_with("_id") || col == "image_ref";
+
+    if raw.is_empty() {
+        return view! { <td><span class="cell-muted">"—"</span></td> }.into_any();
+    }
+    if is_status {
+        let cls = format!("chip {}", status_chip_modifier(&raw));
+        return view! { <td><span class=cls>{raw}</span></td> }.into_any();
+    }
+    if is_id {
+        let title = raw.clone();
+        return view! {
+            <td><span class="cell-id" title=title>{raw}</span></td>
+        }
+        .into_any();
+    }
+    view! { <td><span class="cell">{raw}</span></td> }.into_any()
+}
+
+/// Map a raw status string to a `.chip--*` modifier class.
+fn status_chip_modifier(value: &str) -> &'static str {
+    let v = value.to_lowercase();
+    if v.contains("error") || v.contains("fail") || v.contains("dead") || v.contains("unhealthy") {
+        "chip--error"
+    } else if v.contains("run")
+        || v.contains("healthy")
+        || v.contains("active")
+        || v.contains("online")
+        || v == "up"
+        || v.starts_with("up ")
+    {
+        "chip--running"
+    } else if v.contains("paus")
+        || v.contains("restart")
+        || v.contains("pending")
+        || v.contains("warn")
+        || v.contains("creat")
+    {
+        "chip--warn"
+    } else if v.contains("exit")
+        || v.contains("stop")
+        || v.contains("inactive")
+        || v.contains("offline")
+    {
+        "chip--stopped"
+    } else {
+        "chip--neutral"
+    }
+}
+
+/// Turn a snake_case column key into a spaced Title-ish header label.
+fn pretty_header(key: &str) -> String {
+    key.replace('_', " ")
+}
+
+/// Pick the default empty-state / error icon for a topic.
+fn topic_icon(topic: &str) -> &'static str {
+    match topic {
+        "container" => "container",
+        "image" => "image",
+        "volume" => "volume",
+        "network" => "network",
+        "snapshot" => "snapshot",
+        "session" => "event",
+        "sandbox" => "sandbox",
+        "audit" => "approval",
+        "cluster" => "daemon",
+        "pin" | "pinned" => "pin",
+        "plugin" => "plugin",
+        _ => "container",
     }
 }
 

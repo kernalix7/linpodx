@@ -9,6 +9,7 @@ use leptos::prelude::*;
 use serde_json::{json, Value};
 use wasm_bindgen_futures::spawn_local;
 
+use super::icons::Icon;
 use crate::api_client::{build_tofu_expiry_body, paths};
 use crate::helpers::{parse_tofu_expiry, tofu_countdown_label, tofu_is_expired};
 use crate::ws::send_rpc;
@@ -89,48 +90,63 @@ pub fn PinnedClientsView() -> impl IntoView {
     };
 
     view! {
-        <section class="pinned-clients-panel">
-            <h3>"TOFU pin-store"</h3>
-            <p class="rest-hint">{format!("REST: PUT {}", paths::TOFU_EXPIRY)}</p>
-            {move || match status.get() {
-                None => view! {
-                    <p class="status-empty">"status not yet loaded"</p>
-                }.into_any(),
-                Some(s) => {
-                    let now = js_now_secs();
-                    let countdown = tofu_countdown_label(s.enabled, s.max_age_secs, s.enabled_at, now);
-                    let expired = tofu_is_expired(s.enabled, s.max_age_secs, s.enabled_at, now);
-                    let badge_cls = if expired { "tofu-badge expired" } else { "tofu-badge" };
-                    view! {
-                        <ul class="status-list">
-                            <li>{format!("enabled: {}", s.enabled)}</li>
-                            <li>{format!("max_age_secs: {}",
-                                s.max_age_secs.map(|n| n.to_string()).unwrap_or_else(|| "(unset)".into()))}</li>
-                            <li>{format!("enabled_at: {}",
-                                s.enabled_at.map(|n| n.to_string()).unwrap_or_else(|| "(never)".into()))}</li>
-                        </ul>
-                        <p class=badge_cls>{countdown}</p>
-                    }.into_any()
-                }
-            }}
-            <div class="set-expiry-row">
-                <input
-                    type="text"
-                    placeholder="e.g. 3600, 30s, 5m, 2h, 1d, clear"
-                    prop:value=move || input.get()
-                    on:input=move |ev| input.set(event_target_value(&ev))
-                />
-                <button
-                    type="button"
-                    class="primary"
-                    prop:disabled=move || busy.get()
-                    on:click=apply
-                >
-                    {move || if busy.get() { "Working…" } else { "Apply" }}
-                </button>
+        <div class="pinned-clients-panel">
+            <div class="page-header">
+                <div class="page-header__titles">
+                    <div class="page-title">"TOFU pin-store"</div>
+                    <div class="page-subtitle">"trust-on-first-use client pin expiry"</div>
+                </div>
             </div>
-            {move || error.get().map(|e| view! { <p class="error-state">{e}</p> })}
-        </section>
+            <div class="surface-card">
+                <p class="rest-hint">{format!("REST: PUT {}", paths::TOFU_EXPIRY)}</p>
+                {move || match status.get() {
+                    None => view! {
+                        <p class="status-empty">"status not yet loaded"</p>
+                    }.into_any(),
+                    Some(s) => {
+                        let now = js_now_secs();
+                        let countdown = tofu_countdown_label(s.enabled, s.max_age_secs, s.enabled_at, now);
+                        let expired = tofu_is_expired(s.enabled, s.max_age_secs, s.enabled_at, now);
+                        let badge_cls = if expired { "chip chip--error" } else { "chip chip--info" };
+                        view! {
+                            <div class="detail-grid">
+                                <span class="detail-grid__key">"enabled"</span>
+                                <span class="detail-grid__val">{s.enabled.to_string()}</span>
+                                <span class="detail-grid__key">"max_age_secs"</span>
+                                <span class="detail-grid__val mono">{
+                                    s.max_age_secs.map(|n| n.to_string()).unwrap_or_else(|| "(unset)".into())
+                                }</span>
+                                <span class="detail-grid__key">"enabled_at"</span>
+                                <span class="detail-grid__val mono">{
+                                    s.enabled_at.map(|n| n.to_string()).unwrap_or_else(|| "(never)".into())
+                                }</span>
+                            </div>
+                            <p><span class=badge_cls>{countdown}</span></p>
+                        }.into_any()
+                    }
+                }}
+                <div class="set-expiry-row">
+                    <input
+                        class="input"
+                        type="text"
+                        placeholder="e.g. 3600, 30s, 5m, 2h, 1d, clear"
+                        prop:value=move || input.get()
+                        on:input=move |ev| input.set(event_target_value(&ev))
+                    />
+                    <button
+                        type="button"
+                        class="btn btn--primary"
+                        prop:disabled=move || busy.get()
+                        on:click=apply
+                    >
+                        {move || if busy.get() { "Working…" } else { "Apply" }}
+                    </button>
+                </div>
+                {move || error.get().map(|e| view! {
+                    <div class="error-state"><Icon name="pin"/><span>{e}</span></div>
+                })}
+            </div>
+        </div>
     }
 }
 
