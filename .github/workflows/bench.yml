@@ -69,6 +69,7 @@ jobs:
               -p linpodx-runtime --bench snapshot \
               -p linpodx-mcp --bench policy \
               -p linpodx-plugin --bench invoke \
+              -p linpodx-bench-tools --bench phase17_crypto \
               -- --quick 2>&1 | tee bench-results/raw-${{ matrix.platform }}.log
 
       - name: Compare against ${{ matrix.platform }} baseline

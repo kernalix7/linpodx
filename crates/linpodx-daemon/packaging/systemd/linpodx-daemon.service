@@ -1,0 +1,28 @@
+[Unit]
+# Phase 18 — system-wide systemd unit shipped by the linpodx-daemon .deb / .rpm.
+# Most users will run linpodx-daemon rootless via `linpodx daemon start`; this
+# unit exists for sysadmin-style installs where the daemon should come up on
+# boot under its own user. It is NOT enabled by default — package post-install
+# scripts only `daemon-reload`.
+Description=linpodx container management daemon
+Documentation=https://github.com/kernalix7/linpodx
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+ExecStart=/usr/bin/linpodx-daemon
+Restart=on-failure
+RestartSec=3
+# Hardening — these are conservative defaults; users can override via a drop-in.
+NoNewPrivileges=true
+ProtectSystem=strict
+ProtectHome=read-only
+PrivateTmp=true
+RuntimeDirectory=linpodx
+RuntimeDirectoryMode=0750
+StateDirectory=linpodx
+StateDirectoryMode=0750
+
+[Install]
+WantedBy=multi-user.target

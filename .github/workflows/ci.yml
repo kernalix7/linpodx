@@ -24,7 +24,9 @@ jobs:
       - name: cargo fmt --check
         run: cargo fmt --all -- --check
       - name: cargo clippy
-        run: cargo clippy --workspace --all-targets --all-features -- -D warnings
+        # linpodx-gui links a system GUI toolkit not installed on hosted
+        # runners; it is excluded until the desktop-shell CI deps land.
+        run: cargo clippy --workspace --exclude linpodx-gui --all-targets --all-features -- -D warnings
 
   test:
     name: test (${{ matrix.toolchain }})
@@ -32,7 +34,7 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        toolchain: [stable, "1.85"]
+        toolchain: [stable, "1.92"]
     steps:
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@master
@@ -42,7 +44,7 @@ jobs:
         with:
           key: ${{ matrix.toolchain }}
       - name: cargo test (workspace, no ignored)
-        run: cargo test --workspace --all-features
+        run: cargo test --workspace --exclude linpodx-gui --all-features
 
   doc:
     name: doc
@@ -54,7 +56,7 @@ jobs:
       - uses: dtolnay/rust-toolchain@stable
       - uses: Swatinem/rust-cache@v2
       - name: cargo doc
-        run: cargo doc --workspace --no-deps
+        run: cargo doc --workspace --exclude linpodx-gui --no-deps
 
   audit:
     name: cargo audit
@@ -88,6 +90,33 @@ jobs:
         with:
           key: nightly
       - name: cargo build (nightly)
-        run: cargo build --workspace --all-features
+        run: cargo build --workspace --exclude linpodx-gui --all-features
       - name: cargo test (nightly)
-        run: cargo test --workspace --all-features
+        run: cargo test --workspace --exclude linpodx-gui --all-features
+
+  podman-integration:
+    # Phase 18 Stream E — runs the `#[ignore]`-gated e2e suites against a real
+    # Podman install. `continue-on-error: true` for now because several
+    # scenarios still soft-skip behind placeholder dispatch (Streams B/C/D).
+    # Flip to `false` once Phase 18 lands the full surface.
+    #
+    # Gated so PR builds stay fast: runs on every push to main and on PRs only
+    # when the `run-integration` label is applied (the apt + podman install +
+    # ignored test sweep is ~3-5 min, too long for every PR roundtrip).
+    name: podman integration (ignored e2e)
+    runs-on: ubuntu-24.04
+    if: github.event_name != 'pull_request' || contains(github.event.pull_request.labels.*.name, 'run-integration')
+    continue-on-error: true
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+        with:
+          key: podman-integration
+      - name: install podman
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y podman
+          podman --version
+      - name: cargo test (ignored, single-threaded)
+        run: cargo test --workspace --exclude linpodx-gui -- --ignored --test-threads=1

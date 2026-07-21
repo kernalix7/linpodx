@@ -105,6 +105,21 @@ pub struct DaemonConfig {
     /// `--client-ca` (no client cert is presented).
     #[arg(long, env = "LINPODX_PIN_CLIENTS")]
     pub pin_clients: bool,
+
+    /// Phase 18 Stream D — accepted for compatibility with
+    /// `linpodx daemon start --fork`. The actual detachment is performed by
+    /// the CLI (via `setsid -f` + stdio redirection); the daemon itself
+    /// stays attached to whatever stdio it was given. Setting `--fork`
+    /// without `--pid-file` is allowed but discouraged.
+    #[arg(long)]
+    pub fork: bool,
+
+    /// Phase 18 Stream D — when set, write the daemon's PID to this file on
+    /// startup and remove it cleanly on shutdown. Default:
+    /// `$XDG_RUNTIME_DIR/linpodx.pid` (or `/tmp/linpodx-$UID.pid`) when
+    /// `--fork` is also set; otherwise no pid-file is written.
+    #[arg(long, env = "LINPODX_PID_FILE", value_name = "PATH")]
+    pub pid_file: Option<std::path::PathBuf>,
 }
 
 impl DaemonConfig {
@@ -135,6 +150,18 @@ pub fn default_socket_path() -> PathBuf {
     }
     let uid = current_uid();
     PathBuf::from(format!("/tmp/linpodx-{uid}.sock"))
+}
+
+/// Phase 18 Stream D — default pid-file location. Mirrors the CLI's
+/// `default_pid_file()` so they always agree on where to look.
+pub fn default_pid_file_path() -> PathBuf {
+    if let Ok(rt) = std::env::var("XDG_RUNTIME_DIR") {
+        if !rt.is_empty() {
+            return PathBuf::from(rt).join("linpodx.pid");
+        }
+    }
+    let uid = current_uid();
+    PathBuf::from(format!("/tmp/linpodx-{uid}.pid"))
 }
 
 /// Resolve the current user's UID from `/proc/self/status`. Falls back to 1000.

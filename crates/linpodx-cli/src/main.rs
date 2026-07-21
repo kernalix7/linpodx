@@ -1,9 +1,12 @@
 #![forbid(unsafe_code)]
 
 mod client;
+mod commands;
 mod output;
 
 use crate::client::Client;
+use crate::commands::completion::Shell as CompletionShell;
+use crate::commands::container::ContainerCmd;
 use crate::output::{
     print_audit_table, print_compile_result, print_container_list, print_distro_instance,
     print_distro_template_list, print_image_list, print_image_manifest_create,
@@ -133,15 +136,29 @@ enum Cmd {
         #[arg(trailing_var_arg = true)]
         command: Vec<String>,
     },
-    /// Manage images.
-    #[command(subcommand)]
+    /// Manage images. Accepts both `images` and the docker-compat alias `image`.
+    #[command(subcommand, visible_alias = "image")]
     Images(ImagesCmd),
-    /// Manage volumes.
-    #[command(subcommand)]
+    /// Manage volumes. Accepts both `volume` and the docker-compat alias `volumes`.
+    #[command(subcommand, visible_alias = "volumes")]
     Volume(VolumeCmd),
-    /// Manage networks.
-    #[command(subcommand)]
+    /// Manage networks. Accepts both `network` and the docker-compat alias `networks`.
+    #[command(subcommand, visible_alias = "networks")]
     Network(NetworkCmd),
+    /// Container lifecycle verbs grouped under one subcommand for users coming
+    /// from `docker` / `podman`. Identical behavior to the flat `ps` / `run` /
+    /// `start` / `stop` / `rm` / `inspect` / `logs` / `exec` verbs (Phase 18).
+    #[command(subcommand)]
+    Container(ContainerCmd),
+    /// Generate a shell-completion script for the chosen shell to stdout
+    /// (Phase 18). Run before opening a daemon connection — completion does
+    /// not need one. Pipe the output into the appropriate shell-specific
+    /// location, e.g. `linpodx completion bash | sudo tee
+    /// /etc/bash_completion.d/linpodx >/dev/null`.
+    Completion {
+        /// Target shell (bash, zsh, fish, powershell, elvish).
+        shell: CompletionShell,
+    },
     /// Sandbox profiles + audit log (Phase 1C).
     #[command(subcommand)]
     Sandbox(SandboxCmd),
@@ -241,6 +258,8 @@ enum Cmd {
     /// Daemon-side helpers (cert generation, etc.) (Phase 10).
     #[command(subcommand)]
     Daemon(DaemonCmd),
+    /// First-run environment readiness diagnostics (Phase 18 Stream C).
+    Doctor(crate::commands::doctor::DoctorArgs),
 }
 
 #[derive(Subcommand, Debug)]
@@ -251,6 +270,18 @@ enum DaemonCmd {
     /// Manage pinned WebSocket client certificates (Phase 15).
     #[command(subcommand, name = "pin-client")]
     PinClient(PinClientCmd),
+    // Phase 18 Stream D — daemon process lifecycle. Each of these dispatches
+    // off the fast-path in `main()` because none of them need a running
+    // daemon to be useful (`start` *creates* one; `stop` signals it;
+    // `status` and `logs` poll files on disk).
+    /// Start the linpodx daemon (foreground by default; `--fork` to detach).
+    Start(crate::commands::daemon_mgmt::StartArgs),
+    /// Send SIGTERM to a running daemon (looked up via pid-file).
+    Stop(crate::commands::daemon_mgmt::StopArgs),
+    /// Report daemon status (running / stopped / stale-socket).
+    Status(crate::commands::daemon_mgmt::StatusArgs),
+    /// Tail the daemon's stderr log file (forked-mode only).
+    Logs(crate::commands::daemon_mgmt::LogsArgs),
 }
 
 #[derive(Subcommand, Debug)]
@@ -998,17 +1029,17 @@ enum ClusterStateCmd {
     },
 }
 
-fn parse_kv(raw: &str) -> std::result::Result<(String, String), String> {
+pub(crate) fn parse_kv(raw: &str) -> std::result::Result<(String, String), String> {
     raw.split_once('=')
         .map(|(k, v)| (k.to_string(), v.to_string()))
         .ok_or_else(|| format!("expected KEY=VALUE, got '{raw}'"))
 }
 
-fn parse_port_mapping(raw: &str) -> std::result::Result<PortMapping, String> {
+pub(crate) fn parse_port_mapping(raw: &str) -> std::result::Result<PortMapping, String> {
     PortMapping::parse(raw)
 }
 
-fn parse_volume_mount(raw: &str) -> std::result::Result<VolumeMount, String> {
+pub(crate) fn parse_volume_mount(raw: &str) -> std::result::Result<VolumeMount, String> {
     VolumeMount::parse(raw)
 }
 
@@ -1041,7 +1072,7 @@ fn parse_mcp_decision(raw: &str) -> std::result::Result<McpPolicyDecision, Strin
 
 #[tokio::main(flavor = "current_thread")]
 async fn main() -> Result<()> {
-    let cli = Cli::parse();
+    let mut cli = Cli::parse();
     init_tracing();
 
     // Phase 10: cert generation is a local-only helper — no daemon connection needed.
@@ -1050,6 +1081,34 @@ async fn main() -> Result<()> {
     if let Cmd::Daemon(DaemonCmd::Cert(CertCmd::Generate { out })) = &cli.cmd {
         return handle_cert_generate(out.clone()).await;
     }
+
+    // Phase 18 Stream D — daemon lifecycle subcommands never connect to a
+    // daemon. They spawn / signal / poll the daemon process directly.
+    // Routing them here means `linpodx daemon start` works on a clean host
+    // (instead of bailing out with "could not connect" before it has had a
+    // chance to start anything).
+    if matches!(
+        &cli.cmd,
+        Cmd::Daemon(
+            DaemonCmd::Start(_) | DaemonCmd::Stop(_) | DaemonCmd::Status(_) | DaemonCmd::Logs(_)
+        )
+    ) {
+        return handle_daemon_mgmt(cli).await;
+    }
+
+    // Phase 18 Stream B — shell completion is a local-only renderer. Bail
+    // out before opening a socket / WS so users don't need a running daemon
+    // to bootstrap their tab-completion.
+    if let Cmd::Completion { shell } = cli.cmd {
+        commands::completion::render::<Cli, _>(shell, &mut std::io::stdout());
+        return Ok(());
+    }
+
+    // Phase 18 Stream B — collapse the docker-compat `linpodx container <verb>`
+    // surface onto the existing flat `Cmd::Ps / Run / Start / Stop / Rm /
+    // Inspect / Logs / Exec` variants so the rest of the dispatcher runs
+    // unchanged. There is exactly one code path per verb.
+    cli.cmd = flatten_container_cmd(cli.cmd);
 
     let mut client = match cli.remote.clone() {
         Some(addr) => {
@@ -1211,9 +1270,87 @@ async fn main() -> Result<()> {
         Cmd::Daemon(DaemonCmd::PinClient(cmd)) => {
             handle_pin_client(&mut client, cli.output, cmd).await?;
         }
+        Cmd::Daemon(
+            DaemonCmd::Start(_) | DaemonCmd::Stop(_) | DaemonCmd::Status(_) | DaemonCmd::Logs(_),
+        ) => {
+            // Unreachable — Phase 18 Stream D handles these on the fast path.
+            unreachable!("Daemon lifecycle handled before client setup");
+        }
+        Cmd::Doctor(args) => {
+            let code = crate::commands::doctor::handle(&mut client, args).await?;
+            if code != 0 {
+                std::process::exit(code);
+            }
+        }
+        Cmd::Container(_) => {
+            // Unreachable — `flatten_container_cmd` above rewrites every
+            // `Cmd::Container(...)` value into the matching flat verb before
+            // this match runs.
+            unreachable!("Cmd::Container should have been flattened");
+        }
+        Cmd::Completion { .. } => {
+            // Unreachable — handled by the Phase 18 Stream B completion fast
+            // path above (no daemon connection required).
+            unreachable!("Cmd::Completion handled before client setup");
+        }
     }
 
     Ok(())
+}
+
+/// Phase 18 Stream B — collapse the docker-compat `linpodx container <verb>`
+/// surface onto its flat equivalent. Every variant of `ContainerCmd` has a 1:1
+/// counterpart in `Cmd`; this function is the single point of translation.
+///
+/// Non-container variants pass through untouched.
+fn flatten_container_cmd(cmd: Cmd) -> Cmd {
+    match cmd {
+        Cmd::Container(ContainerCmd::Ls { all }) => Cmd::Ps { all },
+        Cmd::Container(ContainerCmd::Run {
+            name,
+            rm,
+            detach,
+            env,
+            labels,
+            publish,
+            volume,
+            network,
+            sandbox,
+            image,
+            command,
+        }) => Cmd::Run {
+            name,
+            rm,
+            detach,
+            env,
+            labels,
+            publish,
+            volume,
+            network,
+            sandbox,
+            image,
+            command,
+        },
+        Cmd::Container(ContainerCmd::Start { id }) => Cmd::Start { id },
+        Cmd::Container(ContainerCmd::Stop { time, id }) => Cmd::Stop { time, id },
+        Cmd::Container(ContainerCmd::Rm { force, id }) => Cmd::Rm { force, id },
+        Cmd::Container(ContainerCmd::Inspect { id }) => Cmd::Inspect { id },
+        Cmd::Container(ContainerCmd::Logs { since, follow, id }) => Cmd::Logs { since, follow, id },
+        Cmd::Container(ContainerCmd::Exec {
+            env,
+            tty,
+            interactive,
+            id,
+            command,
+        }) => Cmd::Exec {
+            env,
+            tty,
+            interactive,
+            id,
+            command,
+        },
+        other => other,
+    }
 }
 
 /// Phase 10: generate a self-signed CA + server-leaf + client-leaf bundle into
@@ -2747,6 +2884,333 @@ fn default_socket_path() -> PathBuf {
     PathBuf::from(format!("/tmp/linpodx-{uid}.sock"))
 }
 
+// ---------------------------------------------------------------------------
+// Phase 18 Stream D — `linpodx daemon {start, stop, status, logs}` handler
+// ---------------------------------------------------------------------------
+
+/// Fast-path entry for the daemon-lifecycle subcommands. Avoids the
+/// `Client::connect` step in `main()` because none of these need (or
+/// expect) an already-running daemon to talk to.
+async fn handle_daemon_mgmt(cli: Cli) -> Result<()> {
+    use crate::commands::daemon_mgmt::{
+        default_log_file, default_pid_file, pid_alive, pid_is_linpodx_daemon, read_pid_file,
+        resolve_daemon_binary, send_sigterm, wait_for_exit, StatusOutcome,
+    };
+    use std::time::Duration;
+
+    let socket = cli.socket.clone().unwrap_or_else(default_socket_path);
+
+    match cli.cmd {
+        Cmd::Daemon(DaemonCmd::Start(args)) => {
+            let pid_file = args.pid_file.clone().unwrap_or_else(default_pid_file);
+
+            if let Some(existing) = read_pid_file(&pid_file)? {
+                if pid_alive(existing) && pid_is_linpodx_daemon(existing) {
+                    println!(
+                        "linpodx-daemon already running (pid {existing}, pid-file {})",
+                        pid_file.display()
+                    );
+                    return Ok(());
+                }
+            }
+
+            let binary = resolve_daemon_binary(args.daemon_bin.as_deref())?;
+            let log_file = args.log_file.clone().unwrap_or_else(default_log_file);
+
+            if args.fork {
+                if let Some(dir) = log_file.parent() {
+                    let _ = std::fs::create_dir_all(dir);
+                }
+                if let Some(dir) = pid_file.parent() {
+                    let _ = std::fs::create_dir_all(dir);
+                }
+                let log = std::fs::OpenOptions::new()
+                    .create(true)
+                    .append(true)
+                    .open(&log_file)
+                    .with_context(|| format!("opening daemon log file {}", log_file.display()))?;
+                let mut cmd = std::process::Command::new(&binary);
+                cmd.arg("--fork")
+                    .arg("--pid-file")
+                    .arg(&pid_file)
+                    .env("LINPODX_SOCKET", &socket)
+                    .stdout(std::process::Stdio::from(log.try_clone()?))
+                    .stderr(std::process::Stdio::from(log))
+                    .stdin(std::process::Stdio::null());
+                let child = cmd
+                    .spawn()
+                    .with_context(|| format!("spawning {} --fork", binary.display()))?;
+                let _ = child.id();
+                let start = std::time::Instant::now();
+                let timeout = Duration::from_secs(5);
+                while start.elapsed() < timeout {
+                    if socket.exists() {
+                        break;
+                    }
+                    tokio::time::sleep(Duration::from_millis(100)).await;
+                }
+                if !socket.exists() {
+                    bail!(
+                        "daemon did not create socket at {} within {:?} (check {})",
+                        socket.display(),
+                        timeout,
+                        log_file.display()
+                    );
+                }
+                let pid = read_pid_file(&pid_file)?;
+                println!(
+                    "linpodx-daemon started (pid {}, socket {}, log {})",
+                    pid.map(|p| p.to_string())
+                        .unwrap_or_else(|| "?".to_string()),
+                    socket.display(),
+                    log_file.display()
+                );
+                Ok(())
+            } else {
+                let mut cmd = std::process::Command::new(&binary);
+                cmd.arg("--pid-file")
+                    .arg(&pid_file)
+                    .env("LINPODX_SOCKET", &socket);
+                let status = cmd
+                    .status()
+                    .with_context(|| format!("spawning {} (foreground)", binary.display()))?;
+                if !status.success() {
+                    let code = status.code().unwrap_or(1);
+                    std::process::exit(code);
+                }
+                Ok(())
+            }
+        }
+        Cmd::Daemon(DaemonCmd::Stop(args)) => {
+            let pid_file = args.pid_file.clone().unwrap_or_else(default_pid_file);
+            let pid = match read_pid_file(&pid_file)? {
+                Some(p) => p,
+                None => {
+                    println!("daemon not running (no pid-file at {})", pid_file.display());
+                    return Ok(());
+                }
+            };
+            if !pid_alive(pid) {
+                let _ = std::fs::remove_file(&pid_file);
+                println!("daemon not running (pid {pid} dead; removed stale pid-file)");
+                return Ok(());
+            }
+            if !pid_is_linpodx_daemon(pid) {
+                bail!(
+                    "pid-file {} points at pid {pid} which is not linpodx-daemon — refusing to kill",
+                    pid_file.display()
+                );
+            }
+            send_sigterm(pid)?;
+            let timeout = Duration::from_secs(args.timeout);
+            if wait_for_exit(pid, timeout).await? {
+                let _ = std::fs::remove_file(&pid_file);
+                println!("linpodx-daemon stopped (pid {pid})");
+                Ok(())
+            } else {
+                bail!(
+                    "daemon (pid {pid}) did not exit within {}s — try again or kill -9 manually",
+                    args.timeout
+                );
+            }
+        }
+        Cmd::Daemon(DaemonCmd::Status(args)) => {
+            let pid_file = args.pid_file.clone().unwrap_or_else(default_pid_file);
+            let socket = args.socket.clone().unwrap_or(socket);
+            let outcome = probe_daemon_status(&pid_file, &socket).await;
+            if args.json {
+                let json = status_outcome_to_json(&outcome, &pid_file);
+                println!("{}", serde_json::to_string_pretty(&json)?);
+            } else {
+                match &outcome {
+                    StatusOutcome::Running { pid, socket } => {
+                        println!(
+                            "running (pid {pid}, socket {}, pid-file {})",
+                            socket.display(),
+                            pid_file.display()
+                        );
+                    }
+                    StatusOutcome::Unhealthy {
+                        pid,
+                        socket,
+                        reason,
+                    } => {
+                        println!(
+                            "unhealthy (pid {pid}, socket {}): {reason}",
+                            socket.display()
+                        );
+                    }
+                    StatusOutcome::StaleSocket { socket } => {
+                        println!(
+                            "stale (socket {} present but no live daemon)",
+                            socket.display()
+                        );
+                    }
+                    StatusOutcome::Stopped => {
+                        println!("stopped");
+                    }
+                }
+            }
+            let code: i32 = match outcome {
+                StatusOutcome::Running { .. } => 0,
+                StatusOutcome::Stopped => 3,
+                StatusOutcome::StaleSocket { .. } | StatusOutcome::Unhealthy { .. } => 4,
+            };
+            if code != 0 {
+                std::process::exit(code);
+            }
+            Ok(())
+        }
+        Cmd::Daemon(DaemonCmd::Logs(args)) => {
+            let file = args.file.clone().unwrap_or_else(default_log_file);
+            tail_log_file(&file, args.tail, args.follow).await
+        }
+        _ => unreachable!("handle_daemon_mgmt called with non-lifecycle subcommand"),
+    }
+}
+
+/// Try the file-on-disk probe (pid-file present + alive + comm matches) and
+/// the socket-exists probe, then combine into a `StatusOutcome`. When both a
+/// live pid and a socket are present we also fire a lightweight `Version`
+/// IPC ping so the result reflects whether the daemon is *responsive*.
+async fn probe_daemon_status(
+    pid_file: &Path,
+    socket: &Path,
+) -> crate::commands::daemon_mgmt::StatusOutcome {
+    use crate::commands::daemon_mgmt::{
+        pid_alive, pid_is_linpodx_daemon, read_pid_file, StatusOutcome,
+    };
+
+    let pid = read_pid_file(pid_file).ok().flatten();
+    let socket_exists = socket.exists();
+
+    match (pid, socket_exists) {
+        (Some(p), true) if pid_alive(p) && pid_is_linpodx_daemon(p) => {
+            match Client::connect(socket).await {
+                Ok(mut c) => match c
+                    .call::<linpodx_common::ipc::responses::VersionResponse>(
+                        linpodx_common::ipc::Method::Version,
+                    )
+                    .await
+                {
+                    Ok(_) => StatusOutcome::Running {
+                        pid: p,
+                        socket: socket.to_path_buf(),
+                    },
+                    Err(e) => StatusOutcome::Unhealthy {
+                        pid: p,
+                        socket: socket.to_path_buf(),
+                        reason: format!("Version IPC failed: {e}"),
+                    },
+                },
+                Err(e) => StatusOutcome::Unhealthy {
+                    pid: p,
+                    socket: socket.to_path_buf(),
+                    reason: format!("socket connect failed: {e}"),
+                },
+            }
+        }
+        (Some(_), _) | (None, true) => StatusOutcome::StaleSocket {
+            socket: socket.to_path_buf(),
+        },
+        (None, false) => StatusOutcome::Stopped,
+    }
+}
+
+/// Render a `StatusOutcome` as a JSON-friendly value. Field naming mirrors
+/// `responses::DaemonMgmtStatusResponse` so the surfaces stay easy to diff.
+fn status_outcome_to_json(
+    outcome: &crate::commands::daemon_mgmt::StatusOutcome,
+    pid_file: &Path,
+) -> serde_json::Value {
+    use crate::commands::daemon_mgmt::StatusOutcome;
+    use serde_json::json;
+    match outcome {
+        StatusOutcome::Running { pid, socket } => json!({
+            "state": "running",
+            "pid": pid,
+            "pid_file": pid_file,
+            "socket_path": socket,
+        }),
+        StatusOutcome::Unhealthy {
+            pid,
+            socket,
+            reason,
+        } => json!({
+            "state": "unhealthy",
+            "pid": pid,
+            "pid_file": pid_file,
+            "socket_path": socket,
+            "reason": reason,
+        }),
+        StatusOutcome::StaleSocket { socket } => json!({
+            "state": "stale_socket",
+            "pid_file": pid_file,
+            "socket_path": socket,
+        }),
+        StatusOutcome::Stopped => json!({
+            "state": "stopped",
+            "pid_file": pid_file,
+        }),
+    }
+}
+
+/// Print the last `tail` lines of `path` and (when `follow`) keep printing
+/// new bytes appended to the file. SIGINT breaks the follow loop cleanly.
+async fn tail_log_file(path: &Path, tail: usize, follow: bool) -> Result<()> {
+    use tokio::io::{AsyncBufReadExt, AsyncSeekExt, BufReader};
+
+    if !path.exists() {
+        bail!(
+            "log file {} does not exist — daemon may be running in the foreground or under journald.\n\
+             Try: journalctl --user -u linpodx -f",
+            path.display()
+        );
+    }
+
+    let content = std::fs::read_to_string(path)
+        .with_context(|| format!("reading log file {}", path.display()))?;
+    let lines: Vec<&str> = content.lines().collect();
+    let start = lines.len().saturating_sub(tail);
+    for l in &lines[start..] {
+        println!("{l}");
+    }
+
+    if !follow {
+        return Ok(());
+    }
+
+    let mut file = tokio::fs::File::open(path)
+        .await
+        .with_context(|| format!("re-opening log file for follow {}", path.display()))?;
+    file.seek(std::io::SeekFrom::End(0))
+        .await
+        .context("seeking to end for follow")?;
+    let mut reader = BufReader::new(file);
+    let mut sigint = tokio::signal::unix::signal(tokio::signal::unix::SignalKind::interrupt())
+        .context("installing SIGINT handler")?;
+
+    loop {
+        let mut line = String::new();
+        tokio::select! {
+            res = reader.read_line(&mut line) => {
+                match res {
+                    Ok(0) => {
+                        tokio::time::sleep(std::time::Duration::from_millis(200)).await;
+                    }
+                    Ok(_) => {
+                        print!("{line}");
+                    }
+                    Err(e) => bail!("reading log file: {e}"),
+                }
+            }
+            _ = sigint.recv() => {
+                return Ok(());
+            }
+        }
+    }
+}
+
 async fn handle_plugin(client: &mut Client, fmt: OutputFormat, cmd: PluginCmd) -> Result<()> {
     use linpodx_common::ipc::responses::{
         PluginInstallResponse, PluginListResponse, PluginRemoveResponse, PluginToggleResponse,
@@ -4018,6 +4482,207 @@ mod tests {
                 assert_eq!(t.max, Some(3));
             }
             other => panic!("expected PinClient Tofu, got {other:?}"),
+        }
+    }
+
+    // ---- Phase 18 Stream B: docker-compat container group + plural aliases + completion ----
+
+    #[test]
+    fn parse_container_ls_with_all_flag() {
+        let cli = Cli::parse_from(["linpodx", "container", "ls", "--all"]);
+        match cli.cmd {
+            Cmd::Container(ContainerCmd::Ls { all }) => assert!(all),
+            other => panic!("expected Container::Ls, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn parse_container_ls_default_running_only() {
+        let cli = Cli::parse_from(["linpodx", "container", "ls"]);
+        match cli.cmd {
+            Cmd::Container(ContainerCmd::Ls { all }) => assert!(!all),
+            other => panic!("expected Container::Ls, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn parse_container_run_inherits_flat_flags() {
+        let cli = Cli::parse_from([
+            "linpodx",
+            "container",
+            "run",
+            "--name",
+            "test",
+            "--rm",
+            "-e",
+            "FOO=bar",
+            "alpine:latest",
+            "echo",
+            "hi",
+        ]);
+        match cli.cmd {
+            Cmd::Container(ContainerCmd::Run {
+                name,
+                rm,
+                env,
+                image,
+                command,
+                ..
+            }) => {
+                assert_eq!(name.as_deref(), Some("test"));
+                assert!(rm);
+                assert_eq!(env, vec![("FOO".to_string(), "bar".to_string())]);
+                assert_eq!(image, "alpine:latest");
+                assert_eq!(command, vec!["echo".to_string(), "hi".to_string()]);
+            }
+            other => panic!("expected Container::Run, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn parse_container_exec_with_tty_and_interactive() {
+        let cli = Cli::parse_from([
+            "linpodx",
+            "container",
+            "exec",
+            "-it",
+            "my-container",
+            "--",
+            "sh",
+        ]);
+        match cli.cmd {
+            Cmd::Container(ContainerCmd::Exec {
+                tty,
+                interactive,
+                id,
+                command,
+                ..
+            }) => {
+                assert!(tty);
+                assert!(interactive);
+                assert_eq!(id, "my-container");
+                assert_eq!(command, vec!["sh".to_string()]);
+            }
+            other => panic!("expected Container::Exec, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn flatten_container_ls_becomes_flat_ps() {
+        let cli = Cli::parse_from(["linpodx", "container", "ls", "-a"]);
+        match flatten_container_cmd(cli.cmd) {
+            Cmd::Ps { all } => assert!(all),
+            other => panic!("expected flat Cmd::Ps, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn flatten_container_logs_preserves_follow_and_since() {
+        let cli = Cli::parse_from([
+            "linpodx",
+            "container",
+            "logs",
+            "--since",
+            "2026-05-15T00:00:00Z",
+            "-f",
+            "my-id",
+        ]);
+        match flatten_container_cmd(cli.cmd) {
+            Cmd::Logs { since, follow, id } => {
+                assert_eq!(since.as_deref(), Some("2026-05-15T00:00:00Z"));
+                assert!(follow);
+                assert_eq!(id, "my-id");
+            }
+            other => panic!("expected flat Cmd::Logs, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn flatten_non_container_variant_passes_through_unchanged() {
+        let cli = Cli::parse_from(["linpodx", "version"]);
+        match flatten_container_cmd(cli.cmd) {
+            Cmd::Version => {}
+            other => panic!("expected flat Cmd::Version, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn parse_image_singular_alias_resolves_to_images_subcommand() {
+        // `image ls` should reach the same `ImagesCmd::Ls` value as `images ls`.
+        let cli = Cli::parse_from(["linpodx", "image", "ls"]);
+        match cli.cmd {
+            Cmd::Images(ImagesCmd::Ls { all, dangling }) => {
+                assert!(!all);
+                assert!(!dangling);
+            }
+            other => panic!("expected Images::Ls, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn parse_volumes_plural_alias_resolves_to_volume_subcommand() {
+        let cli = Cli::parse_from(["linpodx", "volumes", "ls"]);
+        match cli.cmd {
+            Cmd::Volume(VolumeCmd::Ls) => {}
+            other => panic!("expected Volume::Ls, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn parse_networks_plural_alias_resolves_to_network_subcommand() {
+        let cli = Cli::parse_from(["linpodx", "networks", "ls"]);
+        match cli.cmd {
+            Cmd::Network(NetworkCmd::Ls) => {}
+            other => panic!("expected Network::Ls, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn parse_completion_accepts_each_clap_complete_shell() {
+        for (arg, expected) in [
+            ("bash", CompletionShell::Bash),
+            ("zsh", CompletionShell::Zsh),
+            ("fish", CompletionShell::Fish),
+            ("powershell", CompletionShell::PowerShell),
+            ("elvish", CompletionShell::Elvish),
+        ] {
+            let cli = Cli::parse_from(["linpodx", "completion", arg]);
+            match cli.cmd {
+                Cmd::Completion { shell } => assert_eq!(shell, expected, "{arg}"),
+                other => panic!("expected Completion for {arg}, got {other:?}"),
+            }
+        }
+    }
+
+    #[test]
+    fn completion_render_produces_non_empty_bash_script() {
+        let mut buf: Vec<u8> = Vec::new();
+        crate::commands::completion::render::<Cli, _>(CompletionShell::Bash, &mut buf);
+        let s = String::from_utf8(buf).expect("bash completion is valid utf-8");
+        assert!(
+            s.contains("linpodx"),
+            "completion script must mention binary name"
+        );
+        // bash completion uses `complete -F`. zsh / fish / powershell wrappers
+        // use different markers; this test pins the bash dialect we ship.
+        assert!(
+            s.contains("complete "),
+            "bash completion script must call `complete`"
+        );
+    }
+
+    #[test]
+    fn completion_render_covers_all_shells_without_panic() {
+        for shell in [
+            CompletionShell::Bash,
+            CompletionShell::Zsh,
+            CompletionShell::Fish,
+            CompletionShell::PowerShell,
+            CompletionShell::Elvish,
+        ] {
+            let mut buf: Vec<u8> = Vec::new();
+            crate::commands::completion::render::<Cli, _>(shell, &mut buf);
+            assert!(!buf.is_empty(), "{shell:?} produced an empty script");
         }
     }
 }

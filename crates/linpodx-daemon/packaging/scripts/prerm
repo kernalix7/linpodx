@@ -1,0 +1,10 @@
+#!/bin/sh
+# Phase 18 — prerm hook. Stops the unit if it was enabled so the binary can be
+# safely removed. Silent no-op when the unit is not active.
+set -e
+
+if [ -d /run/systemd/system ] && systemctl is-active --quiet linpodx-daemon.service 2>/dev/null; then
+    systemctl stop linpodx-daemon.service || true
+fi
+
+exit 0

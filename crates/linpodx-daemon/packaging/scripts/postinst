@@ -1,0 +1,12 @@
+#!/bin/sh
+# Phase 18 — postinst hook for the linpodx-daemon .deb.
+# Reloads systemd so the unit shipped under /lib/systemd/system is picked up.
+# The unit is intentionally not enabled by default; users opt in with
+# `systemctl enable --now linpodx-daemon`.
+set -e
+
+if [ -d /run/systemd/system ]; then
+    systemctl daemon-reload || true
+fi
+
+exit 0

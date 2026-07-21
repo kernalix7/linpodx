@@ -13,10 +13,30 @@ name = "linpodx"
 path = "src/main.rs"
 
 [package.metadata.generate-rpm]
+# Phase 18 — runtime requires for the .rpm. Podman is the container runtime;
+# sqlite is loaded dynamically by the daemon (and the CLI talks to the daemon).
+requires = { podman = ">= 4.6", "sqlite-libs" = "*" }
 assets = [
     { source = "target/release/linpodx", dest = "/usr/bin/linpodx", mode = "755" },
     { source = "README.md", dest = "/usr/share/doc/linpodx-cli/README.md", mode = "644", doc = true },
     { source = "LICENSE", dest = "/usr/share/doc/linpodx-cli/LICENSE", mode = "644", doc = true },
+]
+
+# Phase 18 — Debian/Ubuntu packaging metadata. `cargo deb` reads this section to
+# produce a runnable .deb. `depends` is comma-separated per dpkg conventions.
+# Pin podman >= 4.6 (lowest version the runtime crate targets).
+[package.metadata.deb]
+maintainer = "Kim DaeHyun <kernalix7@kodenet.io>"
+copyright = "2026, Kim DaeHyun <kernalix7@kodenet.io>"
+license-file = ["../../LICENSE", "0"]
+extended-description = "linpodx CLI — Linux-native container management with AI-agent sandboxing. Talks to linpodx-daemon over a Unix socket."
+section = "admin"
+priority = "optional"
+depends = "podman (>= 4.6), libsqlite3-0, libc6"
+assets = [
+    ["target/release/linpodx", "usr/bin/", "755"],
+    ["../../README.md", "usr/share/doc/linpodx-cli/README.md", "644"],
+    ["../../LICENSE", "usr/share/doc/linpodx-cli/copyright", "644"],
 ]
 
 [dependencies]
@@ -29,6 +49,8 @@ serde_json = { workspace = true }
 serde_norway = { workspace = true }
 anyhow = { workspace = true }
 clap = { workspace = true }
+# Phase 18 Stream B: `linpodx completion <shell>` renders shell completion scripts.
+clap_complete = { workspace = true }
 comfy-table = { workspace = true }
 tracing = { workspace = true }
 tracing-subscriber = { workspace = true }

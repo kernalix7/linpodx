@@ -1,0 +1,14 @@
+#!/bin/sh
+# Phase 18 — postinst hook for the linpodx-netfilter-helper .deb.
+# The helper needs CAP_NET_ADMIN + CAP_SYS_ADMIN to program nftables on behalf
+# of the unprivileged daemon. Granting these via file capabilities avoids
+# requiring setuid-root or a long-lived elevated daemon.
+set -e
+
+if command -v setcap >/dev/null 2>&1 && [ -x /usr/bin/linpodx-netfilter-helper ]; then
+    setcap cap_net_admin,cap_sys_admin+ep /usr/bin/linpodx-netfilter-helper || true
+fi
+
+install -d -m 0755 /run/linpodx 2>/dev/null || true
+
+exit 0

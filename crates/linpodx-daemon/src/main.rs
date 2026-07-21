@@ -98,6 +98,31 @@ async fn main() -> Result<()> {
     let listener = UnixListener::bind(&socket_path)
         .with_context(|| format!("binding {}", socket_path.display()))?;
 
+    // Phase 18 Stream D — pid-file management. Honour `--pid-file` when
+    // explicitly set; otherwise infer the default when `--fork` was passed
+    // (the CLI's `linpodx daemon start --fork` path always passes both, so
+    // this branch is mostly a safety net for direct `linpodx-daemon` runs).
+    let pid_file_path: Option<std::path::PathBuf> = match (&cfg.pid_file, cfg.fork) {
+        (Some(p), _) => Some(p.clone()),
+        (None, true) => Some(crate::config::default_pid_file_path()),
+        (None, false) => None,
+    };
+    if let Some(ref pf) = pid_file_path {
+        if let Some(parent) = pf.parent() {
+            if !parent.as_os_str().is_empty() {
+                if let Err(e) = std::fs::create_dir_all(parent) {
+                    warn!(error = %e, pid_file = %pf.display(), "could not create pid-file parent");
+                }
+            }
+        }
+        let pid_str = format!("{}\n", std::process::id());
+        if let Err(e) = std::fs::write(pf, pid_str) {
+            warn!(error = %e, pid_file = %pf.display(), "could not write pid-file (continuing)");
+        } else {
+            info!(pid_file = %pf.display(), pid = std::process::id(), "pid-file written");
+        }
+    }
+
     let event_bus = Arc::new(EventBus::new(1024));
     let publisher: Arc<dyn linpodx_common::events::EventPublisher> = event_bus.clone();
     let approval_registry = Arc::new(ApprovalRegistry::new());
@@ -414,6 +439,18 @@ async fn main() -> Result<()> {
     // Best-effort cleanup of the socket file.
     if let Err(e) = std::fs::remove_file(&socket_path) {
         warn!(error = %e, "could not remove socket file at shutdown");
+    }
+    // Phase 18 Stream D — pair the pid-file unlink with the socket cleanup
+    // so `linpodx daemon status` after a clean stop reports `stopped`
+    // rather than `stale-socket`.
+    if let Some(ref pf) = pid_file_path {
+        if let Err(e) = std::fs::remove_file(pf) {
+            // Missing-file is fine (the user may have removed it manually);
+            // log everything else.
+            if e.kind() != std::io::ErrorKind::NotFound {
+                warn!(error = %e, pid_file = %pf.display(), "could not remove pid-file at shutdown");
+            }
+        }
     }
     if let Err(e) = db_arc.close_clone().await {
         warn!(error = %e, "db close errored");

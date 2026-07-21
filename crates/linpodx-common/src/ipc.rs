@@ -267,6 +267,11 @@ pub enum Method {
     DaemonPinClientAdd(DaemonPinClientAddParams),
     DaemonPinClientList,
     DaemonPinClientRemove(DaemonPinClientRemoveParams),
+    // Phase 18 — first-run reliability (Stream C / Stream D fill the dispatch bodies).
+    DoctorRun(DoctorRunParams),
+    DaemonMgmtStart(DaemonMgmtStartParams),
+    DaemonMgmtStop,
+    DaemonMgmtStatus,
 }
 
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
@@ -755,6 +760,38 @@ pub struct DaemonPinClientRemoveParams {
     /// Lowercase hex SHA-256 fingerprint to remove. Pass exactly what
     /// `pin-client list` printed in its `fingerprint` column.
     pub fingerprint: String,
+}
+
+// ----- Phase 18: first-run reliability -----
+
+/// Parameters for `Method::DoctorRun` (Stream C — linpodx doctor).
+///
+/// `doctor` walks a fixed environment-readiness checklist (podman binary +
+/// version, rootless setup, cgroup v2 availability, socket permissions, etc.)
+/// and emits either a human-readable summary or a machine-parsable JSON
+/// document. Stream C fills the dispatch body in
+/// `linpodx-daemon/src/dispatch.rs`.
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+pub struct DoctorRunParams {
+    /// When `true`, the daemon returns a structured `DoctorRunResponse` JSON
+    /// instead of a pre-formatted text block.
+    #[serde(default)]
+    pub json: bool,
+}
+
+/// Parameters for `Method::DaemonMgmtStart` (Stream D — daemon lifecycle).
+///
+/// Asks the running daemon (if any) to spawn or take ownership of a managed
+/// daemon process. Stream D fills the dispatch body.
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+pub struct DaemonMgmtStartParams {
+    /// Whether to fork a detached background daemon (`linpodx daemon start --fork`).
+    #[serde(default)]
+    pub fork: bool,
+    /// Optional override of the pid-file location. `None` means use the
+    /// daemon's compiled-in default.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub pid_file: Option<std::path::PathBuf>,
 }
 
 // ----- K8s write-side (Phase 13) -----
@@ -1993,6 +2030,82 @@ pub mod responses {
     pub struct DaemonPinClientRemoveResponse {
         pub fingerprint: String,
         pub removed: bool,
+    }
+
+    // ----- Phase 18: first-run reliability -----
+
+    /// Outcome of a single doctor check. `Pass` = ready, `Warn` = degraded but
+    /// usable, `Fail` = blocker the user must resolve before linpodx will work.
+    #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+    #[serde(rename_all = "snake_case")]
+    pub enum DoctorOutcome {
+        Pass,
+        Warn,
+        Fail,
+    }
+
+    #[derive(Debug, Clone, Serialize, Deserialize)]
+    pub struct DoctorCheck {
+        /// Stable check identifier (e.g. `"podman-installed"`, `"cgroup-v2"`).
+        pub id: String,
+        pub label: String,
+        pub outcome: DoctorOutcome,
+        /// Free-form human-readable detail (e.g. detected version, suggested fix).
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        pub detail: Option<String>,
+        /// Optional documentation pointer (relative path under `docs/` or URL).
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        pub fix_hint: Option<String>,
+    }
+
+    #[derive(Debug, Clone, Serialize, Deserialize)]
+    pub struct DoctorRunResponse {
+        pub checks: Vec<DoctorCheck>,
+        pub pass_count: u32,
+        pub warn_count: u32,
+        pub fail_count: u32,
+    }
+
+    /// Lifecycle of the daemon process from a managing CLI's point of view.
+    #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+    #[serde(rename_all = "snake_case")]
+    pub enum DaemonMgmtState {
+        Running,
+        Stopped,
+        Unknown,
+    }
+
+    #[derive(Debug, Clone, Serialize, Deserialize)]
+    pub struct DaemonMgmtStartResponse {
+        pub state: DaemonMgmtState,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        pub pid: Option<u32>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        pub pid_file: Option<std::path::PathBuf>,
+        /// Free-form message — e.g. "started", "already running", or a hint.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        pub message: Option<String>,
+    }
+
+    #[derive(Debug, Clone, Serialize, Deserialize)]
+    pub struct DaemonMgmtStopResponse {
+        pub state: DaemonMgmtState,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        pub message: Option<String>,
+    }
+
+    #[derive(Debug, Clone, Serialize, Deserialize)]
+    pub struct DaemonMgmtStatusResponse {
+        pub state: DaemonMgmtState,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        pub pid: Option<u32>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        pub pid_file: Option<std::path::PathBuf>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        pub socket_path: Option<std::path::PathBuf>,
+        /// Daemon uptime in seconds, when discoverable.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        pub uptime_secs: Option<u64>,
     }
 }
 

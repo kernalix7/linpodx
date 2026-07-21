@@ -58,3 +58,11 @@ harness = false
 [[bench]]
 name = "cgroup"
 harness = false
+
+# Phase 18 Stream G — explicit registration of the ignore-gated real-podman
+# runtime smoke harness. Cargo auto-discovers `tests/*.rs` so this entry is
+# redundant for builds; we keep it so the Stream E CI podman-integration job
+# can target the file by name without relying on auto-discovery.
+[[test]]
+name = "real_podman"
+path = "tests/real_podman.rs"
