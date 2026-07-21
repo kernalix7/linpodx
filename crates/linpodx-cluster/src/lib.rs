@@ -24,7 +24,7 @@ pub use election::{
 };
 pub use k8s::K8sAdapter;
 pub use peer::PeerInfo;
-pub use raft_http::{raft_router, RaftHttpClient, RaftHttpFactory};
+pub use raft_http::{raft_router, raft_router_with_auth, RaftHttpClient, RaftHttpFactory};
 pub use store::PeerStore;
 
 use thiserror::Error;

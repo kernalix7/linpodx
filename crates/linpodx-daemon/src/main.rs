@@ -13,7 +13,7 @@ mod web_ui_local;
 
 use crate::approval::{ApprovalRegistry, PluginAwareApprovalGateway};
 use crate::config::DaemonConfig;
-use crate::dispatch::Dispatcher;
+use crate::dispatch::DispatcherBuilder;
 use crate::event_bus::EventBus;
 use anyhow::{Context, Result};
 use clap::Parser;
@@ -258,7 +258,20 @@ async fn main() -> Result<()> {
             bootstrap_single_node: true,
         };
         let result = if multi_node {
-            let factory = linpodx_cluster::RaftHttpFactory::new();
+            // Multi-node Raft reuses the remote bearer token so peer RPCs are
+            // authenticated. All cluster nodes must share the same
+            // `--remote-token`; without one the outbound RPCs are unsigned and
+            // peers (which enforce the token) will reject them with 401.
+            let factory = match cfg.remote_token.clone() {
+                Some(token) => linpodx_cluster::RaftHttpFactory::with_token(token),
+                None => {
+                    warn!(
+                        "multi-node raft enabled without --remote-token; peer RPCs will be \
+                         unauthenticated and rejected by token-enforcing peers"
+                    );
+                    linpodx_cluster::RaftHttpFactory::new()
+                }
+            };
             linpodx_cluster::RaftNode::start_with_network(
                 raft_cfg,
                 Some(vote_sink),
@@ -314,27 +327,26 @@ async fn main() -> Result<()> {
     // takes effect on the next handshake without restarting the daemon.
     let pin_store = crate::pin_store::PinnedClientStore::new(Arc::clone(&db_arc));
 
-    let dispatcher_builder = Dispatcher::new(
-        podman,
-        podman_bin,
-        podman_version,
-        Arc::clone(&event_bus),
-        Arc::clone(&sandbox),
-        Arc::clone(&approval_registry),
-        Arc::clone(&snapshot),
-        Arc::clone(&session),
-        Arc::clone(&bridges),
-        Arc::clone(&metrics),
-        Arc::clone(&audit_sink),
-        pin_store.clone(),
-    )
-    // Phase 13: hand the long-lived plugin registry to the dispatcher so the
-    // `ContainerCreate` arm can run the `runtime_injector` chain.
-    .with_plugin_registry(Arc::clone(&plugin_registry));
-    let dispatcher = Arc::new(match raft_node.clone() {
-        Some(n) => dispatcher_builder.with_raft(n),
-        None => dispatcher_builder,
-    });
+    let mut dispatcher_builder = DispatcherBuilder::new()
+        .podman(podman)
+        .podman_bin(podman_bin)
+        .podman_version(podman_version)
+        .event_bus(Arc::clone(&event_bus))
+        .sandbox(Arc::clone(&sandbox))
+        .approvals(Arc::clone(&approval_registry))
+        .snapshot(Arc::clone(&snapshot))
+        .session(Arc::clone(&session))
+        .bridges(Arc::clone(&bridges))
+        .metrics(Arc::clone(&metrics))
+        .audit(Arc::clone(&audit_sink))
+        .pin_store(pin_store.clone())
+        // Phase 13: hand the long-lived plugin registry to the dispatcher so the
+        // `ContainerCreate` arm can run the `runtime_injector` chain.
+        .plugin_registry(Arc::clone(&plugin_registry));
+    if let Some(n) = raft_node.clone() {
+        dispatcher_builder = dispatcher_builder.raft(n);
+    }
+    let dispatcher = Arc::new(dispatcher_builder.build()?);
 
     // Phase 15 Stream A — when multi-node Raft is enabled, periodically reconcile
     // gossip peer state into Raft membership: alive peers older than 5 s become
@@ -425,6 +437,37 @@ async fn main() -> Result<()> {
     }
 
     let shutdown = CancellationToken::new();
+
+    // Phase 9 gossip health loop — pings each peer's `/api/v1/version`, touches
+    // `last_seen` on success, and rolls peer statuses alive->stale->dead on
+    // persistent silence. Gated on the same flag that enables the cluster
+    // subsystem (`--cluster-raft`); without it peers joined via `cluster join`
+    // would never transition out of `alive`. Aborted cleanly when the daemon's
+    // shutdown token fires.
+    if cfg.cluster_raft {
+        let store =
+            linpodx_sandbox::ClusterStore::new(Arc::clone(&db_arc), Arc::clone(&audit_sink));
+        let store_arc: Arc<dyn linpodx_cluster::store::PeerStore> = Arc::new(store);
+        let http = linpodx_cluster::gossip::default_client();
+        let handle = linpodx_cluster::gossip::run_loop(
+            store_arc,
+            http,
+            linpodx_cluster::gossip::DEFAULT_GOSSIP_PERIOD_SECS,
+            linpodx_cluster::gossip::DEFAULT_STALE_AFTER_SECS,
+            linpodx_cluster::gossip::DEFAULT_DEAD_AFTER_SECS,
+        );
+        let gossip_shutdown = shutdown.clone();
+        tokio::spawn(async move {
+            gossip_shutdown.cancelled().await;
+            handle.abort();
+        });
+        info!(
+            period_secs = linpodx_cluster::gossip::DEFAULT_GOSSIP_PERIOD_SECS,
+            stale_after_secs = linpodx_cluster::gossip::DEFAULT_STALE_AFTER_SECS,
+            dead_after_secs = linpodx_cluster::gossip::DEFAULT_DEAD_AFTER_SECS,
+            "gossip health loop spawned"
+        );
+    }
 
     let shutdown_for_signals = shutdown.clone();
     tokio::spawn(async move {

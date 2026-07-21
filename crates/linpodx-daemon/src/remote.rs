@@ -233,9 +233,18 @@ pub(crate) fn build_router(state: Arc<RemoteState>) -> Router {
     // Phase 14 Stream C — mount the Raft HTTP transport when leader-elect
     // is enabled. The router is only added when the dispatcher actually
     // holds a `RaftNode` so single-node deployments don't expose the
-    // endpoints.
+    // endpoints. The peer RPCs are gated on the same bearer token as the
+    // rest of the remote surface (`--remote-token`); mismatches are rejected
+    // with 401 and audited via `RemoteAuthFailed`.
     if let Some(node) = raft_node {
-        router = router.nest("/cluster/raft", linpodx_cluster::raft_router(node));
+        router = router.nest(
+            "/cluster/raft",
+            linpodx_cluster::raft_router_with_auth(
+                node,
+                Some(state.token.clone()),
+                Some(Arc::clone(&state.audit)),
+            ),
+        );
     }
     router
 }
