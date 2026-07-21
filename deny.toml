@@ -25,16 +25,6 @@ ignore = [
     # local container compromise first, after which DoS on the resolver is the least
     # interesting capability. Fix requires 0.26.1.
     "RUSTSEC-2026-0119",
-    # rsa 0.9.10 — Marvin Attack timing sidechannel via sqlx-mysql. Workspace sqlx
-    # uses `default-features = false, features = ["runtime-tokio","sqlite","macros",
-    # "migrate"]` — sqlx-mysql is in Cargo.lock as a vestigial dep but NOT in any
-    # compiled artifact (`cargo tree -i rsa --target all` returns empty). Zero
-    # runtime exposure. Upstream has no fix.
-    "RUSTSEC-2023-0071",
-    # lru 0.12.5 — `IterMut` Stacked-Borrows violation in iced_glyphon's GUI font
-    # cache. GUI-only, never invoked in the security path (daemon, sandbox, runtime).
-    # Wait for iced to bump glyphon.
-    "RUSTSEC-2026-0002",
     # backoff 0.4.0 — unmaintained, transitive via kube-runtime. Will resolve when
     # kube bumps to ≥0.99 (drops backoff).
     "RUSTSEC-2025-0012",

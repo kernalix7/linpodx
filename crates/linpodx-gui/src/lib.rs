@@ -1,13 +1,15 @@
-#![forbid(unsafe_code)]
-
-//! linpodx desktop GUI — live read-only dashboard for containers / images / volumes / networks.
+//! Phase 24 — cxx-qt + Qt 6 desktop GUI for linpodx.
 //!
-//! Phase 1B introduces this as a read-only viewer: the daemon is the source of truth and pushes
-//! events on subscribe, the GUI re-renders. User actions still go through the CLI for now;
-//! action buttons land in a follow-up.
+//! This crate holds the Qt-linked surface: the `ffi` bridge to the C++
+//! `MainWindow` shell (`src/cpp/mainwindow.*`) and, from Stage 2, the
+//! QWidget-backed per-tab views + modal dialogs.
+//!
+//! The Qt-agnostic state model, IPC client, and event rings live in the
+//! sibling `linpodx-gui-core` crate (re-exported here as `core`) so they are
+//! unit-tested without linking Qt.
 
-pub mod connection;
-pub mod daemon_client;
-pub mod messages;
-pub mod state;
-pub mod views;
+pub mod ffi;
+
+/// Re-export the Qt-agnostic core so view code can refer to
+/// `linpodx_gui::core::state::App` etc. without a second `use` path.
+pub use linpodx_gui_core as core;

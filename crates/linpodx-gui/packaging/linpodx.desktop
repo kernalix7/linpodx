@@ -1,0 +1,10 @@
+[Desktop Entry]
+Type=Application
+Name=linpodx
+GenericName=Container Manager
+Comment=Linux-native container management
+Exec=/usr/bin/linpodx-gui
+Icon=utilities-terminal
+Terminal=false
+Categories=System;Utility;
+StartupNotify=true

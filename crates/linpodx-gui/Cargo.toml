@@ -6,18 +6,58 @@ rust-version.workspace = true
 license.workspace = true
 repository.workspace = true
 authors.workspace = true
-description = "linpodx desktop GUI — iced-based live dashboard"
+description = "linpodx desktop GUI — cxx-qt + Qt 6 native widget dashboard"
 
 [lib]
 path = "src/lib.rs"
+# Qt-linked: cxx-qt 0.8 static initializers (cxx_qt_init_crate_*) don't link
+# into rustc test harnesses, so a test target here fails to link even with zero
+# tests. All Qt-agnostic logic is unit-tested in `linpodx-gui-core`; the Qt
+# surface is verified by manual + CI smoke runs. So disable test/doctest here.
+test = false
+doctest = false
 
 [[bin]]
 name = "linpodx-gui"
 path = "src/main.rs"
+test = false
+
+# Phase 24 — RPM packaging for the cxx-qt + Qt 6 GUI. Runtime depends on the
+# Qt 6 base libraries (Core, Gui, Widgets) which Qt provides system-wide on
+# any modern Linux distro. DBus pulled in by Qt itself.
+[package.metadata.generate-rpm]
+requires = { "libQt6Core6" = "*", "libQt6Gui6" = "*", "libQt6Widgets6" = "*" }
+assets = [
+    { source = "target/release/linpodx-gui", dest = "/usr/bin/linpodx-gui", mode = "755" },
+    { source = "packaging/linpodx.desktop", dest = "/usr/share/applications/linpodx.desktop", mode = "644" },
+    { source = "README.md", dest = "/usr/share/doc/linpodx-gui/README.md", mode = "644", doc = true },
+    { source = "LICENSE", dest = "/usr/share/doc/linpodx-gui/LICENSE", mode = "644", doc = true },
+]
+
+# Phase 24 — Debian/Ubuntu packaging. depends matches the apt-side runtime
+# SONAMEs for Qt 6 base.
+[package.metadata.deb]
+maintainer = "Kim DaeHyun <kernalix7@kodenet.io>"
+copyright = "2026, Kim DaeHyun <kernalix7@kodenet.io>"
+license-file = ["../../LICENSE", "0"]
+extended-description = "linpodx desktop GUI — cxx-qt + Qt 6 widget dashboard for the linpodx container manager."
+section = "x11"
+priority = "optional"
+depends = "libqt6core6, libqt6gui6, libqt6widgets6, libc6"
+assets = [
+    ["target/release/linpodx-gui", "usr/bin/", "755"],
+    ["packaging/linpodx.desktop", "usr/share/applications/linpodx.desktop", "644"],
+    ["../../README.md", "usr/share/doc/linpodx-gui/README.md", "644"],
+    ["../../LICENSE", "usr/share/doc/linpodx-gui/copyright", "644"],
+]
 
 [dependencies]
 linpodx-common = { workspace = true }
-iced = { workspace = true }
+linpodx-gui-core = { workspace = true }
+cxx = { workspace = true }
+cxx-qt = { workspace = true }
+cxx-qt-lib = { workspace = true }
+cxx-qt-lib-extras = { workspace = true }
 tokio = { workspace = true }
 tracing = { workspace = true }
 tracing-subscriber = { workspace = true }
@@ -25,3 +65,6 @@ serde = { workspace = true }
 serde_json = { workspace = true }
 anyhow = { workspace = true }
 chrono = { workspace = true }
+
+[build-dependencies]
+cxx-qt-build = { workspace = true }
