@@ -68,29 +68,43 @@ pub fn apply(profile: &SandboxProfile, mut opts: CreateOptions) -> PolicyDecisio
 
     // 1. Mounts whitelist
     let mut mounts_allowed = Vec::new();
-    for vm in &opts.volumes {
-        if !mount_allowed(profile, vm) {
-            if gate_mounts {
-                pending_gates.push(PendingGate {
-                    category: ApprovalCategory::MountHostPath,
-                    payload: serde_json::json!({
-                        "source": vm.source,
-                        "destination": vm.destination,
-                        "read_only": vm.read_only,
-                    }),
-                });
-                // Still record it as "allowed once approved" for audit symmetry.
-                mounts_allowed.push(format!("{}->{} (pending)", vm.source, vm.destination));
-                continue;
+    for vm in &mut opts.volumes {
+        match mount_verdict(profile, vm) {
+            MountVerdict::NotAllowed => {
+                if gate_mounts {
+                    pending_gates.push(PendingGate {
+                        category: ApprovalCategory::MountHostPath,
+                        payload: serde_json::json!({
+                            "source": vm.source,
+                            "destination": vm.destination,
+                            "read_only": vm.read_only,
+                        }),
+                    });
+                    // Still record it as "allowed once approved" for audit symmetry.
+                    mounts_allowed.push(format!("{}->{} (pending)", vm.source, vm.destination));
+                    continue;
+                }
+                return PolicyDecision::Deny {
+                    reason: format!(
+                        "mount '{}->{}' is not permitted by profile '{}'",
+                        vm.source, vm.destination, profile.name
+                    ),
+                };
             }
-            return PolicyDecision::Deny {
-                reason: format!(
-                    "mount '{}->{}' is not permitted by profile '{}'",
-                    vm.source, vm.destination, profile.name
-                ),
-            };
+            MountVerdict::DowngradeToReadOnly => {
+                // The profile pins this mount read-only but the request asked for
+                // read-write. Enforce the profile by downgrading the mount to
+                // read-only (mirrors the `read_only_rootfs` force-downgrade in
+                // step 4) rather than denying, so the container still runs but
+                // with the constraint the profile author intended. The
+                // `(ro-enforced)` marker surfaces the override in the audit log.
+                vm.read_only = true;
+                mounts_allowed.push(format!("{}->{} (ro-enforced)", vm.source, vm.destination));
+            }
+            MountVerdict::Allowed => {
+                mounts_allowed.push(format!("{}->{}", vm.source, vm.destination));
+            }
         }
-        mounts_allowed.push(format!("{}->{}", vm.source, vm.destination));
     }
 
     // 2. Network policy
@@ -169,20 +183,38 @@ pub fn apply(profile: &SandboxProfile, mut opts: CreateOptions) -> PolicyDecisio
     }
 }
 
-fn mount_allowed(profile: &SandboxProfile, vm: &VolumeMount) -> bool {
-    profile.mounts.iter().any(|rule| {
+/// Outcome of matching a requested volume mount against the profile's mount rules.
+enum MountVerdict {
+    /// No rule matched the source+destination pair — the mount is off-whitelist.
+    NotAllowed,
+    /// A rule matched and permits the requested access mode as-is.
+    Allowed,
+    /// A rule matched but pins the mount read-only while the request asked for
+    /// read-write. The caller downgrades the mount to read-only to enforce the
+    /// profile.
+    DowngradeToReadOnly,
+}
+
+/// Match `vm` against `profile.mounts`. The first rule whose source+destination
+/// matches wins. A matched rule that pins `read_only = true` against a read-write
+/// request yields [`MountVerdict::DowngradeToReadOnly`] so the policy engine can
+/// force the mount read-only (a matched read-only request, or a read-write rule,
+/// is [`MountVerdict::Allowed`]).
+fn mount_verdict(profile: &SandboxProfile, vm: &VolumeMount) -> MountVerdict {
+    for rule in &profile.mounts {
         let src_match = match &rule.source {
             SourcePattern::Named { name } => vm.source == *name,
             SourcePattern::HostPath { path } => vm.source == *path,
         };
         let dst_match = rule.destination == vm.destination;
-        // If the rule pins read-only, the user can mount read-only or read-write. We
-        // intentionally upgrade-to-RO here is simpler than denial; for v0.1 we only check
-        // the structural match and let the runtime apply the rule's read_only flag later.
-        // That refinement (overriding vm.read_only when rule.read_only=true) is on the TODO
-        // list for Phase 2 sandbox v0.2.
-        src_match && dst_match
-    })
+        if src_match && dst_match {
+            if rule.read_only && !vm.read_only {
+                return MountVerdict::DowngradeToReadOnly;
+            }
+            return MountVerdict::Allowed;
+        }
+    }
+    MountVerdict::NotAllowed
 }
 
 fn sorted(set: HashSet<String>) -> Vec<String> {
@@ -272,6 +304,103 @@ mod tests {
         }];
         let decision = apply(&p, opts);
         assert!(matches!(decision, PolicyDecision::Allow(_)));
+    }
+
+    #[test]
+    fn ro_rule_downgrades_rw_request_to_read_only() {
+        // Profile pins the mount read-only; the request asks for read-write.
+        // The engine must enforce RO (downgrade), not silently allow RW.
+        let mut p = empty_profile("ro-pin");
+        p.mounts.push(MountRule {
+            source: SourcePattern::HostPath {
+                path: "/data".into(),
+            },
+            destination: "/data".into(),
+            read_only: true,
+        });
+        let mut opts = create_opts();
+        opts.volumes = vec![VolumeMount {
+            source: "/data".into(),
+            destination: "/data".into(),
+            read_only: false,
+        }];
+        match apply(&p, opts) {
+            PolicyDecision::Allow(d) => {
+                assert!(
+                    d.opts.volumes[0].read_only,
+                    "read-write mount must be forced read-only by the RO rule"
+                );
+                assert!(d
+                    .applied
+                    .mounts_allowed
+                    .iter()
+                    .any(|s| s.contains("ro-enforced")));
+            }
+            other => panic!("expected Allow, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn rw_rule_leaves_rw_request_untouched() {
+        // Profile allows read-write; the request asks read-write. No downgrade.
+        let mut p = empty_profile("rw-ok");
+        p.mounts.push(MountRule {
+            source: SourcePattern::HostPath {
+                path: "/data".into(),
+            },
+            destination: "/data".into(),
+            read_only: false,
+        });
+        let mut opts = create_opts();
+        opts.volumes = vec![VolumeMount {
+            source: "/data".into(),
+            destination: "/data".into(),
+            read_only: false,
+        }];
+        match apply(&p, opts) {
+            PolicyDecision::Allow(d) => {
+                assert!(
+                    !d.opts.volumes[0].read_only,
+                    "read-write request must stay read-write when the rule permits RW"
+                );
+                assert!(d
+                    .applied
+                    .mounts_allowed
+                    .iter()
+                    .all(|s| !s.contains("ro-enforced")));
+            }
+            other => panic!("expected Allow, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn ro_rule_leaves_ro_request_untouched() {
+        // Profile pins read-only; request already read-only — allowed, no marker.
+        let mut p = empty_profile("ro-ok");
+        p.mounts.push(MountRule {
+            source: SourcePattern::HostPath {
+                path: "/data".into(),
+            },
+            destination: "/data".into(),
+            read_only: true,
+        });
+        let mut opts = create_opts();
+        opts.volumes = vec![VolumeMount {
+            source: "/data".into(),
+            destination: "/data".into(),
+            read_only: true,
+        }];
+        match apply(&p, opts) {
+            PolicyDecision::Allow(d) => {
+                assert!(d.opts.volumes[0].read_only);
+                assert!(d
+                    .applied
+                    .mounts_allowed
+                    .iter()
+                    .all(|s| !s.contains("ro-enforced")));
+            }
+            other => panic!("expected Allow, got {other:?}"),
+        }
     }
 
     #[test]

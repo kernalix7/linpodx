@@ -1,0 +1,11 @@
+-- Audit hash-chain v2: cover ALL row fields, not just prev_hash + payload.
+--
+-- The v1 chain (migration 0003) computed this_hash = sha256(prev_hash || payload_json),
+-- which left `kind`, `ts`, `profile_name` and `container_id` unauthenticated — a DB
+-- writer could alter any of those columns without breaking verification, defeating the
+-- tamper-evident guarantee. v2 hashes a canonical, length-prefixed serialization of
+-- every field plus prev_hash.
+--
+-- `hash_version` lets old rows keep verifying under the v1 rule while new rows are
+-- written and verified under v2. Existing rows default to 1; the appender writes 2.
+ALTER TABLE audit_log ADD COLUMN hash_version INTEGER NOT NULL DEFAULT 1;

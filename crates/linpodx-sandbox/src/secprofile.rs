@@ -20,19 +20,66 @@
 //!   `checkmodule + semodule_package + semodule` toolchain (or with SELinux disabled)
 //!   skip this branch with a warn and `CompiledProfile::selinux_module_name` is `None`.
 //!
-//! Cache: each profile's last_updated timestamp gates re-compile. When a cached file
-//! is newer than the profile it is reused without rewriting.
+//! Cache: compiled artefacts are content-addressed — the filename embeds a digest of
+//! the exact bytes written (`{stem}.{digest}.seccomp.json` / `.apparmor`). A cache hit
+//! is only possible when the compiled output is byte-identical, so any change to the
+//! profile (e.g. tightening `syscall_allowlist`) lands on a fresh filename and never
+//! re-serves stale, looser artefacts. The `{stem}` is a sanitized profile name that
+//! cannot traverse out of the cache dir. Stale same-stem files are pruned best-effort.
 
 use crate::schema::{Capabilities, MountRule, NetworkPolicy, SandboxProfile, SourcePattern};
 use linpodx_common::audit_sink::{AuditSink, AuditSinkKind};
 use linpodx_common::error::{Error, Result};
 use serde::Serialize;
+use sha2::{Digest, Sha256};
 use std::path::{Path, PathBuf};
 use std::process::Stdio;
 use std::sync::Arc;
-use std::time::SystemTime;
 use tokio::process::Command;
 use tracing::{debug, instrument, warn};
+
+/// Maximum length of a sanitized profile-name cache stem. Caps pathological
+/// names so a filename can never blow past the OS limit.
+const MAX_CACHE_STEM_LEN: usize = 128;
+
+/// Sanitize a profile name into a safe filesystem stem. Keeps `[A-Za-z0-9_-]`
+/// verbatim and folds every other byte (path separators, `.`, whitespace, …) to
+/// `_`, then caps the length. This makes it impossible for a crafted profile name
+/// such as `../../etc/cron.d/x` or `/etc/shadow` to escape `cache_dir` when the
+/// stem is joined into it — every traversal / absolute-path character becomes a
+/// literal underscore. Mirrors (and is stricter than) `selinux::module_name`.
+fn sanitize_profile_stem(profile_name: &str) -> String {
+    let mut s = String::with_capacity(profile_name.len().min(MAX_CACHE_STEM_LEN));
+    for c in profile_name.chars() {
+        if s.len() >= MAX_CACHE_STEM_LEN {
+            break;
+        }
+        if c.is_ascii_alphanumeric() || c == '_' || c == '-' {
+            s.push(c);
+        } else {
+            s.push('_');
+        }
+    }
+    if s.is_empty() {
+        s.push('_');
+    }
+    s
+}
+
+/// Short (8-byte / 16-hex) content digest used to make cache filenames
+/// content-addressed: any change to the compiled artefact's bytes yields a
+/// different digest, so a tightened profile can never be served a stale, looser
+/// cached file.
+fn content_digest(bytes: &[u8]) -> String {
+    let mut h = Sha256::new();
+    h.update(bytes);
+    let full = h.finalize();
+    let mut s = String::with_capacity(16);
+    for b in &full[..8] {
+        s.push_str(&format!("{b:02x}"));
+    }
+    s
+}
 
 const APPARMOR_PROFILE_PREFIX: &str = "linpodx-";
 const SELINUX_MODULE_PREFIX: &str = "linpodx_";
@@ -199,20 +246,31 @@ impl SecProfileCompiler {
         profile: &SandboxProfile,
         syscalls: &[String],
     ) -> Result<PathBuf> {
-        let path = self.seccomp_path_for(&profile.name);
-        let cache_hit = is_cache_fresh(&path, last_updated_to_systime(profile)).await;
-        if cache_hit {
-            debug!(profile = %profile.name, path = %path.display(),
-                "secprofile: seccomp cache hit");
-            return Ok(path);
-        }
-
         let json = render_seccomp_json(syscalls);
         validate_seccomp_json(&json);
 
         let serialized = serde_json::to_string_pretty(&json).map_err(|e| Error::Runtime {
             message: format!("seccomp serialize: {e}"),
         })?;
+
+        // Content-addressed cache: the filename embeds a digest of the exact bytes
+        // we are about to write. A cache hit is therefore only possible when the
+        // compiled artefact is byte-identical, so any change to `syscall_allowlist`
+        // (e.g. tightening it) lands on a fresh filename and never re-serves the
+        // old, looser JSON.
+        let stem = sanitize_profile_stem(&profile.name);
+        let digest = content_digest(serialized.as_bytes());
+        let path = self.seccomp_path_for(&stem, &digest);
+        if tokio::fs::metadata(&path).await.is_ok() {
+            debug!(profile = %profile.name, path = %path.display(),
+                "secprofile: seccomp cache hit");
+            return Ok(path);
+        }
+
+        // Best-effort: drop stale seccomp artefacts for this profile so the cache
+        // dir doesn't accumulate a file per historical allowlist.
+        self.prune_stale(&stem, ".seccomp.json", &path).await;
+
         tokio::fs::write(&path, &serialized)
             .await
             .map_err(|e| Error::Runtime {
@@ -234,11 +292,16 @@ impl SecProfileCompiler {
     }
 
     async fn compile_apparmor(&self, profile: &SandboxProfile) -> std::io::Result<String> {
-        let path = self.apparmor_path_for(&profile.name);
         let name = apparmor_profile_name(&profile.name);
-        let cache_hit = is_cache_fresh(&path, last_updated_to_systime(profile)).await;
+        let body = render_apparmor_profile(profile, &name);
+        // Content-addressed cache (same rationale as seccomp): the digest of the
+        // rendered profile body keys the filename, so any profile change misses.
+        let stem = sanitize_profile_stem(&profile.name);
+        let digest = content_digest(body.as_bytes());
+        let path = self.apparmor_path_for(&stem, &digest);
+        let cache_hit = tokio::fs::metadata(&path).await.is_ok();
         if !cache_hit {
-            let body = render_apparmor_profile(profile, &name);
+            self.prune_stale(&stem, ".apparmor", &path).await;
             tokio::fs::write(&path, body.as_bytes()).await?;
         }
 
@@ -366,12 +429,42 @@ impl SecProfileCompiler {
             "secprofile: applied SELinux runtime fallback label '{SELINUX_RUNTIME_FALLBACK_LABEL}'");
     }
 
-    fn seccomp_path_for(&self, profile_name: &str) -> PathBuf {
-        self.cache_dir.join(format!("{profile_name}.seccomp.json"))
+    /// Build the seccomp cache path from an already-sanitized `stem` and a
+    /// content `digest`. Callers MUST pass a stem produced by
+    /// [`sanitize_profile_stem`] so a crafted profile name cannot traverse out of
+    /// `cache_dir`.
+    fn seccomp_path_for(&self, stem: &str, digest: &str) -> PathBuf {
+        self.cache_dir.join(format!("{stem}.{digest}.seccomp.json"))
     }
 
-    fn apparmor_path_for(&self, profile_name: &str) -> PathBuf {
-        self.cache_dir.join(format!("{profile_name}.apparmor"))
+    /// Build the AppArmor cache path from a sanitized `stem` and content
+    /// `digest`. See [`Self::seccomp_path_for`] for the sanitization contract.
+    fn apparmor_path_for(&self, stem: &str, digest: &str) -> PathBuf {
+        self.cache_dir.join(format!("{stem}.{digest}.apparmor"))
+    }
+
+    /// Best-effort removal of stale content-addressed cache files for `stem` that
+    /// carry a different digest than `keep`. Matches files named
+    /// `{stem}.<something>{suffix}` in `cache_dir`. Any I/O error is ignored — a
+    /// leftover stale file is a cosmetic disk-space issue, never a correctness one
+    /// (it is never served because the live path is content-addressed).
+    async fn prune_stale(&self, stem: &str, suffix: &str, keep: &Path) {
+        let prefix = format!("{stem}.");
+        let mut rd = match tokio::fs::read_dir(&self.cache_dir).await {
+            Ok(rd) => rd,
+            Err(_) => return,
+        };
+        while let Ok(Some(entry)) = rd.next_entry().await {
+            let p = entry.path();
+            if p == keep {
+                continue;
+            }
+            if let Some(fname) = p.file_name().and_then(|s| s.to_str()) {
+                if fname.starts_with(&prefix) && fname.ends_with(suffix) {
+                    let _ = tokio::fs::remove_file(&p).await;
+                }
+            }
+        }
     }
 
     fn selinux_te_path_for(&self, profile_name: &str) -> PathBuf {
@@ -627,25 +720,6 @@ pub mod selinux {
             }
         }
     }
-}
-
-fn last_updated_to_systime(profile: &SandboxProfile) -> SystemTime {
-    // SandboxProfile doesn't carry the loader-side last_updated timestamp — the
-    // SandboxManager keeps that with `LoadedProfile`. Until we plumb it through the
-    // compile call, presence of any cached file is treated as a hit (anchored at the
-    // UNIX epoch, so any mtime ≥ epoch passes). Manual invalidation = delete the file.
-    let _ = profile;
-    SystemTime::UNIX_EPOCH
-}
-
-async fn is_cache_fresh(path: &Path, profile_anchor: SystemTime) -> bool {
-    let Ok(meta) = tokio::fs::metadata(path).await else {
-        return false;
-    };
-    let Ok(mtime) = meta.modified() else {
-        return false;
-    };
-    mtime >= profile_anchor
 }
 
 /// OCI runtime-spec style seccomp profile. This is the shape podman + crun consume
@@ -967,6 +1041,69 @@ mod tests {
             mtime_before, mtime_after,
             "cache hit should not rewrite the file"
         );
+    }
+
+    #[test]
+    fn sanitize_profile_stem_neutralises_traversal_and_absolute_names() {
+        // Path traversal and absolute names must become inert single-segment stems.
+        assert_eq!(
+            sanitize_profile_stem("../../etc/cron.d/x"),
+            "______etc_cron_d_x"
+        );
+        assert_eq!(sanitize_profile_stem("/etc/shadow"), "_etc_shadow");
+        assert_eq!(sanitize_profile_stem("a/../b"), "a____b");
+        // Normal names are preserved verbatim.
+        assert_eq!(sanitize_profile_stem("ai-agent"), "ai-agent");
+        assert_eq!(sanitize_profile_stem("plain_1"), "plain_1");
+        // Empty / all-invalid names never yield an empty stem.
+        assert!(!sanitize_profile_stem("").is_empty());
+        assert!(!sanitize_profile_stem("///").is_empty());
+        // Length is capped.
+        assert!(sanitize_profile_stem(&"x".repeat(500)).len() <= MAX_CACHE_STEM_LEN);
+    }
+
+    #[tokio::test]
+    async fn compile_seccomp_traversal_name_stays_inside_cache_dir() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let cache_root = dir.path().to_path_buf();
+        let compiler = SecProfileCompiler::new(cache_root.clone(), Arc::new(NoopAuditSink));
+        let mut p = profile_fixture("../../../../tmp/pwned");
+        p.syscall_allowlist = Some(vec!["read".into()]);
+
+        let compiled = compiler.compile(&p).await.expect("compile");
+        let path = compiled.seccomp_path.expect("seccomp path");
+        // The written file must live directly inside the cache dir — no escape.
+        let canon_cache = std::fs::canonicalize(&cache_root).expect("canon cache");
+        let canon_parent =
+            std::fs::canonicalize(path.parent().expect("parent")).expect("canon parent");
+        assert_eq!(canon_parent, canon_cache);
+        assert!(path.exists());
+    }
+
+    #[tokio::test]
+    async fn compile_seccomp_changed_allowlist_uses_new_cache_file() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let compiler = SecProfileCompiler::new(dir.path().to_path_buf(), Arc::new(NoopAuditSink));
+        let mut p = profile_fixture("evolving");
+        p.syscall_allowlist = Some(vec!["read".into(), "write".into()]);
+        let first = compiler.compile(&p).await.expect("compile 1");
+        let path_a = first.seccomp_path.expect("path a");
+
+        // Tighten the allowlist — the cache must miss and a *different* file used.
+        p.syscall_allowlist = Some(vec!["read".into()]);
+        let second = compiler.compile(&p).await.expect("compile 2");
+        let path_b = second.seccomp_path.expect("path b");
+
+        assert_ne!(
+            path_a, path_b,
+            "a changed allowlist must produce a distinct content-addressed cache file"
+        );
+        assert!(path_b.exists());
+        let body = std::fs::read_to_string(&path_b).expect("read new seccomp");
+        let parsed: serde_json::Value = serde_json::from_str(&body).expect("parse");
+        assert_eq!(parsed["syscalls"][0]["names"].as_array().unwrap().len(), 1);
+        // Stale file for the old allowlist is pruned.
+        assert!(!path_a.exists(), "old cache file should be pruned");
     }
 
     #[tokio::test]

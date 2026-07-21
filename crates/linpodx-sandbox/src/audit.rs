@@ -282,11 +282,64 @@ pub struct VerifyReport {
     pub broken_at: Option<i64>,
 }
 
-/// Compute `sha256(prev_hash_hex || payload_json_canonical)` as 64-char hex.
+/// Chain hash version written by [`append`] and understood by [`verify_chain`].
+/// v1 rows (migration 0003) hashed only `prev_hash || payload`; v2 hashes every
+/// row field so `kind`, `ts`, `profile_name` and `container_id` are also
+/// tamper-evident.
+const HASH_VERSION_V2: i64 = 2;
+
+/// v1 chain hash — `sha256(prev_hash_hex || payload_json)` as 64-char hex.
+///
+/// Retained for verifying rows written before the v2 upgrade. It authenticates
+/// only `prev_hash` + `payload`, so the `kind` / `ts` / `profile_name` /
+/// `container_id` columns of a v1 row are NOT covered. New rows use
+/// [`hash_link_v2`].
 pub fn hash_link(prev_hash_hex: &str, payload_json: &str) -> String {
     let mut h = Sha256::new();
     h.update(prev_hash_hex.as_bytes());
     h.update(payload_json.as_bytes());
+    hex_encode(&h.finalize())
+}
+
+/// v2 chain hash — authenticates the full row: `prev_hash`, `kind`, `ts`,
+/// `profile_name`, `container_id` and `payload`.
+///
+/// Fields are fed through an unambiguous, domain-separated, length-prefixed
+/// encoding (each field prefixed by its byte length; `Option` fields tagged
+/// present/absent) so no combination of field values can collide with a
+/// different combination. Altering ANY covered column changes the hash, so a
+/// direct DB edit of `kind`, `ts`, `profile_name` or `container_id` now breaks
+/// verification just like a `payload` edit already did.
+pub fn hash_link_v2(
+    prev_hash_hex: &str,
+    kind: &str,
+    ts: &str,
+    profile_name: Option<&str>,
+    container_id: Option<&str>,
+    payload_json: &str,
+) -> String {
+    fn feed(h: &mut Sha256, bytes: &[u8]) {
+        h.update((bytes.len() as u64).to_le_bytes());
+        h.update(bytes);
+    }
+    fn feed_opt(h: &mut Sha256, v: Option<&str>) {
+        match v {
+            Some(s) => {
+                h.update([1u8]);
+                feed(h, s.as_bytes());
+            }
+            None => h.update([0u8]),
+        }
+    }
+
+    let mut h = Sha256::new();
+    h.update(b"linpodx.audit.v2");
+    feed(&mut h, prev_hash_hex.as_bytes());
+    feed(&mut h, kind.as_bytes());
+    feed(&mut h, ts.as_bytes());
+    feed_opt(&mut h, profile_name);
+    feed_opt(&mut h, container_id);
+    feed(&mut h, payload_json.as_bytes());
     hex_encode(&h.finalize())
 }
 
@@ -321,11 +374,18 @@ pub async fn append(
     .map_err(Error::Sqlx)?
     .unwrap_or_else(|| ZERO_HASH.to_string());
 
-    let this_hash = hash_link(&prev_hash, &payload_json);
+    let this_hash = hash_link_v2(
+        &prev_hash,
+        &kind_str,
+        &ts_str,
+        profile_name.as_deref(),
+        container_id.as_deref(),
+        &payload_json,
+    );
 
     let row: (i64,) = sqlx::query_as(
-        "INSERT INTO audit_log (ts, kind, profile_name, container_id, payload, prev_hash, this_hash)
-         VALUES (?, ?, ?, ?, ?, ?, ?) RETURNING seq",
+        "INSERT INTO audit_log (ts, kind, profile_name, container_id, payload, prev_hash, this_hash, hash_version)
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?) RETURNING seq",
     )
     .bind(&ts_str)
     .bind(&kind_str)
@@ -334,6 +394,7 @@ pub async fn append(
     .bind(&payload_json)
     .bind(&prev_hash)
     .bind(&this_hash)
+    .bind(HASH_VERSION_V2)
     .fetch_one(&mut *tx)
     .await
     .map_err(Error::Sqlx)?;
@@ -426,7 +487,8 @@ pub async fn verify_chain(db: &Database, since_seq: Option<i64>) -> Result<Verif
     };
 
     let rows = sqlx::query(
-        "SELECT seq, payload, prev_hash, this_hash FROM audit_log WHERE seq >= ? ORDER BY seq ASC",
+        "SELECT seq, ts, kind, profile_name, container_id, payload, prev_hash, this_hash, hash_version \
+         FROM audit_log WHERE seq >= ? ORDER BY seq ASC",
     )
     .bind(start)
     .fetch_all(db.pool())
@@ -440,15 +502,32 @@ pub async fn verify_chain(db: &Database, since_seq: Option<i64>) -> Result<Verif
     for row in rows {
         use sqlx::Row;
         let seq: i64 = row.try_get("seq").map_err(Error::Sqlx)?;
+        let ts: String = row.try_get("ts").map_err(Error::Sqlx)?;
+        let kind: String = row.try_get("kind").map_err(Error::Sqlx)?;
+        let profile_name: Option<String> = row.try_get("profile_name").map_err(Error::Sqlx)?;
+        let container_id: Option<String> = row.try_get("container_id").map_err(Error::Sqlx)?;
         let payload: String = row.try_get("payload").map_err(Error::Sqlx)?;
         let stored_prev: String = row.try_get("prev_hash").map_err(Error::Sqlx)?;
         let stored_this: String = row.try_get("this_hash").map_err(Error::Sqlx)?;
+        // Older DBs (or defensive reads) default to v1 when the column is absent.
+        let version: i64 = row.try_get("hash_version").unwrap_or(1);
 
         if stored_prev != prev_hash {
             broken_at = Some(seq);
             break;
         }
-        let recomputed = hash_link(&prev_hash, &payload);
+        let recomputed = if version >= HASH_VERSION_V2 {
+            hash_link_v2(
+                &prev_hash,
+                &kind,
+                &ts,
+                profile_name.as_deref(),
+                container_id.as_deref(),
+                &payload,
+            )
+        } else {
+            hash_link(&prev_hash, &payload)
+        };
         if recomputed != stored_this {
             broken_at = Some(seq);
             break;
@@ -582,5 +661,189 @@ mod tests {
             .unwrap();
         let report = verify_chain(&db, None).await.unwrap();
         assert_eq!(report.broken_at, Some(2));
+    }
+
+    // ---- Fix #1: chain v2 covers all row fields ----
+
+    /// Insert a legacy v1 row (hash_version=1, hash over payload only) chained
+    /// from `prev`. Returns the row's `this_hash`.
+    async fn insert_v1_row(db: &Database, payload: &str, prev: &str) -> String {
+        let this = hash_link(prev, payload);
+        sqlx::query(
+            "INSERT INTO audit_log (ts, kind, profile_name, container_id, payload, prev_hash, this_hash, hash_version) \
+             VALUES (?, 'profile_loaded', NULL, NULL, ?, ?, ?, 1)",
+        )
+        .bind("2026-01-01T00:00:00.000Z")
+        .bind(payload)
+        .bind(prev)
+        .bind(&this)
+        .execute(db.pool())
+        .await
+        .unwrap();
+        this
+    }
+
+    async fn db_with_three_v2_rows() -> Database {
+        let db = fresh_db().await;
+        for i in 0..3 {
+            append(
+                &db,
+                AuditKind::ProfileApplied,
+                Some(format!("p{i}")),
+                Some(format!("c{i}")),
+                serde_json::json!({"i": i}),
+            )
+            .await
+            .unwrap();
+        }
+        db
+    }
+
+    #[test]
+    fn hash_link_v2_changes_when_any_field_changes() {
+        let base = hash_link_v2(ZERO_HASH, "k", "t", Some("p"), Some("c"), "{}");
+        assert_eq!(base.len(), 64);
+        assert_ne!(
+            base,
+            hash_link_v2(ZERO_HASH, "K", "t", Some("p"), Some("c"), "{}")
+        );
+        assert_ne!(
+            base,
+            hash_link_v2(ZERO_HASH, "k", "T", Some("p"), Some("c"), "{}")
+        );
+        assert_ne!(
+            base,
+            hash_link_v2(ZERO_HASH, "k", "t", Some("P"), Some("c"), "{}")
+        );
+        assert_ne!(
+            base,
+            hash_link_v2(ZERO_HASH, "k", "t", Some("p"), Some("C"), "{}")
+        );
+        assert_ne!(
+            base,
+            hash_link_v2(ZERO_HASH, "k", "t", Some("p"), Some("c"), "{ }")
+        );
+        // None vs Some("") must not collide (length-prefix + present/absent tag).
+        assert_ne!(
+            hash_link_v2(ZERO_HASH, "k", "t", None, Some("c"), "{}"),
+            hash_link_v2(ZERO_HASH, "k", "t", Some(""), Some("c"), "{}")
+        );
+    }
+
+    #[tokio::test]
+    async fn verify_chain_accepts_legacy_v1_rows() {
+        let db = fresh_db().await;
+        let mut prev = ZERO_HASH.to_string();
+        for i in 0..2 {
+            prev = insert_v1_row(&db, &format!("{{\"i\":{i}}}"), &prev).await;
+        }
+        let report = verify_chain(&db, None).await.unwrap();
+        assert_eq!(report.total, 2);
+        assert!(report.broken_at.is_none());
+        assert_eq!(report.last_seq, Some(2));
+    }
+
+    #[tokio::test]
+    async fn verify_v2_detects_kind_tamper() {
+        let db = db_with_three_v2_rows().await;
+        sqlx::query("UPDATE audit_log SET kind = 'profile_denied' WHERE seq = 2")
+            .execute(db.pool())
+            .await
+            .unwrap();
+        assert_eq!(verify_chain(&db, None).await.unwrap().broken_at, Some(2));
+    }
+
+    #[tokio::test]
+    async fn verify_v2_detects_ts_tamper() {
+        let db = db_with_three_v2_rows().await;
+        sqlx::query("UPDATE audit_log SET ts = '1999-01-01T00:00:00.000Z' WHERE seq = 2")
+            .execute(db.pool())
+            .await
+            .unwrap();
+        assert_eq!(verify_chain(&db, None).await.unwrap().broken_at, Some(2));
+    }
+
+    #[tokio::test]
+    async fn verify_v2_detects_profile_name_tamper() {
+        let db = db_with_three_v2_rows().await;
+        sqlx::query("UPDATE audit_log SET profile_name = 'evil' WHERE seq = 2")
+            .execute(db.pool())
+            .await
+            .unwrap();
+        assert_eq!(verify_chain(&db, None).await.unwrap().broken_at, Some(2));
+    }
+
+    #[tokio::test]
+    async fn verify_v2_detects_container_id_tamper() {
+        let db = db_with_three_v2_rows().await;
+        sqlx::query("UPDATE audit_log SET container_id = 'deadbeef' WHERE seq = 2")
+            .execute(db.pool())
+            .await
+            .unwrap();
+        assert_eq!(verify_chain(&db, None).await.unwrap().broken_at, Some(2));
+    }
+
+    #[tokio::test]
+    async fn verify_v2_detects_payload_tamper() {
+        let db = db_with_three_v2_rows().await;
+        sqlx::query("UPDATE audit_log SET payload = '{\"tampered\":true}' WHERE seq = 2")
+            .execute(db.pool())
+            .await
+            .unwrap();
+        assert_eq!(verify_chain(&db, None).await.unwrap().broken_at, Some(2));
+    }
+
+    #[tokio::test]
+    async fn verify_mixed_v1_and_v2_chain_passes() {
+        let db = fresh_db().await;
+        // seq=1 is a legacy v1 row; the v2 appends chain on top of it.
+        let prev = insert_v1_row(&db, "{\"legacy\":true}", ZERO_HASH).await;
+        assert_ne!(prev, ZERO_HASH);
+        append(
+            &db,
+            AuditKind::ProfileApplied,
+            Some("p".into()),
+            None,
+            serde_json::json!({"x": 1}),
+        )
+        .await
+        .unwrap();
+        append(
+            &db,
+            AuditKind::ProfileApplied,
+            None,
+            Some("c".into()),
+            serde_json::json!({"y": 2}),
+        )
+        .await
+        .unwrap();
+        let report = verify_chain(&db, None).await.unwrap();
+        assert_eq!(report.total, 3);
+        assert!(
+            report.broken_at.is_none(),
+            "a mixed v1+v2 chain must verify end to end"
+        );
+        assert_eq!(report.last_seq, Some(3));
+    }
+
+    #[tokio::test]
+    async fn verify_mixed_chain_detects_v1_field_tamper_via_payload() {
+        // Even in a mixed chain, tampering the v2 segment is caught.
+        let db = fresh_db().await;
+        let _ = insert_v1_row(&db, "{\"legacy\":true}", ZERO_HASH).await;
+        append(
+            &db,
+            AuditKind::ProfileApplied,
+            Some("p".into()),
+            None,
+            serde_json::json!({"x": 1}),
+        )
+        .await
+        .unwrap();
+        sqlx::query("UPDATE audit_log SET profile_name = 'evil' WHERE seq = 2")
+            .execute(db.pool())
+            .await
+            .unwrap();
+        assert_eq!(verify_chain(&db, None).await.unwrap().broken_at, Some(2));
     }
 }
