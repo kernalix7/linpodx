@@ -255,7 +255,7 @@ impl SessionManager {
                 }),
             });
         }
-        entries.sort_by(|a, b| a.ts.cmp(&b.ts));
+        entries.sort_by_key(|entry| entry.ts);
         Ok(entries)
     }
 }
