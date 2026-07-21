@@ -118,8 +118,12 @@ pub fn resolve_daemon_binary() -> PathBuf {
 /// Build the webview navigation target from the daemon's `WebUiEnsure` reply.
 /// The token rides in the query string so the browser `fetch()` / WebSocket
 /// auth paths pick it up (the daemon accepts `?token=` on both).
+///
+/// No trailing slash after `/ui`: the daemon's static router answers `/ui`
+/// but 404s `/ui/` (axum nest semantics), so the slashed form would open the
+/// webview on an error page.
 pub fn ui_url(base: &str, token: &str) -> String {
-    format!("{}/ui/?token={}", base.trim_end_matches('/'), token)
+    format!("{}/ui?token={}", base.trim_end_matches('/'), token)
 }
 
 /// Full flow: ensure the daemon is reachable (auto-spawning if needed), then
@@ -222,7 +226,7 @@ mod tests {
     fn ui_url_appends_ui_path_and_token() {
         assert_eq!(
             ui_url("http://127.0.0.1:53187", "abc123"),
-            "http://127.0.0.1:53187/ui/?token=abc123"
+            "http://127.0.0.1:53187/ui?token=abc123"
         );
     }
 
@@ -230,7 +234,7 @@ mod tests {
     fn ui_url_trims_trailing_slash_on_base() {
         assert_eq!(
             ui_url("http://127.0.0.1:8080/", "tok"),
-            "http://127.0.0.1:8080/ui/?token=tok"
+            "http://127.0.0.1:8080/ui?token=tok"
         );
     }
 

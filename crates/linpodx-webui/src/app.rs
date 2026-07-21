@@ -96,6 +96,23 @@ impl Tab {
 #[derive(Clone, Copy)]
 pub struct AuthToken(pub RwSignal<Option<String>>);
 
+/// Pull a `?token=<t>` bearer token out of the current URL, if present.
+///
+/// The desktop shell (and `linpodx daemon` operators following the docs) hand
+/// the token over in the query string; the SPA otherwise only knows the token
+/// via localStorage, so without this ingest a fresh webview would load the
+/// page yet fail every API call with 401. Tokens are hex, so a plain split is
+/// enough — no percent-decoding needed.
+fn token_from_query() -> Option<String> {
+    let search = web_sys::window()?.location().search().ok()?;
+    search
+        .trim_start_matches('?')
+        .split('&')
+        .find_map(|kv| kv.strip_prefix("token="))
+        .map(str::to_string)
+        .filter(|t| !t.trim().is_empty())
+}
+
 /// Read the current theme from `<html data-theme>`; falls back to `"dark"`
 /// (the design system is dark-first) when no explicit choice is stored.
 fn current_theme() -> String {
@@ -133,9 +150,17 @@ pub fn AppRoot() -> impl IntoView {
         }
     }
 
-    let initial_token = gloo_storage::LocalStorage::get::<String>(TOKEN_KEY)
-        .ok()
-        .filter(|s| !s.trim().is_empty());
+    // Query-string token (desktop shell / operator handoff) wins over the
+    // stored one and is persisted for future loads.
+    let query_token = token_from_query();
+    if let Some(t) = &query_token {
+        let _ = gloo_storage::LocalStorage::set(TOKEN_KEY, t);
+    }
+    let initial_token = query_token.or_else(|| {
+        gloo_storage::LocalStorage::get::<String>(TOKEN_KEY)
+            .ok()
+            .filter(|s| !s.trim().is_empty())
+    });
     let token = RwSignal::new(initial_token);
     provide_context(AuthToken(token));
 
