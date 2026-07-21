@@ -92,6 +92,26 @@ crate = "linpodx-gui"
 allow = ["MPL-2.0"]
 crate = "option-ext"
 
+# Servo CSS crates — MPL-2.0, required by tauri-utils' dom_query (tauri injects
+# its IPC bootstrap into app HTML at build time). Same legal position as
+# option-ext: unmodified file-level weak copyleft, no effect on MIT app code.
+# Scoped per-crate so any other MPL entrant still fails the gate.
+[[licenses.exceptions]]
+allow = ["MPL-2.0"]
+crate = "cssparser"
+
+[[licenses.exceptions]]
+allow = ["MPL-2.0"]
+crate = "cssparser-macros"
+
+[[licenses.exceptions]]
+allow = ["MPL-2.0"]
+crate = "dtoa-short"
+
+[[licenses.exceptions]]
+allow = ["MPL-2.0"]
+crate = "selectors"
+
 # jsonpath-rust 0.5.1 ships an MIT LICENSE file but never set `license =` in its
 # Cargo.toml. Pin the SPDX expression so cargo-deny does not emit a
 # `license-not-encountered` warning for it. Upstream PR pending.
