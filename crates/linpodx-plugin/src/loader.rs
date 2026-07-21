@@ -21,6 +21,15 @@ use std::path::Path;
 use wasmtime::{Engine, Instance, Linker, Module, Store, TypedFunc};
 
 const HOST_NAMESPACE: &str = "linpodx_host";
+
+/// Per-invocation fuel budget. wasmtime charges roughly one fuel unit per executed wasm
+/// instruction, so 200M units bounds a runaway or infinite-loop plugin to a few tens of
+/// milliseconds of CPU on modern hardware while leaving enormous headroom for legitimate
+/// policy plugins (which run on the order of thousands of instructions per call). The
+/// budget is re-armed before every host entry point, so it is a per-call — not
+/// per-lifetime — ceiling. Requires `Config::consume_fuel(true)` (set in the registry).
+pub(crate) const CALL_FUEL_BUDGET: u64 = 200_000_000;
+
 const ENTRY_APPROVAL: &str = "evaluate_approval";
 const ENTRY_AUDIT_FILTER: &str = "evaluate_audit_filter";
 const ENTRY_PROFILE_VALIDATOR: &str = "evaluate_profile_validator";
@@ -109,6 +118,14 @@ pub fn load(engine: &Engine, manifest: &PluginManifest, wasm_path: &Path) -> Res
         .map_err(|e| PluginError::WasmLoad(format!("link host_return_injector_payload: {e}")))?;
 
     let mut store = Store::new(engine, HostState::new(manifest.name.clone()));
+    // Apply the per-store memory/table/instance caps (HostState::limits). Must be wired
+    // before instantiation so an over-cap declared minimum memory is rejected up front.
+    store.limiter(|state| &mut state.limits);
+    // Arm the fuel budget before instantiation so a module with a start function that
+    // loops can never hang the daemon at load time.
+    store
+        .set_fuel(CALL_FUEL_BUDGET)
+        .map_err(|e| PluginError::WasmLoad(format!("set fuel for {}: {e}", manifest.name)))?;
     let instance = linker
         .instantiate(&mut store, &module)
         .map_err(|e| PluginError::WasmLoad(format!("instantiate {}: {e}", manifest.name)))?;
@@ -162,6 +179,18 @@ pub fn load(engine: &Engine, manifest: &PluginManifest, wasm_path: &Path) -> Res
     })
 }
 
+/// Re-arm the per-call fuel budget before invoking a plugin export. Fuel is consumed as
+/// wasm executes, so it must be reset before every call or a plugin that ran near the
+/// budget last time would trap prematurely. A fuel-exhaustion trap during the subsequent
+/// `.call` surfaces as [`PluginError::HostRejected`], which callers treat as trap-like
+/// (Defer / skip) — never poisoning the registry for other plugins.
+fn arm_fuel(plugin: &mut LoadedPlugin) -> Result<()> {
+    plugin
+        .store
+        .set_fuel(CALL_FUEL_BUDGET)
+        .map_err(|e| PluginError::HostRejected(format!("plugin {}: arm fuel: {e}", plugin.name)))
+}
+
 /// Run the `evaluate_approval` export with `payload` (typically a serialized
 /// `ApprovalRequest`) and return the (decision, reason) the plugin recorded. Returns a
 /// `WasmLoad` error if the plugin doesn't export this entry — call `has_approval` first.
@@ -173,6 +202,7 @@ pub fn evaluate(plugin: &mut LoadedPlugin, payload: &[u8]) -> Result<(PluginDeci
         ))
     })?;
     plugin.store.data_mut().reset(payload.to_vec());
+    arm_fuel(plugin)?;
     entry
         .call(&mut plugin.store, ())
         .map_err(|e| PluginError::HostRejected(format!("plugin {}: {e}", plugin.name)))?;
@@ -191,6 +221,7 @@ pub fn evaluate_audit_filter(plugin: &mut LoadedPlugin, payload: &[u8]) -> Resul
         ))
     })?;
     plugin.store.data_mut().reset(payload.to_vec());
+    arm_fuel(plugin)?;
     entry
         .call(&mut plugin.store, ())
         .map_err(|e| PluginError::HostRejected(format!("plugin {}: {e}", plugin.name)))?;
@@ -222,6 +253,7 @@ pub fn evaluate_profile_validator(
         ))
     })?;
     plugin.store.data_mut().reset(yaml.as_bytes().to_vec());
+    arm_fuel(plugin)?;
     entry
         .call(&mut plugin.store, ())
         .map_err(|e| PluginError::HostRejected(format!("plugin {}: {e}", plugin.name)))?;
@@ -248,6 +280,7 @@ pub fn evaluate_network_trace(
     let payload = serde_json::to_vec(event)
         .map_err(|e| PluginError::HostRejected(format!("serialize network event: {e}")))?;
     plugin.store.data_mut().reset(payload);
+    arm_fuel(plugin)?;
     entry
         .call(&mut plugin.store, ())
         .map_err(|e| PluginError::HostRejected(format!("plugin {}: {e}", plugin.name)))?;
@@ -270,6 +303,7 @@ pub fn evaluate_runtime_injector(
         ))
     })?;
     plugin.store.data_mut().reset(opts_json.to_vec());
+    arm_fuel(plugin)?;
     entry
         .call(&mut plugin.store, ())
         .map_err(|e| PluginError::HostRejected(format!("plugin {}: {e}", plugin.name)))?;

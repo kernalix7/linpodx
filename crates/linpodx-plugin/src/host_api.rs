@@ -18,6 +18,33 @@
 use crate::{InjectorPayload, NetworkDecision, PluginDecision};
 use std::sync::Mutex;
 use tracing::{debug, error, info, warn};
+use wasmtime::{StoreLimits, StoreLimitsBuilder};
+
+/// Hard cap on a plugin's linear-memory footprint. 64 MiB is far more than any policy
+/// plugin needs while bounding a memory-bomb plugin so it can never OOM the daemon.
+pub const PLUGIN_MAX_MEMORY_BYTES: usize = 64 * 1024 * 1024;
+/// Hard cap on total table elements — bounds funcref/​externref table growth.
+pub const PLUGIN_MAX_TABLE_ELEMENTS: usize = 10_000;
+/// A plugin store hosts exactly one instance / memory; a handful of tables covers any
+/// realistic module without leaving room for table-spraying.
+pub const PLUGIN_MAX_INSTANCES: usize = 1;
+pub const PLUGIN_MAX_TABLES: usize = 4;
+pub const PLUGIN_MAX_MEMORIES: usize = 1;
+
+/// Build the per-store resource limits applied to every loaded plugin. `trap_on_grow_failure`
+/// turns an over-cap `memory.grow` / `table.grow` into a trap (surfaced as a
+/// `PluginError`) instead of a silent `-1`, so exceeding the cap is audited rather than
+/// letting a plugin spin unbounded.
+pub fn plugin_store_limits() -> StoreLimits {
+    StoreLimitsBuilder::new()
+        .memory_size(PLUGIN_MAX_MEMORY_BYTES)
+        .table_elements(PLUGIN_MAX_TABLE_ELEMENTS)
+        .instances(PLUGIN_MAX_INSTANCES)
+        .tables(PLUGIN_MAX_TABLES)
+        .memories(PLUGIN_MAX_MEMORIES)
+        .trap_on_grow_failure(true)
+        .build()
+}
 
 /// Per-invocation host state stored inside the wasmtime `Store`. Fields the wasm callbacks
 /// mutate go through `std::sync::Mutex` so the whole struct is `Send + Sync` — that lets
@@ -46,6 +73,11 @@ pub struct HostState {
     /// — treated as the empty payload.
     pub injector_payload: Mutex<Option<InjectorPayload>>,
     pub plugin_name: String,
+    /// Per-store wasmtime resource limits (memory / table / instance caps). Wired into the
+    /// `Store` via `Store::limiter` in [`crate::loader::load`] so an unbounded-growth plugin
+    /// traps instead of exhausting host memory. Not reset between calls — the caps are
+    /// constant for the plugin's lifetime.
+    pub limits: StoreLimits,
 }
 
 impl HostState {
@@ -59,6 +91,7 @@ impl HostState {
             network_decision: Mutex::new(NetworkDecision::Allow),
             injector_payload: Mutex::new(None),
             plugin_name,
+            limits: plugin_store_limits(),
         }
     }
 
