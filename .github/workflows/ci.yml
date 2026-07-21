@@ -91,3 +91,30 @@ jobs:
         run: cargo build --workspace --all-features
       - name: cargo test (nightly)
         run: cargo test --workspace --all-features
+
+  podman-integration:
+    # Phase 18 Stream E — runs the `#[ignore]`-gated e2e suites against a real
+    # Podman install. `continue-on-error: true` for now because several
+    # scenarios still soft-skip behind placeholder dispatch (Streams B/C/D).
+    # Flip to `false` once Phase 18 lands the full surface.
+    #
+    # Gated so PR builds stay fast: runs on every push to main and on PRs only
+    # when the `run-integration` label is applied (the apt + podman install +
+    # ignored test sweep is ~3-5 min, too long for every PR roundtrip).
+    name: podman integration (ignored e2e)
+    runs-on: ubuntu-24.04
+    if: github.event_name != 'pull_request' || contains(github.event.pull_request.labels.*.name, 'run-integration')
+    continue-on-error: true
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+        with:
+          key: podman-integration
+      - name: install podman
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y podman
+          podman --version
+      - name: cargo test (ignored, single-threaded)
+        run: cargo test --workspace -- --ignored --test-threads=1

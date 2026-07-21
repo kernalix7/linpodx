@@ -1,7 +1,14 @@
 # Scenario — Multi-distro shells from one host
 
-linpodx ships per-distro presets so you can drop into Ubuntu, Fedora, or Alpine with
-one command — lighter than a VM, native to your desktop session.
+> **Status — illustrative end-to-end walkthrough.** Today the runnable
+> surface is `linpodx distro {list, create, build, enter, remove}` with the
+> `--vm-mode` flag for persistent state. The `linpodx distro run --rm` /
+> `--persist` / `distro shell` / `distro prune` ergonomics shown below are
+> planned. The six templates (ubuntu, fedora, arch, debian, alpine, nixos)
+> and `systemd`-in-container support are already wired today.
+
+linpodx ships per-distro presets so you can drop into Ubuntu, Fedora, or
+Alpine with one command — lighter than a VM, native to your desktop session.
 
 ## Available distro templates
 

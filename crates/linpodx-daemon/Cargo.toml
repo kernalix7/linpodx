@@ -14,10 +14,34 @@ name = "linpodx-daemon"
 path = "src/main.rs"
 
 [package.metadata.generate-rpm]
+# Phase 18 — runtime requires for the .rpm. podman is the OCI runtime; sqlite is
+# loaded dynamically for the Phase 2C session DB.
+requires = { podman = ">= 4.6", "sqlite-libs" = "*" }
 assets = [
     { source = "target/release/linpodx-daemon", dest = "/usr/bin/linpodx-daemon", mode = "755" },
+    { source = "packaging/systemd/linpodx-daemon.service", dest = "/usr/lib/systemd/system/linpodx-daemon.service", mode = "644" },
     { source = "README.md", dest = "/usr/share/doc/linpodx-daemon/README.md", mode = "644", doc = true },
     { source = "LICENSE", dest = "/usr/share/doc/linpodx-daemon/LICENSE", mode = "644", doc = true },
+]
+
+# Phase 18 — Debian/Ubuntu packaging metadata for `cargo deb`.
+# Ships a systemd unit under /lib/systemd/system but does NOT enable it; users
+# opt in with `systemctl enable --now linpodx-daemon`. Maintainer scripts only
+# call `daemon-reload` and `stop`, never `enable`.
+[package.metadata.deb]
+maintainer = "Kim DaeHyun <kernalix7@kodenet.io>"
+copyright = "2026, Kim DaeHyun <kernalix7@kodenet.io>"
+license-file = ["../../LICENSE", "0"]
+extended-description = "linpodx daemon — Unix socket / WebSocket API server for the linpodx container management platform."
+section = "admin"
+priority = "optional"
+depends = "podman (>= 4.6), libsqlite3-0, libc6"
+maintainer-scripts = "packaging/scripts"
+systemd-units = { unit-scripts = "packaging/systemd", enable = false, start = false }
+assets = [
+    ["target/release/linpodx-daemon", "usr/bin/", "755"],
+    ["../../README.md", "usr/share/doc/linpodx-daemon/README.md", "644"],
+    ["../../LICENSE", "usr/share/doc/linpodx-daemon/copyright", "644"],
 ]
 
 [dependencies]

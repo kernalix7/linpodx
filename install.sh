@@ -28,6 +28,7 @@ INSTALL_DIR="${LINPODX_INSTALL_DIR:-$HOME/.local/bin/linpodx-app}"
 BIN_DIR="${LINPODX_BIN_DIR:-$HOME/.local/bin}"
 REPO_URL="https://github.com/kernalix7/linpodx.git"
 REPO_API="https://api.github.com/repos/kernalix7/linpodx"
+RELEASES_URL="https://github.com/kernalix7/linpodx/releases"
 
 LINPODX_SOURCE="${LINPODX_SOURCE:-}"
 LINPODX_REF="${LINPODX_REF:-}"
@@ -37,6 +38,11 @@ LINPODX_NO_HELPER="${LINPODX_NO_HELPER:-}"
 LINPODX_SETCAP_HELPER="${LINPODX_SETCAP_HELPER:-}"
 LINPODX_NO_DESKTOP="${LINPODX_NO_DESKTOP:-}"
 LINPODX_ASSUME_YES="${LINPODX_ASSUME_YES:-}"
+# Phase 18: Skip the source build entirely and fetch a pre-built tarball from the
+# GitHub release matching $LINPODX_REF (or latest). Falls back to source build if
+# the tarball download fails. The build path still runs all GUI/runtime probes so
+# the host's library set is checked either way.
+LINPODX_PREBUILT="${LINPODX_PREBUILT:-}"
 CARGO_TOOLCHAIN=""
 
 RED='\033[0;31m'
@@ -61,6 +67,7 @@ Flags:
   --setcap-helper     Grant helper CAP_NET_ADMIN + CAP_SYS_ADMIN via sudo setcap
   --install-dir DIR   Source/build checkout directory
   --bin-dir DIR       Binary installation directory
+  --prebuilt          Download release tarball instead of building from source
   -h, --help          Print this help and exit
 USAGE_EOF
 }
@@ -107,6 +114,10 @@ while [ $# -gt 0 ]; do
             BIN_DIR="${2:-}"
             shift 2
             ;;
+        --prebuilt)
+            LINPODX_PREBUILT=1
+            shift
+            ;;
         -h|--help)
             usage
             exit 0
@@ -138,6 +149,12 @@ pkg_name() {
                 libcap) echo "libcap2-bin" ;;
                 nsenter|util-linux) echo "util-linux" ;;
                 nft|nftables) echo "nftables" ;;
+                # Phase 18 — iced GUI runtime libs (Wayland + EGL/GL via softbuffer/wgpu).
+                libwayland-client) echo "libwayland-client0" ;;
+                libxkbcommon) echo "libxkbcommon0" ;;
+                libegl) echo "libegl1" ;;
+                libgl) echo "libgl1" ;;
+                libsqlite3) echo "libsqlite3-0" ;;
                 *) echo "$dep" ;;
             esac
             ;;
@@ -147,6 +164,11 @@ pkg_name() {
                 libcap) echo "libcap" ;;
                 nsenter|util-linux) echo "util-linux" ;;
                 nft|nftables) echo "nftables" ;;
+                libwayland-client) echo "libwayland-client" ;;
+                libxkbcommon) echo "libxkbcommon" ;;
+                libegl) echo "mesa-libEGL" ;;
+                libgl) echo "mesa-libGL" ;;
+                libsqlite3) echo "sqlite-libs" ;;
                 *) echo "$dep" ;;
             esac
             ;;
@@ -157,6 +179,10 @@ pkg_name() {
                 libcap) echo "libcap" ;;
                 nsenter|util-linux) echo "util-linux" ;;
                 nft|nftables) echo "nftables" ;;
+                libwayland-client) echo "wayland" ;;
+                libxkbcommon) echo "libxkbcommon" ;;
+                libegl|libgl) echo "mesa" ;;
+                libsqlite3) echo "sqlite" ;;
                 *) echo "$dep" ;;
             esac
             ;;
@@ -166,6 +192,11 @@ pkg_name() {
                 libcap) echo "libcap-progs" ;;
                 nsenter|util-linux) echo "util-linux" ;;
                 nft|nftables) echo "nftables" ;;
+                libwayland-client) echo "libwayland-client0" ;;
+                libxkbcommon) echo "libxkbcommon0" ;;
+                libegl) echo "Mesa-libEGL1" ;;
+                libgl) echo "Mesa-libGL1" ;;
+                libsqlite3) echo "libsqlite3-0" ;;
                 *) echo "$dep" ;;
             esac
             ;;
@@ -173,6 +204,34 @@ pkg_name() {
             echo "$dep"
             ;;
     esac
+}
+
+# Phase 18 — probe for a runtime shared library via ldconfig / common library
+# search paths. Returns 0 when *any* matching SONAME is found. The `dep` argument
+# is the canonical token used in pkg_name() (libwayland-client, libxkbcommon,
+# libegl, libgl, libsqlite3).
+have_runtime_lib() {
+    local dep="$1"
+    local pattern
+    case "$dep" in
+        libwayland-client) pattern="libwayland-client.so" ;;
+        libxkbcommon) pattern="libxkbcommon.so" ;;
+        libegl) pattern="libEGL.so" ;;
+        libgl) pattern="libGL.so" ;;
+        libsqlite3) pattern="libsqlite3.so" ;;
+        *) return 1 ;;
+    esac
+    if command -v ldconfig >/dev/null 2>&1; then
+        ldconfig -p 2>/dev/null | grep -q "$pattern" && return 0
+    fi
+    local libdir
+    for libdir in /usr/lib /usr/lib64 /usr/lib/x86_64-linux-gnu \
+                  /usr/lib/aarch64-linux-gnu /lib /lib64; do
+        if [ -d "$libdir" ] && ls "$libdir/${pattern}"* >/dev/null 2>&1; then
+            return 0
+        fi
+    done
+    return 1
 }
 
 package_manager() {
@@ -252,22 +311,38 @@ collect_missing_deps() {
     MISSING=()
 
     command -v podman >/dev/null 2>&1 || add_missing "podman"
-    command -v cc >/dev/null 2>&1 || command -v gcc >/dev/null 2>&1 || add_missing "gcc"
-    command -v make >/dev/null 2>&1 || add_missing "make"
-    command -v pkg-config >/dev/null 2>&1 || command -v pkgconf >/dev/null 2>&1 || add_missing "pkg-config"
 
-    if ! command -v rustup >/dev/null 2>&1 && ! command -v cargo >/dev/null 2>&1; then
-        add_missing "rustup"
+    # Build-time toolchain is only required when we'll actually compile.
+    if [ -z "$LINPODX_PREBUILT" ]; then
+        command -v cc >/dev/null 2>&1 || command -v gcc >/dev/null 2>&1 || add_missing "gcc"
+        command -v make >/dev/null 2>&1 || add_missing "make"
+        command -v pkg-config >/dev/null 2>&1 || command -v pkgconf >/dev/null 2>&1 || add_missing "pkg-config"
+        if ! command -v rustup >/dev/null 2>&1 && ! command -v cargo >/dev/null 2>&1; then
+            add_missing "rustup"
+        fi
     fi
+
     if [ -z "$LINPODX_SOURCE" ]; then
         command -v git >/dev/null 2>&1 || add_missing "git"
         command -v curl >/dev/null 2>&1 || add_missing "curl"
     fi
+
     if [ -n "$LINPODX_SETCAP_HELPER" ] && [ -z "$LINPODX_NO_HELPER" ]; then
         command -v nft >/dev/null 2>&1 || add_missing "nftables"
         command -v nsenter >/dev/null 2>&1 || add_missing "util-linux"
         command -v setcap >/dev/null 2>&1 || add_missing "libcap"
     fi
+
+    # Phase 18 — runtime libraries required by the linpodx-gui (iced + softbuffer)
+    # and the SQLite-backed daemon session DB. The CLI alone does not need them.
+    if [ -z "$LINPODX_NO_GUI" ]; then
+        have_runtime_lib "libwayland-client" || add_missing "libwayland-client"
+        have_runtime_lib "libxkbcommon" || add_missing "libxkbcommon"
+        have_runtime_lib "libegl" || add_missing "libegl"
+        have_runtime_lib "libgl" || add_missing "libgl"
+    fi
+    # libsqlite3 is loaded dynamically by linpodx-daemon (Phase 2C session DB).
+    have_runtime_lib "libsqlite3" || add_missing "libsqlite3"
 }
 
 install_missing_deps() {
@@ -455,6 +530,67 @@ checkout_source() {
     fi
 }
 
+prebuilt_tarball_url() {
+    local ref="$1"
+    local arch="$2"
+    local tag="${ref#v}"
+    tag="v$tag"
+    echo "$RELEASES_URL/download/$tag/linpodx-$tag-linux-$arch.tar.gz"
+}
+
+# Phase 18 — download the official release tarball and install its binaries
+# without running cargo. Returns 0 on success, 1 if download/extraction fails so
+# the caller can fall back to building from source.
+download_prebuilt() {
+    local ref="$1"
+    if ! command -v curl >/dev/null 2>&1; then
+        warn "curl not available; cannot download pre-built tarball"
+        return 1
+    fi
+
+    local url
+    url="$(prebuilt_tarball_url "$ref" "$ARCH")"
+    log "Downloading pre-built tarball: $url"
+
+    local tmpdir
+    tmpdir="$(mktemp -d)"
+    if ! curl -fsSL "$url" -o "$tmpdir/linpodx.tar.gz"; then
+        warn "Pre-built tarball download failed (HTTP error or 404)"
+        rm -rf "$tmpdir"
+        return 1
+    fi
+    if ! tar xzf "$tmpdir/linpodx.tar.gz" -C "$tmpdir"; then
+        warn "Pre-built tarball extraction failed"
+        rm -rf "$tmpdir"
+        return 1
+    fi
+
+    install -d "$BIN_DIR"
+    local installed=0
+    local bin
+    for bin in linpodx linpodx-daemon linpodx-gui linpodx-netfilter-helper; do
+        if [ -x "$tmpdir/$bin" ]; then
+            # Honour --no-gui / --no-helper flags even on the prebuilt path.
+            if [ "$bin" = "linpodx-gui" ] && [ -n "$LINPODX_NO_GUI" ]; then
+                continue
+            fi
+            if [ "$bin" = "linpodx-netfilter-helper" ] && [ -n "$LINPODX_NO_HELPER" ]; then
+                continue
+            fi
+            install -m 0755 "$tmpdir/$bin" "$BIN_DIR/$bin"
+            log "Installed pre-built: $BIN_DIR/$bin"
+            installed=$((installed + 1))
+        fi
+    done
+    rm -rf "$tmpdir"
+
+    if [ "$installed" -eq 0 ]; then
+        warn "Pre-built tarball contained no expected binaries"
+        return 1
+    fi
+    return 0
+}
+
 build_and_install() {
     local build_args=(build --release -p linpodx-cli -p linpodx-daemon)
     if [ -z "$LINPODX_NO_GUI" ]; then
@@ -549,6 +685,24 @@ log "Detected arch: $ARCH"
 detect_local_source
 validate_source
 install_missing_deps
+
+# Phase 18 — pre-built fast path. Tries the tarball first; on any failure falls
+# back to the source build so users without internet access (or with custom
+# refs) keep the existing behaviour.
+if [ -n "$LINPODX_PREBUILT" ] && [ -z "$LINPODX_SOURCE" ]; then
+    PREBUILT_REF="$(resolve_ref)"
+    if [ "$PREBUILT_REF" = "main" ]; then
+        warn "Pre-built tarballs are only published for tagged releases; falling back to source build"
+    elif download_prebuilt "$PREBUILT_REF"; then
+        install_desktop_entry
+        configure_helper_caps
+        print_summary
+        exit 0
+    else
+        warn "Falling back to source build"
+    fi
+fi
+
 ensure_rust
 checkout_source
 build_and_install

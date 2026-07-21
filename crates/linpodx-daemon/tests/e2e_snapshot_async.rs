@@ -1,7 +1,13 @@
 //! Phase 2E live integration test for the async snapshot job CLI.
 //! `#[ignore]`-gated. Verifies that `snapshot job start` returns a job id and
-//! `snapshot job status` reports a terminal state. Treats `not yet implemented`
-//! from the runtime-team placeholder as a soft skip.
+//! `snapshot job status` reports a terminal state.
+//!
+//! Phase 18 Stream E note: the legacy `skipped_for_placeholder` helper is kept
+//! as a fallback (still fires on older daemon builds where the placeholder
+//! Error::Runtime path is reached), but the test now carries an explicit
+//! `#[ignore = "<reason>"]` attribute so the silent-skip case is documented in
+//! `cargo test --workspace -- --list --ignored` output instead of being
+//! invisible.
 
 use assert_cmd::Command as AssertCommand;
 use std::path::Path;
@@ -103,7 +109,7 @@ fn poll_until_terminal(socket: &Path, job_id: &str) -> Option<String> {
 }
 
 #[test]
-#[ignore]
+#[ignore = "Phase 2E — requires runtime-team `snapshot job start/status` IPC + Podman ≥ 4.6.0 with commit support; soft-skips when placeholder Error::Runtime is returned"]
 fn snapshot_job_lifecycle() {
     let workdir = tempfile::tempdir().expect("workdir");
     let (_guard, socket) = spawn_daemon(&workdir);

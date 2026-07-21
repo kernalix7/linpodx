@@ -1,8 +1,14 @@
 //! Phase 4 live integration test for the multi-distro CLI surface.
 //! `#[ignore]`-gated. Verifies that the daemon answers DistroTemplateList with
 //! the 6 known kinds. The full create → enter → remove path is gated on the
-//! distro-team's IPC implementation; if the placeholder is still in place, the
-//! test treats `not yet implemented` as a soft skip.
+//! distro-team's IPC implementation.
+//!
+//! Phase 18 Stream E note: the legacy `skipped_for_placeholder` helper is kept
+//! as a fallback (still fires on older daemon builds where the placeholder
+//! Error::Runtime path is reached), but each test now carries an explicit
+//! `#[ignore = "<reason>"]` attribute so the silent-skip case is documented in
+//! `cargo test --workspace -- --list --ignored` output instead of being
+//! invisible.
 
 use assert_cmd::Command as AssertCommand;
 use std::path::Path;
@@ -80,7 +86,7 @@ fn skipped_for_placeholder(stderr: &str) -> bool {
 }
 
 #[test]
-#[ignore]
+#[ignore = "Phase 4 — requires distro-team DistroTemplateList IPC + Podman ≥ 4.6.0; soft-skips when placeholder Error::Runtime is returned"]
 fn distro_template_list_returns_six() {
     let workdir = tempfile::tempdir().expect("workdir");
     let (_guard, socket) = spawn_daemon(&workdir);
@@ -115,7 +121,7 @@ fn distro_template_list_returns_six() {
 }
 
 #[test]
-#[ignore]
+#[ignore = "Phase 4 — requires distro-team `distro create/enter/remove` IPC + Podman ≥ 4.6.0 + alpine pull; soft-skips when placeholder Error::Runtime is returned"]
 fn distro_alpine_create_enter_remove_lifecycle() {
     let workdir = tempfile::tempdir().expect("workdir");
     let (_guard, socket) = spawn_daemon(&workdir);

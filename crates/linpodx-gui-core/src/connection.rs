@@ -1,7 +1,5 @@
 use crate::state::{ConnectionState, Message, Snapshot};
 use anyhow::{anyhow, Context, Result};
-use iced::futures::channel::mpsc;
-use iced::futures::SinkExt;
 use linpodx_common::approval::{ApprovalRequest, ApprovalResolved};
 use linpodx_common::ipc::{
     responses, AuditQueryParams, ContainerListParams, EventTopic, ImageListParams, ImagePushParams,
@@ -16,42 +14,40 @@ use std::sync::atomic::{AtomicI64, Ordering};
 use std::time::Duration;
 use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
 use tokio::net::UnixStream;
+use tokio::sync::mpsc;
 use tracing::{debug, warn};
 
 static NEXT_ID: AtomicI64 = AtomicI64::new(1);
 
-/// Subscription that maintains a connection to the daemon, seeds the GUI with initial state,
+/// Phase 19 — daemon→GUI event-loop driver.
+///
+/// Maintains a connection to the daemon, seeds the GUI with initial state,
 /// then streams events. Reconnects with exponential backoff (1s → 30s).
-pub fn daemon_subscription(socket: PathBuf) -> iced::Subscription<Message> {
-    let id = format!("daemon-connection-{}", socket.display());
-    iced::Subscription::run_with_id(
-        id,
-        iced::stream::channel(256, move |mut output| {
-            let socket = socket.clone();
-            async move {
-                let mut backoff = Duration::from_secs(1);
-                loop {
-                    let _ = output
-                        .send(Message::ConnectionStateChanged(ConnectionState::Connecting))
-                        .await;
+///
+/// Stage 1 leaves the body as a long-running async fn that consumes a
+/// `tokio::sync::mpsc::Sender<Message>` — Stream A spawns this from a
+/// `tokio::task` started in `app_loop::spawn_daemon_task`.
+pub async fn daemon_loop(socket: PathBuf, mut output: mpsc::Sender<Message>) {
+    let mut backoff = Duration::from_secs(1);
+    loop {
+        let _ = output
+            .send(Message::ConnectionStateChanged(ConnectionState::Connecting))
+            .await;
 
-                    let result = run_session(&socket, &mut output).await;
-                    let reason = match result {
-                        Ok(()) => "daemon closed the connection".to_string(),
-                        Err(e) => format!("{e:#}"),
-                    };
-                    let _ = output
-                        .send(Message::ConnectionStateChanged(
-                            ConnectionState::Disconnected(reason),
-                        ))
-                        .await;
+        let result = run_session(&socket, &mut output).await;
+        let reason = match result {
+            Ok(()) => "daemon closed the connection".to_string(),
+            Err(e) => format!("{e:#}"),
+        };
+        let _ = output
+            .send(Message::ConnectionStateChanged(
+                ConnectionState::Disconnected(reason),
+            ))
+            .await;
 
-                    tokio::time::sleep(backoff).await;
-                    backoff = std::cmp::min(backoff * 2, Duration::from_secs(30));
-                }
-            }
-        }),
-    )
+        tokio::time::sleep(backoff).await;
+        backoff = std::cmp::min(backoff * 2, Duration::from_secs(30));
+    }
 }
 
 async fn run_session(socket: &Path, output: &mut mpsc::Sender<Message>) -> Result<()> {

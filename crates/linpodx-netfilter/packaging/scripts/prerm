@@ -1,0 +1,10 @@
+#!/bin/sh
+# Phase 18 — prerm hook. Best-effort cleanup of /run/linpodx; the socket itself
+# is removed by the daemon when it exits cleanly.
+set -e
+
+if [ -d /run/linpodx ]; then
+    rmdir /run/linpodx 2>/dev/null || true
+fi
+
+exit 0

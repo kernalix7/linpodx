@@ -25,21 +25,72 @@ pub struct Client {
 
 impl Client {
     /// Connect to the daemon over its local Unix socket.
+    ///
+    /// Phase 18 Stream D — on failure:
+    /// - if `LINPODX_AUTO_START_DAEMON` is set to a truthy value, spawn a
+    ///   detached `linpodx-daemon --fork --pid-file ...` and retry once;
+    /// - otherwise return an error pointing the user at the
+    ///   `linpodx daemon start` family of subcommands.
     pub async fn connect(socket: &Path) -> Result<Self> {
-        let stream = UnixStream::connect(socket).await.with_context(|| {
-            format!(
-                "could not connect to linpodx daemon at {}\n\
-                 is it running? start it with `linpodx-daemon` in another terminal.",
-                socket.display()
-            )
-        })?;
-        let (read, write) = stream.into_split();
-        Ok(Self {
-            transport: Transport::Unix {
-                write,
-                reader: BufReader::new(read),
-            },
-        })
+        match UnixStream::connect(socket).await {
+            Ok(stream) => {
+                let (read, write) = stream.into_split();
+                Ok(Self {
+                    transport: Transport::Unix {
+                        write,
+                        reader: BufReader::new(read),
+                    },
+                })
+            }
+            Err(first_err) => {
+                // Opt-in auto-start so we never spawn background processes
+                // silently. Off by default.
+                if crate::commands::daemon_mgmt::auto_start_enabled() {
+                    if let Err(spawn_err) = crate::commands::daemon_mgmt::spawn_detached_daemon(
+                        socket,
+                        std::time::Duration::from_secs(5),
+                    )
+                    .await
+                    {
+                        return Err(anyhow::Error::from(first_err)).with_context(|| {
+                            format!(
+                                "could not connect to linpodx daemon at {} and auto-start failed: {spawn_err}",
+                                socket.display()
+                            )
+                        });
+                    }
+                    let stream = UnixStream::connect(socket).await.with_context(|| {
+                        format!(
+                            "auto-started daemon but could not connect to {}",
+                            socket.display()
+                        )
+                    })?;
+                    let (read, write) = stream.into_split();
+                    return Ok(Self {
+                        transport: Transport::Unix {
+                            write,
+                            reader: BufReader::new(read),
+                        },
+                    });
+                }
+                let log_path = crate::commands::daemon_mgmt::default_log_file();
+                Err(anyhow::Error::from(first_err)).with_context(|| {
+                    format!(
+                        "could not connect to linpodx daemon at {}\n\
+                         \n\
+                         The daemon does not appear to be running. Start it with one of:\n  \
+                         linpodx daemon start         # foreground (Ctrl-C to stop)\n  \
+                         linpodx daemon start --fork  # daemonise + detach\n  \
+                         systemctl --user start linpodx  # if you have the systemd unit installed\n\
+                         \n\
+                         Or set LINPODX_AUTO_START_DAEMON=1 to auto-spawn on connect.\n\
+                         Daemon logs (forked mode): {}",
+                        socket.display(),
+                        log_path.display()
+                    )
+                })
+            }
+        }
     }
 
     /// Connect to a remote daemon's WebSocket listener (Phase 7).

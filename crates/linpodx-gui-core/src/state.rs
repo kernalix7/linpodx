@@ -416,7 +416,22 @@ impl App {
             Message::TabSelected(tab) => self.tab = *tab,
             Message::ConnectionStateChanged(s) => self.conn = s.clone(),
             Message::SnapshotLoaded(s) => self.apply_snapshot(s.clone()),
-            Message::EventReceived(e) => self.apply_event(e),
+            Message::EventReceived(e) => {
+                // Phase 19 Stream E wiring — fan out into the process-wide
+                // event ring (Events tab) before applying state mutations.
+                crate::rings::events::push_event(e.clone());
+                // Phase 19 Stream E wiring — daemon-side log tail captures
+                // non-container `Log` events (container logs are routed to
+                // per-container ring buffers downstream).
+                if matches!(e.kind, linpodx_common::ipc::EventKind::Log)
+                    && e.topic != linpodx_common::ipc::EventTopic::Container
+                {
+                    if let Some(line) = e.details.get("line").and_then(|v| v.as_str()) {
+                        crate::rings::daemon::push_log_line(line.to_string());
+                    }
+                }
+                self.apply_event(e);
+            }
             Message::SandboxLoaded(v) => self.sandbox_profiles = v.clone(),
             Message::AuditLoaded(v) => self.audit_entries = v.clone(),
             Message::SnapshotsLoaded(v) => {

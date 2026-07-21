@@ -71,6 +71,19 @@ jobs:
         with:
           key: release-validate
 
+      # Phase 18 — validate job builds the GUI when running `cargo test
+      # --all-features`, so the same -dev libs are required here too.
+      - name: install GUI + sqlite dev headers
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends \
+            libwayland-dev \
+            libxkbcommon-dev \
+            libegl-dev \
+            libgl-dev \
+            libsqlite3-dev \
+            pkg-config
+
       - name: cargo fmt --check
         run: cargo fmt --all -- --check
 
@@ -103,6 +116,21 @@ jobs:
         with:
           key: release-build
 
+      # Phase 18 — GUI build pulls iced/softbuffer/wgpu which need Wayland, EGL,
+      # GL and xkbcommon headers at compile time. SQLite headers come in via the
+      # daemon's sqlx-sqlite. Hard-fail if these are missing rather than letting
+      # the build silently drop the GUI binary.
+      - name: install GUI + sqlite dev headers
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends \
+            libwayland-dev \
+            libxkbcommon-dev \
+            libegl-dev \
+            libgl-dev \
+            libsqlite3-dev \
+            pkg-config
+
       - name: install packaging tools
         run: |
           cargo install cargo-deb --locked || true
@@ -117,22 +145,43 @@ jobs:
       - name: cargo deb (linpodx-daemon)
         run: cargo deb -p linpodx-daemon --no-build --output target/debian/linpodx-daemon.deb
 
+      - name: cargo deb (linpodx-gui)
+        run: cargo deb -p linpodx-gui --no-build --output target/debian/linpodx-gui.deb
+
+      - name: cargo deb (linpodx-netfilter-helper)
+        run: cargo deb -p linpodx-netfilter --no-build --output target/debian/linpodx-netfilter-helper.deb
+
       - name: cargo generate-rpm (linpodx-cli)
         run: cargo generate-rpm -p crates/linpodx-cli --output target/generate-rpm/linpodx-cli.rpm
 
       - name: cargo generate-rpm (linpodx-daemon)
         run: cargo generate-rpm -p crates/linpodx-daemon --output target/generate-rpm/linpodx-daemon.rpm
 
-      # AppImage scaffold — left as a placeholder for v0.2; linuxdeploy chain is heavy
-      # enough that we ship the raw release binaries today and expand to AppImage once
-      # we have a stable GUI launcher.
+      - name: cargo generate-rpm (linpodx-gui)
+        run: cargo generate-rpm -p crates/linpodx-gui --output target/generate-rpm/linpodx-gui.rpm
+
+      - name: cargo generate-rpm (linpodx-netfilter-helper)
+        run: cargo generate-rpm -p crates/linpodx-netfilter --output target/generate-rpm/linpodx-netfilter-helper.rpm
+
+      # Phase 18 — hard-fail tarball staging. The previous `|| tar …` fallback
+      # silently shipped tarballs without linpodx-gui; we now require all four
+      # binaries to be present (build step would have failed otherwise).
+      # The helper tarball is staged separately so privileged-helper users can
+      # download just that piece without the full archive.
       - name: stage release tarballs
         run: |
+          set -euo pipefail
           mkdir -p dist
-          tar czf dist/linpodx-${{ needs.validate.outputs.version_tag }}-linux-x86_64.tar.gz \
-            -C target/release linpodx linpodx-daemon linpodx-gui || \
-          tar czf dist/linpodx-${{ needs.validate.outputs.version_tag }}-linux-x86_64.tar.gz \
-            -C target/release linpodx linpodx-daemon
+          for bin in linpodx linpodx-daemon linpodx-gui linpodx-netfilter-helper; do
+            if [ ! -x "target/release/$bin" ]; then
+              echo "Required binary missing: target/release/$bin" >&2
+              exit 1
+            fi
+          done
+          tar czf "dist/linpodx-${{ needs.validate.outputs.version_tag }}-linux-x86_64.tar.gz" \
+            -C target/release linpodx linpodx-daemon linpodx-gui linpodx-netfilter-helper
+          tar czf "dist/linpodx-netfilter-helper-${{ needs.validate.outputs.version_tag }}-linux-x86_64.tar.gz" \
+            -C target/release linpodx-netfilter-helper
 
       - name: collect artifacts
         run: |

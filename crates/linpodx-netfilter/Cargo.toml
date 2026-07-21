@@ -16,6 +16,41 @@ path = "src/lib.rs"
 name = "linpodx-netfilter-helper"
 path = "src/bin/helper.rs"
 
+# Phase 18 — RPM packaging. The helper requires nftables and util-linux (nsenter)
+# at runtime. setcap is invoked from post_install_script (libcap-bin is a runtime
+# tool, not a library, so it's not in `requires`).
+[package.metadata.generate-rpm]
+requires = { nftables = "*", "util-linux" = "*" }
+post_install_script = """
+if command -v setcap >/dev/null 2>&1 && [ -x /usr/bin/linpodx-netfilter-helper ]; then
+    setcap cap_net_admin,cap_sys_admin+ep /usr/bin/linpodx-netfilter-helper || true
+fi
+install -d -m 0755 /run/linpodx 2>/dev/null || true
+"""
+assets = [
+    { source = "target/release/linpodx-netfilter-helper", dest = "/usr/bin/linpodx-netfilter-helper", mode = "755" },
+    { source = "README.md", dest = "/usr/share/doc/linpodx-netfilter/README.md", mode = "644", doc = true },
+    { source = "LICENSE", dest = "/usr/share/doc/linpodx-netfilter/LICENSE", mode = "644", doc = true },
+]
+
+# Phase 18 — Debian/Ubuntu packaging. The postinst script handles setcap; cargo
+# deb wires the script through `maintainer-scripts`.
+[package.metadata.deb]
+name = "linpodx-netfilter-helper"
+maintainer = "Kim DaeHyun <kernalix7@kodenet.io>"
+copyright = "2026, Kim DaeHyun <kernalix7@kodenet.io>"
+license-file = ["../../LICENSE", "0"]
+extended-description = "linpodx privileged L4 egress firewall helper (nftables-backed) for the linpodx container manager."
+section = "admin"
+priority = "optional"
+depends = "nftables, util-linux, libcap2-bin, libc6"
+maintainer-scripts = "packaging/scripts"
+assets = [
+    ["target/release/linpodx-netfilter-helper", "usr/bin/", "755"],
+    ["../../README.md", "usr/share/doc/linpodx-netfilter/README.md", "644"],
+    ["../../LICENSE", "usr/share/doc/linpodx-netfilter/copyright", "644"],
+]
+
 [dependencies]
 linpodx-common = { workspace = true }
 serde = { workspace = true }

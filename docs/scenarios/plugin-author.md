@@ -1,5 +1,13 @@
 # Scenario — Write a linpodx WASM plugin
 
+> **Status — illustrative end-to-end walkthrough.** Today the runnable
+> surface for plugin lifecycle is `linpodx plugin {install, list, enable,
+> disable, remove, key {list, revoke}}`. Five hook kinds are wired in the
+> host (`approval`, `audit_filter`, `profile_validator`, `network_trace`,
+> `runtime_injector`); the three listed below are a subset. Ed25519
+> signatures are required by default — set
+> `LINPODX_ALLOW_UNSIGNED_PLUGINS=1` for local development.
+
 linpodx plugins are WASM modules. They can hook three extension points:
 
 - **`approval`** — run alongside the built-in approval gate; vote `Allow`,

@@ -1,5 +1,16 @@
 # Scenario — Run an AI agent inside a linpodx sandbox
 
+> **Status — illustrative end-to-end walkthrough.** Today the runnable
+> surface is `linpodx sandbox {list, show, reload, apply, audit, verify,
+> profile compile}` for the profile lifecycle and `linpodx mcp {start, stop,
+> status, policy}` for the bridge. `linpodx sandbox validate` and the
+> in-line `apply --profile <path>` form below are planned; the supported
+> path today is to drop the YAML in the profiles directory and run
+> `linpodx sandbox reload`. `linpodx audit verify --session <id>` is
+> rendered as `linpodx sandbox verify` + `linpodx session timeline` today.
+> The encryption-status, approval gates, and snapshot-encryption flows
+> shown later are real.
+
 This walks through running an AI-agent CLI inside a sandboxed
 linpodx container so it can execute shell commands without touching the host.
 
@@ -122,6 +133,20 @@ image:  linpodx/snapshot/agent-1:before-refactor
 $ linpodx snapshot rollback agent-1 --to before-refactor
 rolled_back: true
 ```
+
+If the daemon was started with `LINPODX_SNAPSHOT_ENCRYPT_PASSPHRASE` or
+`LINPODX_SNAPSHOT_KEY`, the snapshot is written encrypted at rest. Inspect the
+recorded encryption metadata:
+
+```console
+$ linpodx snapshot encryption-status snap-7a3f4c2
+algorithm: aes-256-gcm
+kdf:       argon2id (m=19456, t=2, p=1)
+encrypted: true
+```
+
+The `auto_encrypt_snapshots: true` profile field flips this on for every
+pre-run snapshot taken under the active sandbox profile.
 
 ## Troubleshooting
 
