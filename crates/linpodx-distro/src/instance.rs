@@ -158,20 +158,16 @@ impl InstanceManager {
             .await?
             .ok_or_else(|| DistroError::NotFound(name.to_string()))?;
         let template = Registry::inspect(row.kind_parsed()?);
+        // No `-u` override needed here even in vm_mode: `--userns=keep-id` (set at
+        // `create` time whenever `vm_mode` is true, see `build_create_options`) maps the
+        // container's root UID 1:1 onto the invoking host user, so `podman exec`'s
+        // default (container root) already resolves to the same identity. A previous
+        // version of this code tried to add `-u <uid>` by reading the daemon process's
+        // own `UID` env var — which is never exported by shells and, even if it were,
+        // would be the daemon's UID, not the client's, making the heuristic wrong by
+        // construction on top of being dead code (the var was always unset). Removed
+        // rather than "fixed" because keep-id already makes it unnecessary.
         let mut suggested = vec!["podman".to_string(), "exec".to_string(), "-it".to_string()];
-        if row.vm_mode {
-            // keep-id maps host UID/GID, so use the same user inside.
-            if let Ok(uid) = std::env::var("UID").or_else(|_| {
-                // tokio doesn't expose `getuid` portably; libc is fine but adds a dep.
-                // Fall back to env var or whoami crate-free heuristic.
-                std::env::var("USER").map(|_| String::new())
-            }) {
-                if !uid.is_empty() {
-                    suggested.push("-u".into());
-                    suggested.push(uid);
-                }
-            }
-        }
         suggested.push(row.container_id.clone());
         suggested.push(template.default_shell.clone());
 
@@ -363,11 +359,18 @@ fn build_create_options(
         ("io.linpodx.distro".into(), template.kind.as_str().into()),
         ("io.linpodx.distro.instance".into(), params.name.clone()),
     ];
+    // `keep_alive_command` is an explicit per-template decision (see its doc comment on
+    // `TemplateMeta`): every current `default_image` runs a shell (not a real init) as
+    // PID 1, so leaving `command` empty would let the image's default CMD run with no
+    // TTY/stdin under `--detach` and exit immediately, making the instance unusable for
+    // `distro enter` / `exec`. `--systemd=true` (below) is independent of this and is
+    // still applied whenever the template declares `InitKind::Systemd`.
+    let command = template.keep_alive_command.clone().unwrap_or_default();
 
     CreateOptions {
         image: image_ref.to_string(),
         name: Some(container_name),
-        command: Vec::new(),
+        command,
         env: Vec::new(),
         labels,
         rm: false,
@@ -511,6 +514,13 @@ mod tests {
         assert!(!opts.auto_restart);
         assert!(!opts.keep_user_id);
         assert!(opts.volumes.is_empty());
+        // Regression: the stock ubuntu:24.04 image's default CMD is a shell, not
+        // systemd; without a keep-alive command the container would exit the instant
+        // it started under `--detach` (no TTY/stdin).
+        assert_eq!(
+            opts.command,
+            vec!["sleep".to_string(), "infinity".to_string()]
+        );
     }
 
     #[test]
@@ -536,6 +546,50 @@ mod tests {
         assert_eq!(opts.volumes.len(), 1);
         assert_eq!(opts.volumes[0].source, "linpodx-distro-alp-home");
         assert_eq!(opts.volumes[0].destination, HOME_PATH_IN_CONTAINER);
+        // Regression: OpenRC is never PID 1 in the stock alpine:latest image either.
+        assert_eq!(
+            opts.command,
+            vec!["sleep".to_string(), "infinity".to_string()]
+        );
+    }
+
+    /// Every current template's `default_image` is a stock upstream base image with no
+    /// init system wired up as PID 1 (see `TemplateMeta::keep_alive_command` doc
+    /// comment), so every one of them must get the keep-alive override — regardless of
+    /// what `init_kind` claims the distro *would* use once fully provisioned.
+    #[test]
+    fn build_options_injects_keep_alive_for_every_template() {
+        let kinds = [
+            DistroKind::Ubuntu,
+            DistroKind::Debian,
+            DistroKind::Fedora,
+            DistroKind::Arch,
+            DistroKind::Alpine,
+            DistroKind::NixOS,
+        ];
+        for kind in kinds {
+            let template = Registry::inspect(kind);
+            let params = DistroCreateParams {
+                kind,
+                name: "t1".into(),
+                vm_mode: false,
+                passthrough: None,
+                custom_image: None,
+                sandbox_profile: None,
+            };
+            let opts = build_create_options(&template, &params, &template.default_image, None);
+            assert_eq!(
+                opts.command,
+                vec!["sleep".to_string(), "infinity".to_string()],
+                "{kind:?} template must inject a keep-alive command so `distro enter` has \
+                 something to attach to (its default_image's CMD is not a real init)"
+            );
+            // `--systemd=true` is orthogonal and still tracks `init_kind` exactly.
+            assert_eq!(
+                opts.systemd,
+                matches!(template.init_kind, InitKind::Systemd)
+            );
+        }
     }
 
     #[test]

@@ -1,4 +1,4 @@
-use super::{desktop_passthrough, InitKind, TemplateMeta};
+use super::{desktop_passthrough, standard_keep_alive, InitKind, TemplateMeta};
 use linpodx_common::passthrough::DistroKind;
 
 pub fn template() -> TemplateMeta {
@@ -7,6 +7,7 @@ pub fn template() -> TemplateMeta {
         display_name: "Ubuntu 24.04 LTS".into(),
         default_image: "docker.io/library/ubuntu:24.04".into(),
         init_kind: InitKind::Systemd,
+        keep_alive_command: standard_keep_alive(),
         default_packages: vec![
             "sudo".into(),
             "vim".into(),

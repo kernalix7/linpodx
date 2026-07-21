@@ -1,4 +1,4 @@
-use super::{desktop_passthrough, InitKind, TemplateMeta};
+use super::{desktop_passthrough, standard_keep_alive, InitKind, TemplateMeta};
 use linpodx_common::passthrough::DistroKind;
 
 pub fn template() -> TemplateMeta {
@@ -7,6 +7,7 @@ pub fn template() -> TemplateMeta {
         display_name: "Arch Linux".into(),
         default_image: "docker.io/library/archlinux:latest".into(),
         init_kind: InitKind::Systemd,
+        keep_alive_command: standard_keep_alive(),
         default_packages: vec!["base-devel".into(), "git".into(), "vim".into()],
         default_shell: "bash".into(),
         recommended_passthrough: desktop_passthrough(),

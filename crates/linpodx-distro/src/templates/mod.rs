@@ -47,11 +47,31 @@ pub struct TemplateMeta {
     pub display_name: String,
     pub default_image: String,
     pub init_kind: InitKind,
+    /// Explicit per-template override for the container's entry command, used when
+    /// `default_image` does not actually run an init system as PID 1.
+    ///
+    /// `init_kind` describes what a *fully provisioned* instance of this distro would
+    /// use as PID 1, but every `default_image` today is a stock upstream base image —
+    /// none of them ship with systemd/OpenRC configured to run as the container's
+    /// entrypoint. Left to the image's own default `CMD` (typically an interactive
+    /// shell), the container exits the instant it starts under `--detach` (no TTY, no
+    /// stdin, EOF immediately). `Some(cmd)` keeps the container alive so `distro enter`
+    /// / `exec` has something to attach to; `None` means the image genuinely boots a
+    /// real init as PID 1 and no override is needed (no template sets this today, but
+    /// a future custom-built systemd image could).
+    pub keep_alive_command: Option<Vec<String>>,
     pub default_packages: Vec<String>,
     pub default_shell: String,
     pub recommended_passthrough: PassthroughSpec,
     pub post_create_hooks: Vec<String>,
     pub notes: String,
+}
+
+/// Standard keep-alive command for templates whose `default_image` does not run a
+/// real init system as PID 1. `sleep infinity` is available via coreutils/busybox on
+/// every template image in this registry.
+pub(crate) fn standard_keep_alive() -> Option<Vec<String>> {
+    Some(vec!["sleep".to_string(), "infinity".to_string()])
 }
 
 /// Default desktop-friendly passthrough set: Wayland + PipeWire + GPU + clipboard +

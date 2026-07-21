@@ -227,22 +227,72 @@ async fn dispatch(req: HelperRequest) -> HelperResponse {
     }
 }
 
-async fn apply(
+/// Resolve every rule's address, warning (with the full rule + error) and counting any
+/// that fail so a caller can surface the drop instead of it vanishing silently. Split
+/// out from [`apply`] so the resolution/skip-accounting logic is unit-testable without
+/// requiring the privileged `nsenter`/`nft` side effects of `apply_in_namespace`.
+async fn resolve_rules(
     container_pid: u32,
-    rules: Vec<linpodx_common::network::EgressRule>,
-) -> NetResult<usize> {
+    rules: &[linpodx_common::network::EgressRule],
+) -> (Vec<applier::ResolvedRule>, usize) {
     let mut resolved = Vec::with_capacity(rules.len());
-    for rule in &rules {
-        let addr = resolve_addr(&rule.addr).await.unwrap_or_else(|e| {
-            warn!(addr = %rule.addr, error = %e, "skipping rule: resolution failed");
-            ResolvedAddr::Ips(Vec::new())
-        });
+    let mut skipped = 0usize;
+    for rule in rules {
+        let addr = match resolve_addr(&rule.addr).await {
+            Ok(addr) => addr,
+            Err(e) => {
+                // Default-drop means a rule that silently fails to resolve narrows
+                // connectivity without a trace — always warn with the full rule so an
+                // operator can find it in the logs, and roll it into the summary below.
+                warn!(
+                    container_pid,
+                    addr = %rule.addr,
+                    proto = ?rule.proto,
+                    port = ?rule.port,
+                    note = ?rule.note,
+                    error = %e,
+                    "skipping egress rule: address resolution failed"
+                );
+                skipped += 1;
+                continue;
+            }
+        };
+        // Defensive: resolve_addr's FQDN path returns Err on an empty answer, so this
+        // should be unreachable in practice, but guard it the same way in case that
+        // contract ever changes upstream.
         if let ResolvedAddr::Ips(ips) = &addr {
             if ips.is_empty() {
+                warn!(
+                    container_pid,
+                    addr = %rule.addr,
+                    proto = ?rule.proto,
+                    port = ?rule.port,
+                    note = ?rule.note,
+                    "skipping egress rule: resolved to zero addresses"
+                );
+                skipped += 1;
                 continue;
             }
         }
         resolved.push(applier::ResolvedRule::from_parts(rule, addr));
+    }
+    (resolved, skipped)
+}
+
+async fn apply(
+    container_pid: u32,
+    rules: Vec<linpodx_common::network::EgressRule>,
+) -> NetResult<usize> {
+    let requested = rules.len();
+    let (resolved, skipped) = resolve_rules(container_pid, &rules).await;
+    if skipped > 0 {
+        warn!(
+            container_pid,
+            requested,
+            applied = resolved.len(),
+            skipped,
+            "egress ruleset apply completed with skipped rules (see per-rule warnings above)"
+        );
     }
     let ruleset = applier::build_ruleset(&resolved);
     applier::apply_in_namespace(container_pid, &ruleset).await?;
@@ -291,6 +341,47 @@ mod tests {
                 applied: HELPER_PROTOCOL_VERSION as usize
             }
         );
+    }
+
+    #[tokio::test]
+    async fn resolve_rules_counts_and_skips_unresolvable_addrs() {
+        // Deliberately avoids real DNS (flaky in CI): an empty/whitespace `addr` fails
+        // resolution synchronously inside `resolve_addr`, so this is deterministic.
+        use linpodx_common::network::EgressRule;
+        let rules = vec![
+            EgressRule {
+                proto: Default::default(),
+                addr: "127.0.0.1".into(),
+                port: None,
+                note: None,
+            },
+            EgressRule {
+                proto: Default::default(),
+                addr: "   ".into(),
+                port: None,
+                note: Some("broken-rule".into()),
+            },
+        ];
+        let (resolved, skipped) = resolve_rules(999, &rules).await;
+        assert_eq!(resolved.len(), 1, "only the resolvable rule should survive");
+        assert_eq!(
+            skipped, 1,
+            "the unresolvable rule must be counted, not dropped silently"
+        );
+    }
+
+    #[tokio::test]
+    async fn resolve_rules_all_resolvable_reports_zero_skipped() {
+        use linpodx_common::network::EgressRule;
+        let rules = vec![EgressRule {
+            proto: Default::default(),
+            addr: "10.0.0.0/8".into(),
+            port: None,
+            note: None,
+        }];
+        let (resolved, skipped) = resolve_rules(1, &rules).await;
+        assert_eq!(resolved.len(), 1);
+        assert_eq!(skipped, 0);
     }
 
     #[tokio::test]
