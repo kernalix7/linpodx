@@ -26,6 +26,117 @@ workflow extracts the whole section for the GitHub Release body.
 ### Fixed
 -->
 
+> **Note on 0.1.2 – 0.1.4**: these three sections were drafted while the work
+> was still on an unmerged working tree and **no git tags or GitHub releases
+> exist for them**. Their GUI portions (iced → egui → re_ui polish) were
+> superseded by the desktop-shell rewrite before ever shipping. The sections
+> are preserved below as historical milestones; everything in them first ships
+> as part of the next tagged release.
+
+## [0.1.4] - 2026-05-15
+
+### Highlights
+
+**egui desktop GUI gets a deep polish via re_ui adoption.** Rerun's `re_ui` 0.32 design system replaces the hand-rolled Linear/Notion palette: DesignTokens (RON-driven dark + light variants), the bundled Inter font, the `UiExt::list_item` pattern for table rows, and `apply_style_and_install_loaders` for image + font setup. The window now ships a rerun-style 3-pane shell (left navigation with 11 icon-glyph tabs, conditional bottom event ticker on monitorable tabs, central per-tab body) and a 15-icon embedded SVG set.
+
+- New left-side navigation panel (resizable 168–360 px, default 220 px) replaces the Phase 19 horizontal tab strip; selected row gets a tinted background and a 2 px accent stripe.
+- New bottom event-timeline ticker (Containers / Sandbox / Snapshot / Audit / Session / Metrics tabs only); 50 most-recent events colour-coded by `EventKind` (red = failed, green = succeeded, yellow = progress, blue = other).
+- Phase 19 widget primitives (`card` / `button` / `empty_state` / `badge`) modernised through `re_ui::ReButton::variant(...)`, `re_ui::alert::Alert::info()`, `re_ui::SectionCollapsingHeader`, and `Context::animate_bool_with_time` hover easing (0.20 s).
+- New `linpodx_gui::icons` SVG registry with 15 icons (container / image / volume / network / snapshot / sandbox / plugin / pin / approval / event / daemon / theme-light / theme-dark / settings / search) embedded via `include_bytes!` with `bytes://linpodx/icons/<name>.svg` URIs; `icon!("name")` macro at crate root.
+- Table rows in the 6 list views (container / image / volume / network / events / snapshot) now ship with `list_item`-style interaction: 1st-column click selects the row, selected rows get a 25 %-alpha accent fill, row-end action buttons (Exec / Logs / Push / Branch / Rollback / Rotate / Status / Remove / Copy JSON, etc.) carry human-readable tooltips.
+
+### Added
+
+- `re_ui = "0.32"` workspace dependency (rerun-io design system; MIT/Apache-2.0 + OFL-1.1 for the bundled Inter font).
+- `linpodx-gui` — `theme::apply_re_ui_theme(ctx, mode)` single entry point + `theme::design_tokens(ctx)` / `theme::design_tokens_for(mode)` accessors over `re_ui::DesignTokens`.
+- `linpodx-gui` — `views/sidebar.rs` left-navigation panel; `views/timeline.rs` bottom event ticker; `views/mod.rs` exports both.
+- `linpodx-gui` — `views/widgets/list_item_helpers.rs` with `list_item_row` / `list_item_row_static` / `list_item_collapsible` / `list_item_scope` thin wrappers over `re_ui::UiExt::list_item`.
+- `linpodx-gui` — `icons` module + 15 self-authored, CC0-eligible, 24 × 24 monochrome `currentColor` SVG icons under `crates/linpodx-gui/assets/icons/`.
+
+### Changed
+
+- `eframe` / `egui` / `egui-wgpu` / `egui_extras` bumped `0.29 → 0.34.2` to land on the re_ui-compatible baseline. Workspace MSRV bumped `1.85 → 1.92` to satisfy re_ui 0.32's `rust-version` floor (stable Rust is 1.93.1).
+- egui 0.29 → 0.34 breaking-change sweep across linpodx-gui (mechanical fixes): `Rounding` → `CornerRadius` (`f32` → `u8`), `Margin::same(f32)` → `Margin::same(i8)`, `WidgetVisuals.rounding` → `corner_radius`, `Visuals.window_rounding` → `window_corner_radius`, `epaint::Shadow` numeric fields `f32 / Vec2` → `u8 / [i8;2]`, `Frame::none()` → `Frame::new()`, `eframe::App::update(ctx, frame)` → `App::ui(ui, frame)`, `Panel::show(ctx, ...)` → `show_inside(ui, ...)`, `TopBottomPanel::top` → `Panel::top`, `Panel::default_height/width/width_range` → `default_size` / `size_range`.
+- `linpodx-gui` — Phase 19 `theme::Palette` + `theme::apply_to_egui_visuals` marked `#[deprecated(since = "0.1.4")]`; both stay available as backward-compat shims so the Phase 19 view files (`banner` / `daemon` / `events` / `widgets/*`) keep building during the transition.
+- `linpodx-gui` — `LinpodxApp::ui()` body re-arranged into a 3-pane shell: `Panel::top(banner)` → `Panel::bottom(timeline, conditional)` → `Panel::left(nav)` → `CentralPanel(per-tab body)` → floating dark/light toggle Area.
+
+## [0.1.3] - 2026-05-15
+
+### Highlights
+
+**Desktop GUI rewritten on egui + winit (eframe).** The previous iced 0.13 frontend is replaced wholesale with a pure-Rust egui stack (eframe + egui_wgpu + winit). All 11 tabs (Containers / Images / Volumes / Networks / Sandbox / Audit / Snapshots / Sessions / Metrics / Pinned Clients / Plugins) are ported to `egui_extras::TableBuilder` with filter/search, per-row action buttons, dark/light toggle, modal overlays, and an event/log ring backing the Events + Daemon tabs.
+
+- New egui-based desktop frontend matches Linear/Notion minimalist polish (flat surfaces, 8 px spacing scale, dense rows) with a one-click dark/light toggle in the top-right corner. Wayland and X11 supported via winit; runtime libraries unchanged from v0.1.2 (libwayland-client + libxkbcommon + EGL + GL).
+- Snapshot tab now renders a parent/child tree with KDF badges, color-coded diff panel (+/~/-), and per-row Branch / Rollback / Rotate Key / Status / Remove actions.
+- New approval-decision overlay floats above any tab when an `ApprovalRequest` arrives, with a 30-second countdown progress bar.
+- Plugins tab adds inline cluster-wide revoke modal; Pinned Clients tab adds a TOFU expiry countdown card.
+
+### Added
+
+- `linpodx-gui` — egui+winit (eframe) desktop frontend replacing the iced 0.13 implementation. Same single-binary entry (`linpodx-gui`), same Unix socket / `LINPODX_SOCKET` / `XDG_RUNTIME_DIR` lookup, same `LINPODX_GUI_THEME=dark` override.
+- `linpodx-gui` — `LINPODX_GUI_THEME=system` accepted in addition to `light` / `dark`; in `system` mode the toggle button cycles `Light → Dark → System`.
+- `linpodx-gui` — per-tab egui_extras tables with: filter/search text fields (persisted in `egui::Memory`), striped + resizable + clipped columns, empty-state messaging that distinguishes "no data" vs "no matches".
+- `linpodx-gui` — process-wide event ring (cap 1000) backing the Events tab + daemon-log tail ring (cap 200) backing the Daemon tab. Both populated automatically from the existing JSON-RPC event stream.
+- `linpodx-gui` — snapshot diff panel (color-coded +/~/-) on the Snapshot tab; new key-rotate / re-encrypt-all / encryption-status modals.
+- `linpodx-gui` — top-of-window connection status banner with Phase 18's actionable copy ("Daemon not running — start it with `linpodx daemon start`").
+- `linpodx-gui` — widget primitives module (`card` / `button` / `empty_state` / `badge`) for view consumers.
+
+### Changed
+
+- `linpodx-gui` is rewritten on `eframe = "0.29"` / `egui = "0.29"` / `egui-wgpu = "0.29"` / `egui_extras = "0.29" [features = ["all_loaders"]]`. The `iced = "0.13"` dependency is removed from the workspace `Cargo.toml`.
+- `linpodx-gui` — daemon-event channel switched from `iced::futures::channel::mpsc` to `tokio::sync::mpsc` (capacity 256). All async RPC helpers in `connection.rs` reused unchanged.
+- `linpodx-gui` packaging metadata (`.deb` / `.rpm` descriptions) updated from "iced-based" to "egui+winit".
+
+### Fixed
+
+- `linpodx-gui` — daemon log lines now surface in the Daemon tab tail (previously dropped because the iced subscription only routed container-scoped logs).
+- `linpodx-gui` — approval-decision modal renders above the active tab regardless of which tab the user was viewing when the request arrived (previously only the Approvals tab showed it).
+
+## [0.1.2] - 2026-05-15
+
+### Highlights
+
+**User first-run reliability mega-wave.** First release where a brand-new user can `./install.sh`, run `linpodx doctor`, and have everything Just Work — installers, environment diagnostics, daemon lifecycle, docker-compat aliases, shell completions, e2e CI, GUI graceful-launch, and a full Linear/Notion minimalist UI redesign across both the iced desktop app and the Web UI.
+
+- New `linpodx doctor` walks 11 stable-id environment checks (podman binary + version ≥ 4.6.0, rootless setup, cgroup v2, daemon socket permissions, sandbox profile / MCP bridge dirs, display session, SELinux, netfilter helper capabilities, GUI passthrough libs) and surfaces actionable fix-hints pointing into `docs/INSTALL.md`. `--json` for scripting; exit code 1 iff any check fails.
+- New `linpodx daemon {start,stop,status,logs}` family with systemd-style exit codes (0 running / 3 stopped / 4 stale-or-unhealthy), `--fork` detach, `--pid-file` override, and opt-in `LINPODX_AUTO_START_DAEMON=1` that auto-spawns the daemon when the CLI hits a refused socket.
+- New `install.sh --prebuilt` / `LINPODX_PREBUILT=1` path downloads the official release tarball instead of compiling from source. Cross-distro runtime-lib detection (apt/dnf/pacman/zypper) for Wayland/EGL/sqlite. `.deb` and `.rpm` now ship for all four binaries (cli + daemon + gui + netfilter-helper); v0.1.0/v0.1.1 only shipped cli + daemon.
+- UI: full Linear/Notion minimalist redesign across the iced desktop app and the Web UI — new `theme.rs` design tokens (palette / typography / spacing / radii / shadow), 12 iced views restyled, Web UI CSS custom properties with `prefers-color-scheme` + `data-theme="dark"` override (`LINPODX_GUI_THEME=dark` / `?theme=dark`). Zero functional change.
+
+### Added
+
+- `linpodx doctor [--json]` (Stream C / sandbox-team).
+- `linpodx daemon {start,stop,status,logs}` (Stream D / runtime-team) with `--fork`, `--pid-file`, `--daemon-bin`, `--log-file`, `--timeout`, `-f`, `--tail` arguments; `LINPODX_AUTO_START_DAEMON` opt-in auto-spawn.
+- `linpodx completion <shell>` (Stream B / runtime-team) for bash / zsh / fish / powershell / elvish via `clap_complete`.
+- Docker-compat noun aliases: `linpodx container {ls,run,start,stop,rm,inspect,logs,exec}` flattens to existing flat verbs; `image` (singular) / `volumes` (plural) / `networks` (plural) as visible aliases.
+- `install.sh --prebuilt` / `LINPODX_PREBUILT=1` (Stream A / platform-qa).
+- Cross-distro runtime-library detection in `install.sh::pkg_name()` covering apt / dnf / pacman / zypper.
+- `[package.metadata.deb]` and `[package.metadata.generate-rpm]` for all four binaries; new `crates/linpodx-{daemon,netfilter,gui}/packaging/` directories with `linpodx-daemon.service` systemd unit, `postinst`/`prerm` maintainer scripts (netfilter postinst runs `setcap cap_net_admin,cap_sys_admin+ep`), and a `linpodx.desktop` entry.
+- `docs/INSTALL.md` + `docs/TROUBLESHOOTING.md` (Stream F / docs) — 19 ###-level Troubleshooting entries spanning daemon connectivity, podman runtime, GUI, snapshots, plugins, remote daemon, cluster, sandbox.
+- `tests/phase18_e2e_smoke.rs` (Stream E / platform-qa) — 7 `#[ignore]`-gated scenarios: installer dry-run, doctor JSON envelope, daemon start-stop roundtrip, `docker` alias, shell completion, INSTALL.md presence, GUI graceful-launch.
+- New `podman-integration` CI job in `.github/workflows/ci.yml` — `cargo test --workspace -- --ignored --test-threads=1` on `ubuntu-24.04` with podman pre-installed; gated behind a `run-integration` PR label so default CI stays fast.
+- iced GUI startup preflight (Stream G): `preflight_display_stack()` checks `libwayland-client.so.0` + `libxkbcommon.so.0` and emits per-distro install hints + a "fall back to CLI" suggestion when missing. Escape hatch: `LINPODX_GUI_SKIP_PREFLIGHT=1`.
+- iced GUI socket-graceful banner: when the daemon socket is refused, the disconnected banner shows "Daemon not running — start it with `linpodx daemon start`" instead of a raw error message.
+- `crates/linpodx-sandbox/tests/real_run.rs` (Stream G) — 4 `#[ignore]`-gated end-to-end scenarios exercising profile apply + audit-chain integrity, real `podman create` after apply, and approval-gate grant/deny paths.
+- `crates/linpodx-runtime/tests/real_podman.rs` (Stream G) — 3 `#[ignore]`-gated scenarios: snapshot encryption round-trip, mTLS PEM material generation, and the `podman run alpine echo` smoke.
+- iced design system: `crates/linpodx-gui/src/theme.rs` (Stream H) — 17 design tokens + 11 style helpers + 6 unit tests; 12 view files restyled to consume the tokens. Light + dark via `LINPODX_GUI_THEME=dark`.
+- Web UI design system: `crates/linpodx-webui/index.html` + new `style.css` (Stream H) — CSS custom properties, `prefers-color-scheme` + `?theme=dark` override, `color-scheme` meta. Component class names preserved → zero JS/markup churn.
+
+### Changed
+
+- `linpodx-cli` connect-refused error message now points at `linpodx daemon start [--fork]` / `systemctl --user start linpodx` and includes the log path.
+- `docs/architecture.md` rebased onto v0.1.x (213 → 328 lines): Mermaid migration count 13 → 17, crate table refreshed with Phase 10-17 capabilities, migrations 0014–0017 added, new §5 covering encryption + KDF / remote-daemon trust / plugin signing / cluster Raft state machine + K8s write / SELinux profile generation / vendored xterm / `diff_v2` file-changes.
+- `README.md` Prerequisites lists the iced runtime libs (`libwayland-client0`, `libxkbcommon0`, `libegl1`, `libgl1`, `libxcb1`) and gains a Snapshot Encryption section.
+- `crates/linpodx-cli/src/main.rs` reorganised: per-command groups now live in `crates/linpodx-cli/src/commands/{doctor,daemon_mgmt,container,completion,image,volume,network}.rs`; `main.rs` keeps the top-level `Cmd` enum + dispatch.
+- All 5 `docs/scenarios/*.md` files now lead with a "Status — illustrative end-to-end walkthrough" banner clarifying which commands match `linpodx --help` today versus which are aspirational.
+- `clap_complete` promoted to `[workspace.dependencies]` for cross-crate reuse.
+
+### Fixed
+
+- `winpodx` → `linpodx` typo across `README.md`, `CONTRIBUTING.md`, `docs/INSTALL.md`, and `docs/CHANGELOG.ko.md`.
+- `release.yml` tarball staging is hard-fail (per-binary `set -e` + presence check) instead of silently producing an empty archive when one of the binaries failed to build.
+- Daemon now writes (and unlinks) a pid-file alongside the socket — previously a crashed daemon could leave the socket dangling with no way to know whether the process was alive.
+
 ## [0.1.1] - 2026-05-14
 
 ### Highlights
