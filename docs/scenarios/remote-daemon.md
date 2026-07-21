@@ -1,5 +1,15 @@
 # Scenario — Manage a remote linpodx daemon over WebSocket + mTLS
 
+> **Status — illustrative end-to-end walkthrough.** The daemon's actual
+> flags today are `--remote-listen <addr>` / `--remote-token <token>` /
+> `--tls-cert` / `--tls-key` / `--client-ca` / `--pin-clients`, and the
+> client uses `linpodx --remote <ws-or-wss-url> --token <token>` (plus
+> `--client-cert` / `--client-key` / `--client-ca` for mTLS). The
+> `--listen-tcp` / `--remote-token-file` / `linpodx ctx add` ergonomics
+> shown below are planned; until they ship use the README's
+> [Remote daemon](../../README.md#remote-daemon) section as the source of
+> truth.
+
 You can drive a linpodx daemon on a remote box (a homelab server, a CI runner, a
 co-located dev workstation) from your laptop's CLI, GUI, or Web UI. The transport is
 WebSocket over TLS with mutual auth.

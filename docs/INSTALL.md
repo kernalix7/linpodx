@@ -2,9 +2,8 @@
 
 [Back to README](../README.md)
 
-linpodx installs from source today. The installer follows the same release posture
-as winpodx: the default path installs the latest published release, while `main`
-and arbitrary refs are explicit choices.
+linpodx installs from source today. The default installer path pulls the latest
+published release; `main` and arbitrary refs are explicit choices.
 
 ## Quick install
 

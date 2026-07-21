@@ -1,8 +1,16 @@
 # Scenario — Run a GUI application inside a container with Wayland passthrough
 
-linpodx exposes a `--passthrough` flag that wires the host Wayland socket, audio,
-clipboard, and (optionally) GPU into the container. The result is a containerized
-app that windows on your host like any other native app.
+> **Status — illustrative end-to-end walkthrough.** The runnable surface today
+> is profile-driven: edit a sandbox profile's `passthrough:` block with
+> `linpodx passthrough {grant, revoke, status}` and apply it with
+> `linpodx run --sandbox <profile>`. The inline `linpodx run --passthrough …`
+> form shown below is the target ergonomics and is planned for a later
+> release; the underlying behaviour (Wayland / audio / clipboard / GPU
+> surfaces) is already wired through `linpodx-runtime::passthrough` today.
+
+linpodx wires the host Wayland socket, audio, clipboard, and (optionally) GPU
+into the container so a containerized app windows on your host like any other
+native app.
 
 ## What gets passed through
 

@@ -50,7 +50,9 @@ cargo test --workspace
 ### Integration tests (Podman required)
 
 Integration tests that talk to a real Podman are gated with `#[ignore]` so the
-default `cargo test` run stays hermetic. Run them explicitly:
+default `cargo test` run stays hermetic. Install Podman 4.6.0 or newer (see
+[docs/INSTALL.md](docs/INSTALL.md) for distro instructions), then run them
+explicitly:
 
 ```bash
 cargo test --workspace -- --ignored --test-threads=1
@@ -58,6 +60,15 @@ cargo test --workspace -- --ignored --test-threads=1
 
 `--test-threads=1` is mandatory — multiple integration tests touching the same Podman
 socket will race.
+
+Cross-crate integration tests live under the workspace-level `tests/` crate.
+Crate-local integration tests live under `crates/<crate>/tests/`. Both run from
+the same `cargo test --workspace` command.
+
+Snapshot-encryption integration tests honour the same environment variables the
+daemon does (`LINPODX_SNAPSHOT_ENCRYPT_PASSPHRASE`, `LINPODX_SNAPSHOT_KEY`,
+`LINPODX_SNAPSHOT_KDF`). Tests that need encryption set these variables on the
+spawned daemon, not on the test process itself.
 
 ### Lint
 
@@ -138,8 +149,8 @@ is the source of truth.
   `REL-v0.2.0-rc.1`.
 - RTM suffixes and four-component versions are not used.
 
-This mirrors the winpodx release discipline: rapid tag iteration should not publish a
-GitHub Release accidentally. A release needs both tags pointed at the same commit.
+This release discipline keeps rapid tag iteration from publishing a GitHub Release
+accidentally. A release needs both tags pointed at the same commit.
 
 ```bash
 git tag -a vX.Y.Z -m "linpodx vX.Y.Z"

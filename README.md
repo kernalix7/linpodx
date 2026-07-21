@@ -96,7 +96,7 @@ Use `--purge` to remove local linpodx data/config as well. Podman containers, im
 
 ## Choose a version
 
-The installer follows the winpodx release posture: default to the latest published release, make `main` and arbitrary refs explicit.
+The installer follows the linpodx release posture: default to the latest published release, make `main` and arbitrary refs explicit.
 
 ```bash
 # Latest stable release (default)
@@ -137,6 +137,11 @@ Environment variables mirror the flags: `LINPODX_SOURCE`, `LINPODX_REF`, `LINPOD
 - Podman 4.6.0 or newer, rootless preferred.
 - Rust 1.85+ for source builds. `rust-toolchain.toml` pins the workspace baseline.
 - `rustfmt` and `clippy` for development.
+- Runtime libraries for the iced GUI (most distros ship these by default — see
+  [Troubleshooting](#troubleshooting) if `linpodx-gui` fails to start):
+  - `libwayland-client0` and `libxkbcommon0` on Wayland sessions
+  - `libx11-6` and `libxcb1` on X11 sessions
+  - `libegl1` and `libgl1` for wgpu rendering
 - Optional: `nftables`, `util-linux` / `nsenter`, and `setcap` for the privileged L4 egress helper.
 
 The helper is intentionally opt-in because it needs `CAP_NET_ADMIN` and `CAP_SYS_ADMIN`:
@@ -460,6 +465,7 @@ Rootless Podman + Linux desktop integrations
 | [CHANGELOG.md](CHANGELOG.md) | v0.1.0 release notes and pre-release phase history |
 | [docs/README.ko.md](docs/README.ko.md) | Korean overview |
 | [docs/INSTALL.md](docs/INSTALL.md) | Installer, uninstall, offline/source install, prerequisites |
+| [docs/TROUBLESHOOTING.md](docs/TROUBLESHOOTING.md) | First-run snags and recovery steps |
 | [docs/RELEASE.md](docs/RELEASE.md) | Versioning, tag discipline, release checklist |
 | [docs/architecture.md](docs/architecture.md) | System architecture, data flow, trust boundaries |
 | [docs/scenarios/ai-agent-sandbox.md](docs/scenarios/ai-agent-sandbox.md) | Sandbox workflow |
@@ -513,6 +519,49 @@ cargo +1.85 run -p linpodx-daemon
 cargo +1.85 run -p linpodx-cli -- ps --all
 cargo +1.85 run -p linpodx-gui
 ```
+
+## Snapshot encryption
+
+Snapshots can be stored encrypted at rest with AES-256-GCM. Encryption is opt-in
+through environment variables read by the daemon at startup:
+
+| Variable | Meaning |
+|----------|---------|
+| `LINPODX_SNAPSHOT_ENCRYPT_PASSPHRASE` | Derive the encryption key from this passphrase. Required for the passphrase path. |
+| `LINPODX_SNAPSHOT_KEY` | Use this raw base64-encoded 32-byte key directly. Mutually exclusive with the passphrase. |
+| `LINPODX_SNAPSHOT_KDF` | `argon2id` (default; OWASP 2023 baseline `m=19456, t=2, p=1`) or `sha256-rounds-1k` for backward compatibility. |
+
+When neither variable is set, snapshots are written unencrypted (the original
+v0.1.0 behaviour). Existing snapshots written under one KDF keep their original
+KDF tag; use `linpodx snapshot key-rotate` and `linpodx snapshot re-encrypt-all`
+to migrate the on-disk corpus. Inspect a single snapshot with:
+
+```bash
+linpodx snapshot encryption-status <snapshot_id>
+```
+
+## Troubleshooting
+
+Common first-run snags:
+
+- **`daemon: connection refused`** — start the daemon (`linpodx-daemon &`).
+- **`podman: command not found` / version too old** — install Podman 4.6.0+
+  for your distro.
+- **`linpodx-gui` panics with `wgpu` / `wayland` / `EGL`** — install the
+  runtime libraries listed under [Prerequisites](#prerequisites).
+- **`snapshot decryption failed`** — match the same
+  `LINPODX_SNAPSHOT_ENCRYPT_PASSPHRASE` / `LINPODX_SNAPSHOT_KEY` /
+  `LINPODX_SNAPSHOT_KDF` the snapshot was created with.
+- **`plugin signature rejected`** — install the publisher's public key under
+  `~/.config/linpodx/plugins/keys/`, or set `LINPODX_ALLOW_UNSIGNED_PLUGINS=1`
+  for local development.
+- **Container starts but has no network egress** — the active sandbox profile
+  is in `network: kind: allowlist`; widen it or run without `--sandbox`.
+
+See [docs/TROUBLESHOOTING.md](docs/TROUBLESHOOTING.md) for the full list
+(daemon connectivity, podman runtime, GUI startup, snapshot encryption +
+key-rotation, plugin signatures + revocation, remote daemon mTLS + pinning,
+cluster leader routing, sandbox approvals).
 
 ## Security
 
