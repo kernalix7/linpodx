@@ -6,6 +6,22 @@
 //! the bridge audits the call. Phase 2D shipped a static allowlist; Phase 2E adds a
 //! per-method [`McpPolicyRule`] store evaluated through [`PolicyEngine`] plus an
 //! optional [`ApprovalGateway`] for `Prompt` decisions.
+//!
+//! ## Fail-closed on unparseable frames
+//!
+//! When a policy engine is configured (the policy store is non-empty), an inbound line
+//! that [`McpMessage::parse`] cannot recognize is **denied**, not forwarded. Otherwise a
+//! parser-differential payload — one this crate's parser rejects but the downstream MCP
+//! server still understands — would silently bypass every `Deny` rule. The legacy static
+//! allowlist path (which forwards method-less/malformed lines as audit-only) runs **only
+//! when no policy is configured at all**, preserving backward compatibility for pre-2E
+//! deployments. There is deliberately no env-var escape hatch: if a profile genuinely
+//! needs to pass unparseable frames it must opt in explicitly via the policy schema
+//! (default deny), which lives in `linpodx-common` and is not wired here.
+//!
+//! Denied unparseable frames are audited as [`AuditSinkKind::McpToolDenied`] with a
+//! distinct `decision` field of `"unparseable_denied"` (the shared audit-kind enum is
+//! owned by `linpodx-common`, so the distinguishing marker rides in the payload).
 
 use crate::policy::PolicyEngine;
 use crate::protocol::{self, McpMessage};
@@ -472,32 +488,52 @@ async fn pump<R, W>(
                     (dec, !rules.is_empty())
                 };
 
-                // Resolve the final decision: prefer the policy engine when rules are
-                // loaded *and* the message parsed; otherwise fall back to the legacy
-                // static allowlist so existing deployments keep working.
-                let final_decision = if let (true, Some(dec)) = (policy_active, policy_decision) {
-                    let method = parsed.as_ref().map(|m| m.method_str().to_string());
-                    let tool = parsed
-                        .as_ref()
-                        .and_then(|m| m.tool_name().map(String::from));
-                    resolve_via_policy(&ctx, dec, method, tool, parsed.as_ref()).await
-                } else {
-                    let method = parsed
-                        .as_ref()
-                        .map(|m| m.method_str().to_string())
-                        .or_else(|| extract_method(&trimmed));
-                    let allowlist_dec = check_allowlist(&ctx.allowlist, method.as_deref());
-                    Decision {
-                        forward: matches!(
-                            allowlist_dec,
-                            AllowlistDecision::Allowed | AllowlistDecision::AuditOnly
-                        ),
-                        audit_kind: match allowlist_dec {
-                            AllowlistDecision::Denied => AuditSinkKind::McpToolDenied,
-                            _ => AuditSinkKind::McpToolCalled,
-                        },
-                        decision_str: allowlist_dec.as_str(),
-                        method,
+                // Resolve the final decision. `policy_decision` is `Some` exactly when the
+                // message parsed, so the three arms below are: (1) policy configured and
+                // message parsed → policy engine; (2) policy configured but the frame is
+                // unparseable → fail *closed* (deny), never fall through to the allowlist,
+                // otherwise a parser-differential payload bypasses every Deny rule; (3) no
+                // policy configured → legacy static allowlist, keeping pre-2E deployments
+                // working.
+                let final_decision = match (policy_active, policy_decision) {
+                    (true, Some(dec)) => {
+                        let method = parsed.as_ref().map(|m| m.method_str().to_string());
+                        let tool = parsed
+                            .as_ref()
+                            .and_then(|m| m.tool_name().map(String::from));
+                        resolve_via_policy(&ctx, dec, method, tool, parsed.as_ref()).await
+                    }
+                    (true, None) => {
+                        warn!(
+                            direction,
+                            bridge_id = %ctx.bridge_id,
+                            "unparseable frame denied under active policy (fail-closed)"
+                        );
+                        Decision {
+                            forward: false,
+                            audit_kind: AuditSinkKind::McpToolDenied,
+                            decision_str: "unparseable_denied",
+                            method: None,
+                        }
+                    }
+                    (false, _) => {
+                        let method = parsed
+                            .as_ref()
+                            .map(|m| m.method_str().to_string())
+                            .or_else(|| extract_method(&trimmed));
+                        let allowlist_dec = check_allowlist(&ctx.allowlist, method.as_deref());
+                        Decision {
+                            forward: matches!(
+                                allowlist_dec,
+                                AllowlistDecision::Allowed | AllowlistDecision::AuditOnly
+                            ),
+                            audit_kind: match allowlist_dec {
+                                AllowlistDecision::Denied => AuditSinkKind::McpToolDenied,
+                                _ => AuditSinkKind::McpToolCalled,
+                            },
+                            decision_str: allowlist_dec.as_str(),
+                            method,
+                        }
                     }
                 };
 
@@ -1039,6 +1075,62 @@ mod tests {
         // No rules, no gateway, no allowlist. Should be audit-only forward.
         let (out, log) = run_pump_with(vec![], None, line).await;
         assert!(!out.is_empty());
+        assert!(log
+            .iter()
+            .any(|(k, _)| matches!(k, AuditSinkKind::McpToolCalled)));
+    }
+
+    #[tokio::test]
+    async fn unparseable_frame_denied_under_active_policy() {
+        // A configured policy (non-empty store) must fail *closed* on a frame this crate's
+        // parser rejects — otherwise a parser-differential payload bypasses every Deny rule.
+        let rules = vec![rule("tools/call", None, McpPolicyDecision::Deny)];
+        let line = "this is not valid json at all";
+        let (out, log) = run_pump_with(rules, None, line).await;
+        assert!(
+            out.is_empty(),
+            "unparseable frame must be dropped under an active policy"
+        );
+        let last = log.last().expect("audit entry");
+        assert!(
+            matches!(last.0, AuditSinkKind::McpToolDenied),
+            "denied unparseable frame audits as McpToolDenied"
+        );
+        assert_eq!(
+            last.1.get("decision").and_then(|v| v.as_str()),
+            Some("unparseable_denied"),
+            "distinct decision marker for unparseable frames"
+        );
+    }
+
+    #[tokio::test]
+    async fn parseable_unmatched_method_denied_under_denylist_policy() {
+        // With any Deny rule present, an unmatched (but parseable) method inherits the
+        // derived default action of Deny rather than fail-open forwarding.
+        let rules = vec![rule(
+            "tools/call",
+            Some("write_file"),
+            McpPolicyDecision::Deny,
+        )];
+        let line = r#"{"jsonrpc":"2.0","id":1,"method":"tools/list"}"#;
+        let (out, log) = run_pump_with(rules, None, line).await;
+        assert!(out.is_empty(), "unmatched method under denylist must drop");
+        assert!(log
+            .iter()
+            .any(|(k, _)| matches!(k, AuditSinkKind::McpToolDenied)));
+    }
+
+    #[tokio::test]
+    async fn unparseable_frame_forwarded_in_pure_legacy_mode() {
+        // No policy configured → the legacy static-allowlist path runs. An empty allowlist
+        // treats method-less/malformed lines as audit-only and forwards them, preserving
+        // pre-2E behavior.
+        let line = "not valid json";
+        let (out, log) = run_pump_with(vec![], None, line).await;
+        assert!(
+            !out.is_empty(),
+            "pure-legacy mode forwards unparseable frames audit-only"
+        );
         assert!(log
             .iter()
             .any(|(k, _)| matches!(k, AuditSinkKind::McpToolCalled)));
