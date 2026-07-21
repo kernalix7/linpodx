@@ -9,6 +9,7 @@ mod remote;
 mod server;
 mod snapshot_auto_encrypt;
 mod web_ui;
+mod web_ui_local;
 
 use crate::approval::{ApprovalRegistry, PluginAwareApprovalGateway};
 use crate::config::DaemonConfig;

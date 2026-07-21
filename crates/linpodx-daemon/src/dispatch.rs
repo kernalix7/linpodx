@@ -79,6 +79,11 @@ pub struct Dispatcher {
     /// `Method::DaemonMgmtStatus` to compute `uptime_secs`. `Instant` is
     /// monotonic so this stays sensible across NTP adjustments.
     pub start_time: std::time::Instant,
+    /// Phase 24 — cached loopback plaintext Web UI listener for the desktop
+    /// shell. Lazily populated by `Method::WebUiEnsure` (see
+    /// [`crate::web_ui_local`]); `None` until the shell first asks for it.
+    /// Independent of the `remote` field / `--remote-listen` listener.
+    pub web_ui_local: Arc<Mutex<Option<crate::web_ui_local::WebUiLocalHandle>>>,
 }
 
 impl Dispatcher {
@@ -116,6 +121,7 @@ impl Dispatcher {
             pin_store,
             tofu: new_tofu_handle(),
             start_time: std::time::Instant::now(),
+            web_ui_local: Arc::new(Mutex::new(None)),
         }
     }
 
@@ -1945,6 +1951,10 @@ impl Dispatcher {
                     socket_path: None,
                     uptime_secs: Some(self.start_time.elapsed().as_secs()),
                 };
+                Ok(serde_json::to_value(resp)?)
+            }
+            Method::WebUiEnsure(_) => {
+                let resp = crate::web_ui_local::ensure(self).await?;
                 Ok(serde_json::to_value(resp)?)
             }
         }

@@ -272,6 +272,11 @@ pub enum Method {
     DaemonMgmtStart(DaemonMgmtStartParams),
     DaemonMgmtStop,
     DaemonMgmtStatus,
+    // Phase 24 — ensure the daemon's loopback plaintext Web UI listener is up
+    // and return its URL + bearer token. Used by the Tauri desktop shell to
+    // point its webview at the daemon-served leptos UI. Independent of the
+    // `--remote-listen` listener (which may be TLS/mTLS).
+    WebUiEnsure(WebUiEnsureParams),
 }
 
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
@@ -1287,6 +1292,15 @@ fn default_true() -> bool {
     true
 }
 
+// ----- Local Web UI listener (Phase 24) -----
+
+/// Params for [`Method::WebUiEnsure`]. Intentionally empty — the daemon owns the
+/// bind address (ephemeral loopback) and token generation. Kept as a struct
+/// (rather than a unit variant) so future knobs can be added without a wire
+/// break.
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+pub struct WebUiEnsureParams {}
+
 /// Successful response payload helpers (typed views over the JSON `result`).
 pub mod responses {
     use super::*;
@@ -2106,6 +2120,21 @@ pub mod responses {
         /// Daemon uptime in seconds, when discoverable.
         #[serde(default, skip_serializing_if = "Option::is_none")]
         pub uptime_secs: Option<u64>,
+    }
+
+    // ----- Local Web UI listener response (Phase 24) -----
+    #[derive(Debug, Clone, Serialize, Deserialize)]
+    pub struct WebUiEnsureResponse {
+        /// Base URL of the loopback plaintext listener, e.g.
+        /// `http://127.0.0.1:53187`. The shell navigates to
+        /// `<url>/ui/?token=<token>`.
+        pub url: String,
+        /// Per-daemon-lifetime bearer token accepted by the `/api/v1/*` and
+        /// WebSocket auth paths on this listener.
+        pub token: String,
+        /// `true` when this call bound + spawned the listener; `false` when a
+        /// previously-started listener was reused (url/token are stable).
+        pub started: bool,
     }
 }
 

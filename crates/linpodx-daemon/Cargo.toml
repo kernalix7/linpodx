@@ -80,6 +80,8 @@ x509-parser = { workspace = true }
 # Phase 15 — sha-256 fingerprint of pinned client certs + persistence
 sha2 = { workspace = true }
 sqlx = { workspace = true }
+# Phase 24 — random bearer token for the loopback Web UI listener.
+rand = { workspace = true }
 
 [dev-dependencies]
 tempfile = { workspace = true }
