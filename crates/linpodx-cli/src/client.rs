@@ -1,6 +1,7 @@
 use anyhow::{anyhow, bail, Context, Result};
 use linpodx_common::ipc::{
-    Event, Method, Notification, ResponsePayload, RpcRequest, RpcResponse, ServerMessage,
+    error_codes, Event, Method, Notification, ResponsePayload, RpcError, RpcRequest, RpcResponse,
+    ServerMessage,
 };
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicI64, Ordering};
@@ -8,6 +9,21 @@ use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
 use tokio::net::UnixStream;
 
 static NEXT_ID: AtomicI64 = AtomicI64::new(1);
+
+/// Render a daemon [`RpcError`] for stderr.
+///
+/// Preserves the historical `daemon error (code <n>): <msg>` tail so scripts
+/// grepping the numeric code or the message keep working, and prepends the
+/// stable symbolic code label (`[NOT_FOUND]`, `[UNSUPPORTED]`, …) so humans and
+/// newer tooling can branch on the taxonomy without decoding the integer.
+fn format_daemon_error(error: &RpcError) -> String {
+    format!(
+        "daemon error [{}] (code {}): {}",
+        error_codes::code_name(error.code),
+        error.code,
+        error.message
+    )
+}
 
 /// One of the two underlying IPC transports — Unix socket (default) or WebSocket
 /// (Phase 7 remote daemon). The CLI's high-level [`Client`] wraps either kind.
@@ -136,7 +152,7 @@ impl Client {
                 serde_json::from_value(result).map_err(|e| anyhow!("decoding result: {e}"))
             }
             ResponsePayload::Error { error } => {
-                bail!("daemon error (code {}): {}", error.code, error.message)
+                bail!("{}", format_daemon_error(&error))
             }
         }
     }
@@ -190,29 +206,6 @@ impl Client {
                 .with_context(|| format!("parsing server message: {trimmed}"))?;
             return Ok(Some(msg));
         }
-    }
-
-    /// `notify` variant for fire-and-forget calls.
-    #[allow(dead_code)]
-    pub async fn notify(&mut self, method: Method) -> Result<()> {
-        let req = RpcRequest {
-            jsonrpc: linpodx_common::ipc::JsonRpcVersion::V2,
-            id: None,
-            method,
-        };
-        let payload = serde_json::to_string(&req)?;
-        match &mut self.transport {
-            Transport::Unix { write, .. } => {
-                let mut bytes = payload.into_bytes();
-                bytes.push(b'\n');
-                write.write_all(&bytes).await?;
-                write.flush().await.ok();
-            }
-            Transport::Remote(r) => {
-                r.send(&payload).await?;
-            }
-        }
-        Ok(())
     }
 }
 
@@ -547,7 +540,44 @@ impl PtyWsClient {
 
 #[cfg(test)]
 mod tests {
-    use super::{build_pty_ws_url, normalize_remote_url, url_encode};
+    use super::{build_pty_ws_url, format_daemon_error, normalize_remote_url, url_encode};
+    use linpodx_common::ipc::{error_codes, RpcError};
+
+    #[test]
+    fn daemon_error_display_labels_code_and_keeps_tail() {
+        let s = format_daemon_error(&RpcError {
+            code: error_codes::NOT_FOUND,
+            message: "no such container".into(),
+            data: None,
+        });
+        // Symbolic label prefix + preserved numeric tail + message.
+        assert_eq!(
+            s,
+            "daemon error [NOT_FOUND] (code -32001): no such container"
+        );
+        // The historical grep targets still match as substrings.
+        assert!(s.contains("(code -32001): no such container"));
+    }
+
+    #[test]
+    fn daemon_error_display_covers_new_taxonomy() {
+        let s = format_daemon_error(&RpcError {
+            code: error_codes::UNSUPPORTED,
+            message: "raft not enabled".into(),
+            data: None,
+        });
+        assert!(s.starts_with("daemon error [UNSUPPORTED] (code -32007): "));
+    }
+
+    #[test]
+    fn daemon_error_display_falls_back_on_unknown_code() {
+        let s = format_daemon_error(&RpcError {
+            code: -32050,
+            message: "future".into(),
+            data: None,
+        });
+        assert_eq!(s, "daemon error [ERROR] (code -32050): future");
+    }
 
     #[test]
     fn normalize_bare_host_port() {

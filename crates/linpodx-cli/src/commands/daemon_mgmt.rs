@@ -15,10 +15,49 @@
 //! `DaemonMgmtStart` / `DaemonMgmtStop` / `DaemonMgmtStatus` live in
 //! `linpodx-daemon/src/dispatch.rs` and are filled by the same stream.
 
+use crate::client::Client;
+use crate::commands::daemon_pin::PinClientCmd;
 use anyhow::{anyhow, bail, Context, Result};
 use clap::{Args, Subcommand};
 use std::path::{Path, PathBuf};
 use std::time::Duration;
+
+/// `linpodx daemon <...>` — cert generation, pinned-client management, and
+/// process lifecycle (start / stop / status / logs).
+#[derive(Subcommand, Debug)]
+pub(crate) enum DaemonCmd {
+    /// mTLS / TLS certificate utilities.
+    #[command(subcommand)]
+    Cert(CertCmd),
+    /// Manage pinned WebSocket client certificates (Phase 15).
+    #[command(subcommand, name = "pin-client")]
+    PinClient(PinClientCmd),
+    // Phase 18 Stream D — daemon process lifecycle. Each of these dispatches
+    // off the fast-path in `main()` because none of them need a running
+    // daemon to be useful (`start` *creates* one; `stop` signals it;
+    // `status` and `logs` poll files on disk).
+    /// Start the linpodx daemon (foreground by default; `--fork` to detach).
+    Start(StartArgs),
+    /// Send SIGTERM to a running daemon (looked up via pid-file).
+    Stop(StopArgs),
+    /// Report daemon status (running / stopped / stale-socket).
+    Status(StatusArgs),
+    /// Tail the daemon's stderr log file (forked-mode only).
+    Logs(LogsArgs),
+}
+
+#[derive(Subcommand, Debug)]
+pub(crate) enum CertCmd {
+    /// Generate a self-signed CA plus server + client leaf certs signed by it.
+    /// Output layout: `ca.pem`, `ca-key.pem`, `server-cert.pem`, `server-key.pem`,
+    /// `client-cert.pem`, `client-key.pem`.
+    Generate {
+        /// Output directory. Default: `${XDG_CONFIG_HOME:-~/.config}/linpodx/certs`.
+        /// Created with mode 0700 if missing; private keys are written as 0600.
+        #[arg(long)]
+        out: Option<PathBuf>,
+    },
+}
 
 /// Subcommands exposed under `linpodx daemon {start,stop,status,logs}`.
 #[derive(Subcommand, Debug)]
@@ -323,6 +362,476 @@ pub async fn spawn_detached_daemon(socket: &Path, timeout: Duration) -> Result<(
         timeout,
         log_file.display()
     );
+}
+
+// ---------------------------------------------------------------------------
+// Phase 10: `linpodx daemon cert generate`
+// ---------------------------------------------------------------------------
+
+/// Phase 10: generate a self-signed CA + server-leaf + client-leaf bundle into
+/// `out` (default `${XDG_CONFIG_HOME:-~/.config}/linpodx/certs`). Layout:
+///   ca.pem            (CA cert)
+///   ca-key.pem        (CA private key — keep offline once issuance is done)
+///   server-cert.pem   (server leaf, SAN: localhost, 127.0.0.1)
+///   server-key.pem
+///   client-cert.pem   (client leaf, CN: linpodx-client)
+///   client-key.pem
+pub(crate) async fn handle_cert_generate(out: Option<PathBuf>) -> Result<()> {
+    use rcgen::{BasicConstraints, CertificateParams, DistinguishedName, DnType, IsCa, KeyPair};
+
+    let dir = match out {
+        Some(p) => p,
+        None => default_cert_dir()?,
+    };
+
+    std::fs::create_dir_all(&dir)
+        .with_context(|| format!("creating cert dir {}", dir.display()))?;
+    set_dir_mode_0700(&dir)?;
+
+    // CA — long-lived issuer the daemon's `--client-ca` and the CLI's `--ca` both
+    // trust. Generated locally so a fresh user can bootstrap without external
+    // tooling. Validity: ~10 years to match typical homelab cadence.
+    let mut ca_params =
+        CertificateParams::new(Vec::<String>::new()).context("CA cert params init")?;
+    ca_params.distinguished_name = DistinguishedName::new();
+    ca_params
+        .distinguished_name
+        .push(DnType::CommonName, "linpodx-ca");
+    ca_params.is_ca = IsCa::Ca(BasicConstraints::Unconstrained);
+    apply_validity(&mut ca_params, 365 * 10);
+    let ca_key = KeyPair::generate().context("CA keypair")?;
+    let ca_cert = ca_params.self_signed(&ca_key).context("CA self-sign")?;
+
+    // Server leaf — covers `localhost` + the loopback IP so the most common
+    // `--remote-listen 127.0.0.1:<port>` setup works out of the box.
+    let mut server_params =
+        CertificateParams::new(vec!["localhost".to_string(), "127.0.0.1".to_string()])
+            .context("server cert params init")?;
+    server_params.distinguished_name = DistinguishedName::new();
+    server_params
+        .distinguished_name
+        .push(DnType::CommonName, "linpodx-daemon");
+    apply_validity(&mut server_params, 365);
+    let server_key = KeyPair::generate().context("server keypair")?;
+    let server_cert = server_params
+        .signed_by(&server_key, &ca_cert, &ca_key)
+        .context("server signed_by ca")?;
+
+    // Client leaf — CN is just an identity tag the daemon's `remote_mtls_accepted`
+    // audit entry surfaces.
+    let mut client_params = CertificateParams::new(vec!["linpodx-client".to_string()])
+        .context("client cert params init")?;
+    client_params.distinguished_name = DistinguishedName::new();
+    client_params
+        .distinguished_name
+        .push(DnType::CommonName, "linpodx-client");
+    apply_validity(&mut client_params, 365);
+    let client_key = KeyPair::generate().context("client keypair")?;
+    let client_cert = client_params
+        .signed_by(&client_key, &ca_cert, &ca_key)
+        .context("client signed_by ca")?;
+
+    let ca_pem = dir.join("ca.pem");
+    let ca_key_pem = dir.join("ca-key.pem");
+    let server_cert_pem = dir.join("server-cert.pem");
+    let server_key_pem = dir.join("server-key.pem");
+    let client_cert_pem = dir.join("client-cert.pem");
+    let client_key_pem = dir.join("client-key.pem");
+
+    write_cert(&ca_pem, &ca_cert.pem())?;
+    write_key(&ca_key_pem, &ca_key.serialize_pem())?;
+    write_cert(&server_cert_pem, &server_cert.pem())?;
+    write_key(&server_key_pem, &server_key.serialize_pem())?;
+    write_cert(&client_cert_pem, &client_cert.pem())?;
+    write_key(&client_key_pem, &client_key.serialize_pem())?;
+
+    println!("wrote certs to {}", dir.display());
+    println!("  CA          : {}", ca_pem.display());
+    println!(
+        "  CA key      : {} (mode 0600 — keep offline once done)",
+        ca_key_pem.display()
+    );
+    println!("  server cert : {}", server_cert_pem.display());
+    println!("  server key  : {} (mode 0600)", server_key_pem.display());
+    println!("  client cert : {}", client_cert_pem.display());
+    println!("  client key  : {} (mode 0600)", client_key_pem.display());
+    println!();
+    println!(
+        "daemon: --remote-cert {} --remote-key {} --client-ca {}",
+        server_cert_pem.display(),
+        server_key_pem.display(),
+        ca_pem.display()
+    );
+    println!(
+        "client: --client-cert {} --client-key {} --ca {}",
+        client_cert_pem.display(),
+        client_key_pem.display(),
+        ca_pem.display()
+    );
+    Ok(())
+}
+
+fn default_cert_dir() -> Result<PathBuf> {
+    let base = if let Ok(xdg) = std::env::var("XDG_CONFIG_HOME") {
+        PathBuf::from(xdg)
+    } else {
+        let home = std::env::var("HOME").context("$HOME unset and --out not given")?;
+        PathBuf::from(home).join(".config")
+    };
+    Ok(base.join("linpodx").join("certs"))
+}
+
+fn apply_validity(params: &mut rcgen::CertificateParams, days: i64) {
+    use chrono::{Datelike, Duration as ChronoDuration, Utc};
+    let now = Utc::now();
+    let then = now + ChronoDuration::days(days);
+    params.not_before = rcgen::date_time_ymd(now.year(), now.month() as u8, now.day() as u8);
+    params.not_after = rcgen::date_time_ymd(then.year(), then.month() as u8, then.day() as u8);
+}
+
+fn write_cert(path: &Path, pem: &str) -> Result<()> {
+    std::fs::write(path, pem).with_context(|| format!("writing cert {}", path.display()))?;
+    Ok(())
+}
+
+fn write_key(path: &Path, pem: &str) -> Result<()> {
+    use std::os::unix::fs::OpenOptionsExt;
+    let mut f = std::fs::OpenOptions::new()
+        .write(true)
+        .create(true)
+        .truncate(true)
+        .mode(0o600)
+        .open(path)
+        .with_context(|| format!("opening key file {}", path.display()))?;
+    use std::io::Write;
+    f.write_all(pem.as_bytes())
+        .with_context(|| format!("writing key {}", path.display()))?;
+    Ok(())
+}
+
+fn set_dir_mode_0700(path: &Path) -> Result<()> {
+    use std::os::unix::fs::PermissionsExt;
+    let mut perms = std::fs::metadata(path)
+        .with_context(|| format!("stat {}", path.display()))?
+        .permissions();
+    perms.set_mode(0o700);
+    std::fs::set_permissions(path, perms).with_context(|| format!("chmod {}", path.display()))?;
+    Ok(())
+}
+
+// ---------------------------------------------------------------------------
+// Phase 18 Stream D — `linpodx daemon {start, stop, status, logs}` handler
+// ---------------------------------------------------------------------------
+
+/// Fast-path entry for the daemon-lifecycle subcommands. Avoids the
+/// `Client::connect` step in `main()` because none of these need (or
+/// expect) an already-running daemon to talk to.
+pub(crate) async fn handle_daemon_mgmt(cli: crate::Cli) -> Result<()> {
+    use crate::Cmd;
+
+    let socket = cli
+        .socket
+        .clone()
+        .unwrap_or_else(crate::default_socket_path);
+
+    match cli.cmd {
+        Cmd::Daemon(DaemonCmd::Start(args)) => {
+            let pid_file = args.pid_file.clone().unwrap_or_else(default_pid_file);
+
+            if let Some(existing) = read_pid_file(&pid_file)? {
+                if pid_alive(existing) && pid_is_linpodx_daemon(existing) {
+                    println!(
+                        "linpodx-daemon already running (pid {existing}, pid-file {})",
+                        pid_file.display()
+                    );
+                    return Ok(());
+                }
+            }
+
+            let binary = resolve_daemon_binary(args.daemon_bin.as_deref())?;
+            let log_file = args.log_file.clone().unwrap_or_else(default_log_file);
+
+            if args.fork {
+                if let Some(dir) = log_file.parent() {
+                    let _ = std::fs::create_dir_all(dir);
+                }
+                if let Some(dir) = pid_file.parent() {
+                    let _ = std::fs::create_dir_all(dir);
+                }
+                let log = std::fs::OpenOptions::new()
+                    .create(true)
+                    .append(true)
+                    .open(&log_file)
+                    .with_context(|| format!("opening daemon log file {}", log_file.display()))?;
+                let mut cmd = std::process::Command::new(&binary);
+                cmd.arg("--fork")
+                    .arg("--pid-file")
+                    .arg(&pid_file)
+                    .env("LINPODX_SOCKET", &socket)
+                    .stdout(std::process::Stdio::from(log.try_clone()?))
+                    .stderr(std::process::Stdio::from(log))
+                    .stdin(std::process::Stdio::null());
+                let child = cmd
+                    .spawn()
+                    .with_context(|| format!("spawning {} --fork", binary.display()))?;
+                let _ = child.id();
+                let start = std::time::Instant::now();
+                let timeout = Duration::from_secs(5);
+                while start.elapsed() < timeout {
+                    if socket.exists() {
+                        break;
+                    }
+                    tokio::time::sleep(Duration::from_millis(100)).await;
+                }
+                if !socket.exists() {
+                    bail!(
+                        "daemon did not create socket at {} within {:?} (check {})",
+                        socket.display(),
+                        timeout,
+                        log_file.display()
+                    );
+                }
+                let pid = read_pid_file(&pid_file)?;
+                println!(
+                    "linpodx-daemon started (pid {}, socket {}, log {})",
+                    pid.map(|p| p.to_string())
+                        .unwrap_or_else(|| "?".to_string()),
+                    socket.display(),
+                    log_file.display()
+                );
+                Ok(())
+            } else {
+                let mut cmd = std::process::Command::new(&binary);
+                cmd.arg("--pid-file")
+                    .arg(&pid_file)
+                    .env("LINPODX_SOCKET", &socket);
+                let status = cmd
+                    .status()
+                    .with_context(|| format!("spawning {} (foreground)", binary.display()))?;
+                if !status.success() {
+                    let code = status.code().unwrap_or(1);
+                    std::process::exit(code);
+                }
+                Ok(())
+            }
+        }
+        Cmd::Daemon(DaemonCmd::Stop(args)) => {
+            let pid_file = args.pid_file.clone().unwrap_or_else(default_pid_file);
+            let pid = match read_pid_file(&pid_file)? {
+                Some(p) => p,
+                None => {
+                    println!("daemon not running (no pid-file at {})", pid_file.display());
+                    return Ok(());
+                }
+            };
+            if !pid_alive(pid) {
+                let _ = std::fs::remove_file(&pid_file);
+                println!("daemon not running (pid {pid} dead; removed stale pid-file)");
+                return Ok(());
+            }
+            if !pid_is_linpodx_daemon(pid) {
+                bail!(
+                    "pid-file {} points at pid {pid} which is not linpodx-daemon — refusing to kill",
+                    pid_file.display()
+                );
+            }
+            send_sigterm(pid)?;
+            let timeout = Duration::from_secs(args.timeout);
+            if wait_for_exit(pid, timeout).await? {
+                let _ = std::fs::remove_file(&pid_file);
+                println!("linpodx-daemon stopped (pid {pid})");
+                Ok(())
+            } else {
+                bail!(
+                    "daemon (pid {pid}) did not exit within {}s — try again or kill -9 manually",
+                    args.timeout
+                );
+            }
+        }
+        Cmd::Daemon(DaemonCmd::Status(args)) => {
+            let pid_file = args.pid_file.clone().unwrap_or_else(default_pid_file);
+            let socket = args.socket.clone().unwrap_or(socket);
+            let outcome = probe_daemon_status(&pid_file, &socket).await;
+            if args.json {
+                let json = status_outcome_to_json(&outcome, &pid_file);
+                println!("{}", serde_json::to_string_pretty(&json)?);
+            } else {
+                match &outcome {
+                    StatusOutcome::Running { pid, socket } => {
+                        println!(
+                            "running (pid {pid}, socket {}, pid-file {})",
+                            socket.display(),
+                            pid_file.display()
+                        );
+                    }
+                    StatusOutcome::Unhealthy {
+                        pid,
+                        socket,
+                        reason,
+                    } => {
+                        println!(
+                            "unhealthy (pid {pid}, socket {}): {reason}",
+                            socket.display()
+                        );
+                    }
+                    StatusOutcome::StaleSocket { socket } => {
+                        println!(
+                            "stale (socket {} present but no live daemon)",
+                            socket.display()
+                        );
+                    }
+                    StatusOutcome::Stopped => {
+                        println!("stopped");
+                    }
+                }
+            }
+            let code: i32 = match outcome {
+                StatusOutcome::Running { .. } => 0,
+                StatusOutcome::Stopped => 3,
+                StatusOutcome::StaleSocket { .. } | StatusOutcome::Unhealthy { .. } => 4,
+            };
+            if code != 0 {
+                std::process::exit(code);
+            }
+            Ok(())
+        }
+        Cmd::Daemon(DaemonCmd::Logs(args)) => {
+            let file = args.file.clone().unwrap_or_else(default_log_file);
+            tail_log_file(&file, args.tail, args.follow).await
+        }
+        _ => unreachable!("handle_daemon_mgmt called with non-lifecycle subcommand"),
+    }
+}
+
+/// Try the file-on-disk probe (pid-file present + alive + comm matches) and
+/// the socket-exists probe, then combine into a `StatusOutcome`. When both a
+/// live pid and a socket are present we also fire a lightweight `Version`
+/// IPC ping so the result reflects whether the daemon is *responsive*.
+async fn probe_daemon_status(pid_file: &Path, socket: &Path) -> StatusOutcome {
+    let pid = read_pid_file(pid_file).ok().flatten();
+    let socket_exists = socket.exists();
+
+    match (pid, socket_exists) {
+        (Some(p), true) if pid_alive(p) && pid_is_linpodx_daemon(p) => {
+            match Client::connect(socket).await {
+                Ok(mut c) => match c
+                    .call::<linpodx_common::ipc::responses::VersionResponse>(
+                        linpodx_common::ipc::Method::Version,
+                    )
+                    .await
+                {
+                    Ok(_) => StatusOutcome::Running {
+                        pid: p,
+                        socket: socket.to_path_buf(),
+                    },
+                    Err(e) => StatusOutcome::Unhealthy {
+                        pid: p,
+                        socket: socket.to_path_buf(),
+                        reason: format!("Version IPC failed: {e}"),
+                    },
+                },
+                Err(e) => StatusOutcome::Unhealthy {
+                    pid: p,
+                    socket: socket.to_path_buf(),
+                    reason: format!("socket connect failed: {e}"),
+                },
+            }
+        }
+        (Some(_), _) | (None, true) => StatusOutcome::StaleSocket {
+            socket: socket.to_path_buf(),
+        },
+        (None, false) => StatusOutcome::Stopped,
+    }
+}
+
+/// Render a `StatusOutcome` as a JSON-friendly value. Field naming mirrors
+/// `responses::DaemonMgmtStatusResponse` so the surfaces stay easy to diff.
+fn status_outcome_to_json(outcome: &StatusOutcome, pid_file: &Path) -> serde_json::Value {
+    use serde_json::json;
+    match outcome {
+        StatusOutcome::Running { pid, socket } => json!({
+            "state": "running",
+            "pid": pid,
+            "pid_file": pid_file,
+            "socket_path": socket,
+        }),
+        StatusOutcome::Unhealthy {
+            pid,
+            socket,
+            reason,
+        } => json!({
+            "state": "unhealthy",
+            "pid": pid,
+            "pid_file": pid_file,
+            "socket_path": socket,
+            "reason": reason,
+        }),
+        StatusOutcome::StaleSocket { socket } => json!({
+            "state": "stale_socket",
+            "pid_file": pid_file,
+            "socket_path": socket,
+        }),
+        StatusOutcome::Stopped => json!({
+            "state": "stopped",
+            "pid_file": pid_file,
+        }),
+    }
+}
+
+/// Print the last `tail` lines of `path` and (when `follow`) keep printing
+/// new bytes appended to the file. SIGINT breaks the follow loop cleanly.
+async fn tail_log_file(path: &Path, tail: usize, follow: bool) -> Result<()> {
+    use tokio::io::{AsyncBufReadExt, AsyncSeekExt, BufReader};
+
+    if !path.exists() {
+        bail!(
+            "log file {} does not exist — daemon may be running in the foreground or under journald.\n\
+             Try: journalctl --user -u linpodx -f",
+            path.display()
+        );
+    }
+
+    let content = std::fs::read_to_string(path)
+        .with_context(|| format!("reading log file {}", path.display()))?;
+    let lines: Vec<&str> = content.lines().collect();
+    let start = lines.len().saturating_sub(tail);
+    for l in &lines[start..] {
+        println!("{l}");
+    }
+
+    if !follow {
+        return Ok(());
+    }
+
+    let mut file = tokio::fs::File::open(path)
+        .await
+        .with_context(|| format!("re-opening log file for follow {}", path.display()))?;
+    file.seek(std::io::SeekFrom::End(0))
+        .await
+        .context("seeking to end for follow")?;
+    let mut reader = BufReader::new(file);
+    let mut sigint = tokio::signal::unix::signal(tokio::signal::unix::SignalKind::interrupt())
+        .context("installing SIGINT handler")?;
+
+    loop {
+        let mut line = String::new();
+        tokio::select! {
+            res = reader.read_line(&mut line) => {
+                match res {
+                    Ok(0) => {
+                        tokio::time::sleep(std::time::Duration::from_millis(200)).await;
+                    }
+                    Ok(_) => {
+                        print!("{line}");
+                    }
+                    Err(e) => bail!("reading log file: {e}"),
+                }
+            }
+            _ = sigint.recv() => {
+                return Ok(());
+            }
+        }
+    }
 }
 
 // ---------------------------------------------------------------------------

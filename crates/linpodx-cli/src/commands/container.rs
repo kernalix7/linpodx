@@ -126,3 +126,129 @@ pub(crate) enum ContainerCmd {
         command: Vec<String>,
     },
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::{flatten_container_cmd, Cli, Cmd};
+    use clap::Parser;
+
+    #[test]
+    fn parse_container_ls_with_all_flag() {
+        let cli = Cli::parse_from(["linpodx", "container", "ls", "--all"]);
+        match cli.cmd {
+            Cmd::Container(ContainerCmd::Ls { all }) => assert!(all),
+            other => panic!("expected Container::Ls, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn parse_container_ls_default_running_only() {
+        let cli = Cli::parse_from(["linpodx", "container", "ls"]);
+        match cli.cmd {
+            Cmd::Container(ContainerCmd::Ls { all }) => assert!(!all),
+            other => panic!("expected Container::Ls, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn parse_container_run_inherits_flat_flags() {
+        let cli = Cli::parse_from([
+            "linpodx",
+            "container",
+            "run",
+            "--name",
+            "test",
+            "--rm",
+            "-e",
+            "FOO=bar",
+            "alpine:latest",
+            "echo",
+            "hi",
+        ]);
+        match cli.cmd {
+            Cmd::Container(ContainerCmd::Run {
+                name,
+                rm,
+                env,
+                image,
+                command,
+                ..
+            }) => {
+                assert_eq!(name.as_deref(), Some("test"));
+                assert!(rm);
+                assert_eq!(env, vec![("FOO".to_string(), "bar".to_string())]);
+                assert_eq!(image, "alpine:latest");
+                assert_eq!(command, vec!["echo".to_string(), "hi".to_string()]);
+            }
+            other => panic!("expected Container::Run, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn parse_container_exec_with_tty_and_interactive() {
+        let cli = Cli::parse_from([
+            "linpodx",
+            "container",
+            "exec",
+            "-it",
+            "my-container",
+            "--",
+            "sh",
+        ]);
+        match cli.cmd {
+            Cmd::Container(ContainerCmd::Exec {
+                tty,
+                interactive,
+                id,
+                command,
+                ..
+            }) => {
+                assert!(tty);
+                assert!(interactive);
+                assert_eq!(id, "my-container");
+                assert_eq!(command, vec!["sh".to_string()]);
+            }
+            other => panic!("expected Container::Exec, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn flatten_container_ls_becomes_flat_ps() {
+        let cli = Cli::parse_from(["linpodx", "container", "ls", "-a"]);
+        match flatten_container_cmd(cli.cmd) {
+            Cmd::Ps { all } => assert!(all),
+            other => panic!("expected flat Cmd::Ps, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn flatten_container_logs_preserves_follow_and_since() {
+        let cli = Cli::parse_from([
+            "linpodx",
+            "container",
+            "logs",
+            "--since",
+            "2026-05-15T00:00:00Z",
+            "-f",
+            "my-id",
+        ]);
+        match flatten_container_cmd(cli.cmd) {
+            Cmd::Logs { since, follow, id } => {
+                assert_eq!(since.as_deref(), Some("2026-05-15T00:00:00Z"));
+                assert!(follow);
+                assert_eq!(id, "my-id");
+            }
+            other => panic!("expected flat Cmd::Logs, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn flatten_non_container_variant_passes_through_unchanged() {
+        let cli = Cli::parse_from(["linpodx", "version"]);
+        match flatten_container_cmd(cli.cmd) {
+            Cmd::Version => {}
+            other => panic!("expected flat Cmd::Version, got {other:?}"),
+        }
+    }
+}

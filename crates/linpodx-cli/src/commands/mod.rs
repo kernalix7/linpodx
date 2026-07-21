@@ -1,36 +1,39 @@
-//! Phase 18 — per-command module scaffold.
+//! Per-command module tree.
 //!
-//! New CLI command groups land as files in this directory rather than being
-//! bolted onto `main.rs`. Each stream owns its own submodule and re-exports
-//! the public entry points (`Cmd` sub-enums + `handle_*` functions) consumed
-//! by `main.rs`.
-//!
-//! **File ownership (Phase 18 streams):**
-//! - `doctor.rs` — Stream C (sandbox-team).
-//! - `daemon_mgmt.rs` — Stream D (runtime-team), houses `linpodx daemon
-//!   start|stop|status` and the `--fork` / `--pid-file` plumbing.
-//! - `completion.rs` — Stream B (runtime-team), shell completion + `docker`
-//!   alias surface.
-//! - `container.rs` / `image.rs` / `volume.rs` / `network.rs` — Stream B
-//!   (runtime-team), as the per-noun split lands incrementally.
-//!
-//! Until a stream lands its module the corresponding `pub mod` line is
-//! intentionally omitted so the crate still compiles cleanly. Adding a new
-//! command group is a *single* file-create + a one-line `pub mod` here.
+//! Every CLI command group lives in its own file here rather than being
+//! bolted onto `main.rs`. Each module owns its `clap::Subcommand` enum(s)
+//! plus the `async fn handle_*` that turns a parsed value into IPC calls.
+//! `main.rs` keeps only the top-level `Cli` / `Cmd` definitions, `main()`
+//! itself, and the dispatch `match` that routes each `Cmd` variant to its
+//! module's handler.
 
-// Stream-owned modules are added here as they land.
 pub mod doctor;
 
-// Stream D (runtime) — `linpodx daemon {start,stop,status,logs}`.
+// `linpodx daemon {start,stop,status,logs,cert,pin-client}`.
 pub mod daemon_mgmt;
+pub(crate) mod daemon_pin;
 
-// Stream B (runtime) — docker-compat alias surface + shell completion.
+// docker-compat alias surface + shell completion.
 pub(crate) mod completion;
 pub(crate) mod container;
 // Sibling files (`image.rs`, `volume.rs`, `network.rs`) hold the rationale
 // for the singular/plural alias mappings on the matching `Cmd` variants in
-// `main.rs`; they re-export nothing today, but they are wired in so
-// `cargo build` keeps their docs honest.
-mod image;
-mod network;
-mod volume;
+// `main.rs`.
+pub(crate) mod image;
+pub(crate) mod network;
+pub(crate) mod volume;
+
+// Shared helpers reused by more than one domain module.
+pub(crate) mod util;
+
+pub(crate) mod cluster;
+pub(crate) mod distro;
+pub(crate) mod events;
+pub(crate) mod exec;
+pub(crate) mod k8s;
+pub(crate) mod mcp;
+pub(crate) mod passthrough;
+pub(crate) mod plugin;
+pub(crate) mod sandbox;
+pub(crate) mod session;
+pub(crate) mod snapshot;
