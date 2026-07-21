@@ -2174,6 +2174,25 @@ impl Notification {
 }
 
 /// Standard JSON-RPC 2.0 error codes plus linpodx server-defined extensions.
+///
+/// # Server-defined code table (`-32000 ..= -32099`)
+///
+/// These codes are **stable wire contract** — never renumber an existing code.
+/// New failure classes take the next free slot. Every [`crate::error::Error`]
+/// variant maps to exactly one code via the daemon's `error_to_code`:
+///
+/// | Code                 | Value    | `Error` variant(s)                              | Meaning |
+/// |----------------------|----------|-------------------------------------------------|---------|
+/// | `RUNTIME_ERROR`      | `-32000` | `Runtime`, `Io`, `Json`                         | Unclassified runtime failure (catch-all). |
+/// | `NOT_FOUND`          | `-32001` | `NotFound`                                       | Named resource does not exist. |
+/// | `INVALID_ARGUMENT`   | `-32002` | `InvalidArgument`                                | Caller supplied a malformed / rejected argument. |
+/// | `PODMAN_UNAVAILABLE` | `-32003` | `PodmanNotFound`, `PodmanVersionMismatch`        | Podman binary missing or too old. |
+/// | `PERMISSION_DENIED`  | `-32004` | `PermissionDenied`                               | Authenticated but not authorized / missing host privilege. |
+/// | `CONFLICT`           | `-32005` | `Conflict`                                       | Request conflicts with current state (duplicate, wrong lifecycle). |
+/// | `TIMEOUT`            | `-32006` | `Timeout`                                        | Operation exceeded its deadline. |
+/// | `UNSUPPORTED`        | `-32007` | `Unsupported`                                    | Not supported by this build/config (feature not enabled). |
+/// | `UNAVAILABLE`        | `-32008` | `Unavailable`                                    | Subsystem/dependency temporarily unavailable (often retryable). |
+/// | `INTERNAL`           | `-32009` | `Internal`, `Ipc`, `Sqlx`, `Migrate`             | Internal invariant violation / transport / persistence failure. |
 pub mod error_codes {
     pub const PARSE_ERROR: i32 = -32700;
     pub const INVALID_REQUEST: i32 = -32600;
@@ -2181,11 +2200,45 @@ pub mod error_codes {
     pub const INVALID_PARAMS: i32 = -32602;
     pub const INTERNAL_ERROR: i32 = -32603;
 
-    // -32000 .. -32099 — server-defined.
+    // -32000 .. -32099 — server-defined. Never renumber; append new slots.
     pub const RUNTIME_ERROR: i32 = -32000;
     pub const NOT_FOUND: i32 = -32001;
     pub const INVALID_ARGUMENT: i32 = -32002;
     pub const PODMAN_UNAVAILABLE: i32 = -32003;
+    // Phase 24 — error-code taxonomy expansion (additive; the four above are
+    // frozen for wire compatibility).
+    pub const PERMISSION_DENIED: i32 = -32004;
+    pub const CONFLICT: i32 = -32005;
+    pub const TIMEOUT: i32 = -32006;
+    pub const UNSUPPORTED: i32 = -32007;
+    pub const UNAVAILABLE: i32 = -32008;
+    pub const INTERNAL: i32 = -32009;
+
+    /// Stable symbolic name for a server-defined (or standard JSON-RPC) code.
+    ///
+    /// Used by the CLI to render a human-legible label alongside the numeric
+    /// code. Unknown codes fall back to `"ERROR"` so callers never panic on a
+    /// code minted by a newer daemon.
+    pub fn code_name(code: i32) -> &'static str {
+        match code {
+            PARSE_ERROR => "PARSE_ERROR",
+            INVALID_REQUEST => "INVALID_REQUEST",
+            METHOD_NOT_FOUND => "METHOD_NOT_FOUND",
+            INVALID_PARAMS => "INVALID_PARAMS",
+            INTERNAL_ERROR => "INTERNAL_ERROR",
+            RUNTIME_ERROR => "RUNTIME_ERROR",
+            NOT_FOUND => "NOT_FOUND",
+            INVALID_ARGUMENT => "INVALID_ARGUMENT",
+            PODMAN_UNAVAILABLE => "PODMAN_UNAVAILABLE",
+            PERMISSION_DENIED => "PERMISSION_DENIED",
+            CONFLICT => "CONFLICT",
+            TIMEOUT => "TIMEOUT",
+            UNSUPPORTED => "UNSUPPORTED",
+            UNAVAILABLE => "UNAVAILABLE",
+            INTERNAL => "INTERNAL",
+            _ => "ERROR",
+        }
+    }
 }
 
 #[cfg(test)]
@@ -2319,6 +2372,69 @@ mod tests {
             ResponsePayload::Error { error } => {
                 assert_eq!(error.code, error_codes::NOT_FOUND);
                 assert_eq!(error.message, "no such container");
+            }
+            _ => panic!("expected error payload"),
+        }
+    }
+
+    #[test]
+    fn taxonomy_codes_are_frozen_and_distinct() {
+        // The original four must never move — clients pin these numeric values.
+        assert_eq!(error_codes::RUNTIME_ERROR, -32000);
+        assert_eq!(error_codes::NOT_FOUND, -32001);
+        assert_eq!(error_codes::INVALID_ARGUMENT, -32002);
+        assert_eq!(error_codes::PODMAN_UNAVAILABLE, -32003);
+        // Every server-defined code is unique.
+        let all = [
+            error_codes::RUNTIME_ERROR,
+            error_codes::NOT_FOUND,
+            error_codes::INVALID_ARGUMENT,
+            error_codes::PODMAN_UNAVAILABLE,
+            error_codes::PERMISSION_DENIED,
+            error_codes::CONFLICT,
+            error_codes::TIMEOUT,
+            error_codes::UNSUPPORTED,
+            error_codes::UNAVAILABLE,
+            error_codes::INTERNAL,
+        ];
+        let mut seen = std::collections::HashSet::new();
+        for c in all {
+            assert!(seen.insert(c), "duplicate error code {c}");
+        }
+    }
+
+    #[test]
+    fn code_name_covers_taxonomy_and_falls_back() {
+        assert_eq!(error_codes::code_name(error_codes::NOT_FOUND), "NOT_FOUND");
+        assert_eq!(
+            error_codes::code_name(error_codes::UNSUPPORTED),
+            "UNSUPPORTED"
+        );
+        assert_eq!(error_codes::code_name(error_codes::INTERNAL), "INTERNAL");
+        // A code minted by a newer daemon must not panic.
+        assert_eq!(error_codes::code_name(-32050), "ERROR");
+    }
+
+    #[test]
+    fn rpc_error_with_new_code_round_trips() {
+        let resp = RpcResponse::error(
+            Some(RequestId::from(9u32)),
+            RpcError {
+                code: error_codes::UNSUPPORTED,
+                message: "raft leader-elect not enabled".into(),
+                data: Some(serde_json::json!({"hint": "--cluster-raft"})),
+            },
+        );
+        let s = serde_json::to_string(&resp).unwrap();
+        let back: RpcResponse = serde_json::from_str(&s).unwrap();
+        match back.payload {
+            ResponsePayload::Error { error } => {
+                assert_eq!(error.code, error_codes::UNSUPPORTED);
+                assert_eq!(error.message, "raft leader-elect not enabled");
+                assert_eq!(
+                    error.data.and_then(|d| d.get("hint").cloned()),
+                    Some(serde_json::json!("--cluster-raft"))
+                );
             }
             _ => panic!("expected error payload"),
         }
