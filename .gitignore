@@ -26,8 +26,8 @@ Thumbs.db
 *.iml
 
 # Tauri build
-crates/linpodx-gui/src-tauri/target/
-crates/linpodx-gui/dist/
+# (crates/linpodx-gui/dist/ is hand-authored splash source referenced by
+# tauri.conf.json frontendDist — it must stay tracked)
 node_modules/
 
 # Logs

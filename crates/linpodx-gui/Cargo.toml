@@ -6,27 +6,21 @@ rust-version.workspace = true
 license.workspace = true
 repository.workspace = true
 authors.workspace = true
-description = "linpodx desktop GUI — cxx-qt + Qt 6 native widget dashboard"
+description = "linpodx desktop GUI — thin Tauri 2 shell over the daemon-served web UI"
+build = "build.rs"
 
 [lib]
 path = "src/lib.rs"
-# Qt-linked: cxx-qt 0.8 static initializers (cxx_qt_init_crate_*) don't link
-# into rustc test harnesses, so a test target here fails to link even with zero
-# tests. All Qt-agnostic logic is unit-tested in `linpodx-gui-core`; the Qt
-# surface is verified by manual + CI smoke runs. So disable test/doctest here.
-test = false
-doctest = false
 
 [[bin]]
 name = "linpodx-gui"
 path = "src/main.rs"
-test = false
 
-# Phase 24 — RPM packaging for the cxx-qt + Qt 6 GUI. Runtime depends on the
-# Qt 6 base libraries (Core, Gui, Widgets) which Qt provides system-wide on
-# any modern Linux distro. DBus pulled in by Qt itself.
+# Phase 24 (Tauri pivot) — RPM packaging. The Tauri webview links dynamically
+# against the system WebKitGTK 4.1 + GTK 3 stack. Runtime require names differ
+# per distro; Fedora ships the webkit runtime as `webkit2gtk4.1`.
 [package.metadata.generate-rpm]
-requires = { "libQt6Core6" = "*", "libQt6Gui6" = "*", "libQt6Widgets6" = "*" }
+requires = { "webkit2gtk4.1" = "*", "gtk3" = "*", "librsvg2" = "*" }
 assets = [
     { source = "target/release/linpodx-gui", dest = "/usr/bin/linpodx-gui", mode = "755" },
     { source = "packaging/linpodx.desktop", dest = "/usr/share/applications/linpodx.desktop", mode = "644" },
@@ -34,16 +28,17 @@ assets = [
     { source = "LICENSE", dest = "/usr/share/doc/linpodx-gui/LICENSE", mode = "644", doc = true },
 ]
 
-# Phase 24 — Debian/Ubuntu packaging. depends matches the apt-side runtime
-# SONAMEs for Qt 6 base.
+# Phase 24 (Tauri pivot) — Debian/Ubuntu packaging. `depends` uses the apt-side
+# runtime SONAMEs for the WebKitGTK 4.1 + GTK 3 stack that Tauri loads at
+# runtime. (Debian/Ubuntu ship the runtime as `libwebkit2gtk-4.1-0`.)
 [package.metadata.deb]
 maintainer = "Kim DaeHyun <kernalix7@kodenet.io>"
 copyright = "2026, Kim DaeHyun <kernalix7@kodenet.io>"
 license-file = ["../../LICENSE", "0"]
-extended-description = "linpodx desktop GUI — cxx-qt + Qt 6 widget dashboard for the linpodx container manager."
+extended-description = "linpodx desktop GUI — a thin Tauri 2 shell that displays the linpodx daemon's built-in web UI."
 section = "x11"
 priority = "optional"
-depends = "libqt6core6, libqt6gui6, libqt6widgets6, libc6"
+depends = "libwebkit2gtk-4.1-0, libgtk-3-0, librsvg2-2, libc6"
 assets = [
     ["target/release/linpodx-gui", "usr/bin/", "755"],
     ["packaging/linpodx.desktop", "usr/share/applications/linpodx.desktop", "644"],
@@ -54,17 +49,13 @@ assets = [
 [dependencies]
 linpodx-common = { workspace = true }
 linpodx-gui-core = { workspace = true }
-cxx = { workspace = true }
-cxx-qt = { workspace = true }
-cxx-qt-lib = { workspace = true }
-cxx-qt-lib-extras = { workspace = true }
+tauri = { version = "2", features = [] }
 tokio = { workspace = true }
 tracing = { workspace = true }
 tracing-subscriber = { workspace = true }
 serde = { workspace = true }
 serde_json = { workspace = true }
 anyhow = { workspace = true }
-chrono = { workspace = true }
 
 [build-dependencies]
-cxx-qt-build = { workspace = true }
+tauri-build = { version = "2", features = [] }

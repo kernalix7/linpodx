@@ -1,22 +1,37 @@
 # Third-Party Licenses — linpodx-gui
 
-## Qt 6
+`linpodx-gui` is a thin **Tauri 2** shell: a single native window whose webview
+displays the linpodx daemon's built-in web UI. It bundles no application code of
+its own beyond a small splash page.
 
-The `linpodx-gui` desktop shell links **dynamically** against the system Qt 6
-libraries (QtCore, QtGui, QtWidgets), which are licensed under the
-**GNU Lesser General Public License v3.0 (LGPLv3)**.
+## WebKitGTK 4.1 (system, dynamically linked)
 
-- Qt is **not** bundled with linpodx; the system-provided shared libraries are
-  loaded at runtime (`libQt6Core.so.6`, `libQt6Gui.so.6`, `libQt6Widgets.so.6`).
-- Dynamic linking satisfies LGPLv3 §4(d)(1): users can replace the Qt libraries
-  by installing a different Qt 6 build through their distribution's package
-  manager, and linpodx will pick it up without relinking.
-- Qt source code is available from <https://download.qt.io/official_releases/qt/>
-  and through distribution source packages.
-- Full license text: <https://www.gnu.org/licenses/lgpl-3.0.html>
+On Linux, the Tauri webview renders through the system **WebKitGTK 4.1** library
+(and its GTK 3 host), which is licensed under the
+**GNU Lesser General Public License v2.1 (LGPL-2.1)** (with portions under
+BSD-style licenses).
 
-## Rust bridge crates
+- WebKitGTK is **not** bundled with linpodx; the system-provided shared
+  libraries are loaded at runtime. The runtime package name varies by distro:
+  - **Debian / Ubuntu:** `libwebkit2gtk-4.1-0`
+  - **Fedora:** `webkit2gtk4.1`
+  - **openSUSE:** `libwebkit2gtk-4_1-0`
+- Dynamic linking satisfies LGPL-2.1 §6: users can replace WebKitGTK by
+  installing a different build through their distribution's package manager, and
+  linpodx picks it up without relinking.
+- WebKitGTK source is available from <https://webkitgtk.org/> and through
+  distribution source packages.
+- Full license text: <https://www.gnu.org/licenses/old-licenses/lgpl-2.1.html>
 
-`cxx`, `cxx-qt`, `cxx-qt-lib`, `cxx-qt-lib-extras`, and `cxx-qt-build` are
-licensed **MIT OR Apache-2.0** (KDAB / dtolnay). See each crate's repository
-for the license texts.
+Build-time development headers (`libwebkit2gtk-4.1-dev`, `libgtk-3-dev`,
+`librsvg2-dev`) are required to compile the shell but are not redistributed.
+
+## Tauri stack (Rust crates)
+
+`tauri`, `tauri-build`, and their supporting crates (wry, tao, and the rest of
+the Tauri ecosystem) are licensed **MIT OR Apache-2.0** (Tauri Programme within
+The Commons Conservancy). See each crate's repository for the license texts.
+
+## linpodx crates
+
+`linpodx-common` and `linpodx-gui-core` are part of this project (MIT).

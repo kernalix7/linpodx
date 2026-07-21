@@ -1,28 +1,9 @@
-//! Phase 24 — cxx-qt build glue.
+//! Phase 24 (Tauri pivot) — Tauri build glue.
 //!
-//! Registers the `ffi` cxx bridge and compiles the hand-written Qt C++ shell
-//! (`src/cpp/mainwindow.cpp`). Qt Core/Gui/Widgets are linked so `QString`,
-//! `QApplication`, `QMainWindow`, and the widget tree resolve.
-
+//! The cxx-qt + Qt 6 direction was cancelled (licensing + velocity). The GUI is
+//! now a thin Tauri 2 shell whose webview displays the daemon-served leptos Web
+//! UI. `tauri_build::build()` reads `tauri.conf.json`, generates the runtime
+//! context, and emits the platform metadata Tauri needs at compile time.
 fn main() {
-    let builder = cxx_qt_build::CxxQtBuilder::new()
-        .qt_module("Core")
-        .qt_module("Gui")
-        .qt_module("Widgets")
-        .file("src/ffi.rs");
-
-    // SAFETY: we only register our own hand-written C++ shell + include dir.
-    // No build-flag mutation that would break cxx-qt's own codegen.
-    let builder = unsafe {
-        builder.cc_builder(|cc| {
-            cc.file("src/cpp/mainwindow.cpp");
-            cc.include("src/cpp");
-        })
-    };
-
-    builder.build();
-
-    println!("cargo:rerun-if-changed=src/ffi.rs");
-    println!("cargo:rerun-if-changed=src/cpp/mainwindow.cpp");
-    println!("cargo:rerun-if-changed=src/cpp/mainwindow.h");
+    tauri_build::build();
 }

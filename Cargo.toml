@@ -129,18 +129,13 @@ rand = { version = "0.8", default-features = false, features = ["std", "std_rng"
 # lets `thiserror` `#[source]` preserve the chain for `anyhow::Error::chain()`.
 argon2 = { version = "=0.5.3", features = ["std"] }
 
-# GUI — Phase 24 rewrite: egui+winit (eframe) replaced with cxx-qt + Qt 6.11.
-# Rationale: native widget look across Linux desktops, real Wayland/X11/GPU
-# integration via Qt6, alignment with Docker Desktop / Rancher Desktop /
-# Podman Desktop UX expectations. The cxx-qt stack is the KDAB-maintained
-# Rust↔Qt bridge.
-# License: MIT OR Apache-2.0 for the Rust crates. Qt 6 itself is dynamically
-# linked under LGPLv3 — see crates/linpodx-gui/THIRD-PARTY-LICENSES.md.
-cxx = "1.0"
-cxx-qt = "0.8"
-cxx-qt-lib = "0.8"
-cxx-qt-lib-extras = "0.8"
-cxx-qt-build = "0.8"
+# GUI — Phase 24 (Tauri pivot): the cxx-qt + Qt 6 direction was cancelled
+# (licensing + velocity). linpodx-gui is now a thin Tauri 2 shell that displays
+# the daemon-served leptos web UI, so `tauri` / `tauri-build` are declared
+# directly in `crates/linpodx-gui/Cargo.toml` (single consumer) and the cxx-qt
+# stack is dropped from the workspace. The Tauri webview links dynamically
+# against system WebKitGTK 4.1 (LGPL-2.1) — see
+# crates/linpodx-gui/THIRD-PARTY-LICENSES.md.
 
 # Test helpers
 tempfile = "3"
