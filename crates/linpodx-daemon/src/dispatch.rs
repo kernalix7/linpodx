@@ -40,6 +40,7 @@ mod metrics;
 mod networks;
 mod pin_clients;
 mod plugins;
+mod pods;
 mod remote_listen;
 mod sandbox;
 mod snapshots;
@@ -444,6 +445,11 @@ impl Dispatcher {
             Method::DaemonMgmtStatus => self.daemon_mgmt_status().await,
             Method::WebUiEnsure(p) => self.web_ui_ensure(p).await,
             Method::SystemDf => self.system_df().await,
+            Method::PodList => self.pod_list().await,
+            Method::PodCreate(p) => self.pod_create(p).await,
+            Method::PodStart(p) => self.pod_start(p).await,
+            Method::PodStop(p) => self.pod_stop(p).await,
+            Method::PodRemove(p) => self.pod_remove(p).await,
         }
     }
 

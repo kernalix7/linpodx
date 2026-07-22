@@ -37,9 +37,9 @@ use linpodx_common::ipc::{
     error_codes, responses, AuditQueryParams, ContainerIdParams, ContainerListParams,
     ContainerLogsParams, CreateOptions, DaemonPinClientTofuExpirySetParams, DoctorRunParams,
     ImageListParams, Method, MetricsHistoryParams, MetricsLatestParams,
-    PluginKeyRevokePropagateParams, ResponsePayload, RpcError, RpcRequest,
-    SandboxSnapshotAutoTriggerEnableParams, SessionListParams, SnapshotKeyRotateParams,
-    SnapshotKeySource, SnapshotListParams,
+    PluginKeyRevokePropagateParams, PodActionParams, PodCreateParams, PodRemoveParams,
+    ResponsePayload, RpcError, RpcRequest, SandboxSnapshotAutoTriggerEnableParams,
+    SessionListParams, SnapshotKeyRotateParams, SnapshotKeySource, SnapshotListParams,
 };
 use linpodx_common::types::ContainerId;
 use serde::Deserialize;
@@ -83,6 +83,11 @@ pub fn router(
         .route("/images", get(get_images))
         .route("/volumes", get(get_volumes))
         .route("/networks", get(get_networks))
+        .route("/pods", get(get_pods))
+        .route("/pods/create", post(post_pod_create))
+        .route("/pods/:id/start", post(post_pod_start))
+        .route("/pods/:id/stop", post(post_pod_stop))
+        .route("/pods/:id/remove", post(post_pod_remove))
         .route("/snapshots", get(get_snapshots))
         .route("/sessions", get(get_sessions))
         .route("/sandbox/profiles", get(get_sandbox_profiles))
@@ -308,6 +313,46 @@ async fn get_volumes(State(state): State<WebUiState>) -> Response<Body> {
 
 async fn get_networks(State(state): State<WebUiState>) -> Response<Body> {
     dispatch(&state, Method::NetworkList).await
+}
+
+async fn get_pods(State(state): State<WebUiState>) -> Response<Body> {
+    dispatch(&state, Method::PodList).await
+}
+
+async fn post_pod_create(
+    State(state): State<WebUiState>,
+    Json(params): Json<PodCreateParams>,
+) -> Response<Body> {
+    dispatch(&state, Method::PodCreate(params)).await
+}
+
+async fn post_pod_start(State(state): State<WebUiState>, Path(id): Path<String>) -> Response<Body> {
+    dispatch(&state, Method::PodStart(PodActionParams { id_or_name: id })).await
+}
+
+async fn post_pod_stop(State(state): State<WebUiState>, Path(id): Path<String>) -> Response<Body> {
+    dispatch(&state, Method::PodStop(PodActionParams { id_or_name: id })).await
+}
+
+#[derive(Debug, Deserialize, Default)]
+pub(crate) struct PodRemoveBody {
+    #[serde(default)]
+    pub force: bool,
+}
+
+async fn post_pod_remove(
+    State(state): State<WebUiState>,
+    Path(id): Path<String>,
+    Json(body): Json<PodRemoveBody>,
+) -> Response<Body> {
+    dispatch(
+        &state,
+        Method::PodRemove(PodRemoveParams {
+            id_or_name: id,
+            force: body.force,
+        }),
+    )
+    .await
 }
 
 async fn get_snapshots(State(state): State<WebUiState>) -> Response<Body> {

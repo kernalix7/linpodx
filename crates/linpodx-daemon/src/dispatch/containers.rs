@@ -335,3 +335,59 @@ impl Dispatcher {
         })?)
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use chrono::Utc;
+    use linpodx_common::state::{ContainerState, ContainerSummary};
+    use linpodx_common::types::ContainerId;
+    use std::collections::HashMap;
+
+    /// `container_list` serializes the `podman.list` result verbatim, so labels
+    /// carried on the summary must appear in the wire JSON the Web UI's Stacks
+    /// view groups on. This pins that the additive `labels` field survives the
+    /// `serde_json::to_value` round the dispatch handler performs.
+    #[test]
+    fn container_summary_serializes_labels_for_stack_grouping() {
+        let mut labels = HashMap::new();
+        labels.insert(
+            "com.docker.compose.project".to_string(),
+            "demo-stack".to_string(),
+        );
+        let summary = ContainerSummary {
+            id: ContainerId::from("abc123"),
+            names: vec!["web".to_string()],
+            image: "alpine:latest".to_string(),
+            state: ContainerState::Running,
+            status: "Up 3 minutes".to_string(),
+            created: Utc::now(),
+            command: Some("sh".to_string()),
+            ports: vec![],
+            labels,
+        };
+        let v = serde_json::to_value(vec![summary]).unwrap();
+        assert_eq!(
+            v[0]["labels"]["com.docker.compose.project"],
+            serde_json::json!("demo-stack")
+        );
+    }
+
+    /// A container with no labels still serializes an (empty) `labels` object,
+    /// keeping the wire shape stable for older/newer peers.
+    #[test]
+    fn container_summary_serializes_empty_labels() {
+        let summary = ContainerSummary {
+            id: ContainerId::from("bare"),
+            names: vec![],
+            image: "alpine".to_string(),
+            state: ContainerState::Exited,
+            status: String::new(),
+            created: Utc::now(),
+            command: None,
+            ports: vec![],
+            labels: HashMap::new(),
+        };
+        let v = serde_json::to_value(summary).unwrap();
+        assert!(v["labels"].as_object().unwrap().is_empty());
+    }
+}
