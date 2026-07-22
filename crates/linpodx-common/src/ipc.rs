@@ -277,6 +277,10 @@ pub enum Method {
     // point its webview at the daemon-served leptos UI. Independent of the
     // `--remote-listen` listener (which may be TLS/mTLS).
     WebUiEnsure(WebUiEnsureParams),
+    // Phase 25 — system disk-usage aggregate for the Web UI dashboard. Backs
+    // `GET /api/v1/system/df`. Unit-like (no params) — the daemon owns the
+    // podman invocation + list fallback. Appended, never renumbered.
+    SystemDf,
 }
 
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
@@ -2135,6 +2139,60 @@ pub mod responses {
         /// `true` when this call bound + spawned the listener; `false` when a
         /// previously-started listener was reused (url/token are stable).
         pub started: bool,
+    }
+
+    // ----- System disk-usage aggregate (Phase 25) -----
+
+    /// Container-domain slice of [`SystemDfResponse`]. `size_bytes` is `None`
+    /// when podman's `system df` did not supply per-container writable-layer
+    /// sizes (the list-only fallback path).
+    #[derive(Debug, Clone, Serialize, Deserialize)]
+    pub struct SystemDfContainers {
+        pub total: u64,
+        pub running: u64,
+        pub size_bytes: Option<u64>,
+    }
+
+    /// Image-domain slice of [`SystemDfResponse`]. `size_bytes` is the sum of
+    /// image sizes (may double-count shared layers on the list-only path);
+    /// `reclaimable_bytes` is only populated from `podman system df`.
+    #[derive(Debug, Clone, Serialize, Deserialize)]
+    pub struct SystemDfImages {
+        pub total: u64,
+        pub size_bytes: Option<u64>,
+        pub reclaimable_bytes: Option<u64>,
+    }
+
+    /// Volume-domain slice of [`SystemDfResponse`]. `size_bytes` is only
+    /// populated from `podman system df`.
+    #[derive(Debug, Clone, Serialize, Deserialize)]
+    pub struct SystemDfVolumes {
+        pub total: u64,
+        pub size_bytes: Option<u64>,
+    }
+
+    /// Response for `Method::SystemDf` / `GET /api/v1/system/df`. Every count
+    /// is a `u64`; every `*_bytes` is `u64` when known and `null` when podman's
+    /// `system df` was unavailable and only counts could be produced.
+    #[derive(Debug, Clone, Serialize, Deserialize)]
+    pub struct SystemDfResponse {
+        pub containers: SystemDfContainers,
+        pub images: SystemDfImages,
+        pub volumes: SystemDfVolumes,
+        pub build_cache_bytes: Option<u64>,
+    }
+
+    /// Composite response for `GET /api/v1/system/info`. Assembled in the REST
+    /// layer from `Method::Version` + `Method::DaemonMgmtStatus`, plus the web
+    /// listener base URL. Not backed by a dedicated IPC method.
+    #[derive(Debug, Clone, Serialize, Deserialize)]
+    pub struct SystemInfoResponse {
+        pub linpodx_version: String,
+        pub ipc_version: u32,
+        pub podman_version: String,
+        pub socket_path: Option<String>,
+        pub web_listener_url: Option<String>,
+        pub uptime_secs: Option<u64>,
     }
 }
 

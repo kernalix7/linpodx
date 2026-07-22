@@ -43,6 +43,7 @@ mod plugins;
 mod remote_listen;
 mod sandbox;
 mod snapshots;
+mod system;
 mod volumes;
 
 /// Holds the runtime adapter, event bus, sandbox subsystem, and approval registry.
@@ -422,6 +423,7 @@ impl Dispatcher {
             Method::DaemonMgmtStop => self.daemon_mgmt_stop().await,
             Method::DaemonMgmtStatus => self.daemon_mgmt_status().await,
             Method::WebUiEnsure(p) => self.web_ui_ensure(p).await,
+            Method::SystemDf => self.system_df().await,
         }
     }
 

@@ -34,11 +34,13 @@ use axum::Json;
 use axum::Router;
 use linpodx_common::audit_sink::{AuditSink, AuditSinkKind};
 use linpodx_common::ipc::{
-    AuditQueryParams, ContainerListParams, DaemonPinClientTofuExpirySetParams, ImageListParams,
-    Method, MetricsLatestParams, PluginKeyRevokePropagateParams, ResponsePayload, RpcRequest,
-    SandboxSnapshotAutoTriggerEnableParams, SessionListParams, SnapshotKeyRotateParams,
-    SnapshotKeySource, SnapshotListParams,
+    error_codes, responses, AuditQueryParams, ContainerIdParams, ContainerListParams,
+    ContainerLogsParams, DaemonPinClientTofuExpirySetParams, DoctorRunParams, ImageListParams,
+    Method, MetricsHistoryParams, MetricsLatestParams, PluginKeyRevokePropagateParams,
+    ResponsePayload, RpcError, RpcRequest, SandboxSnapshotAutoTriggerEnableParams,
+    SessionListParams, SnapshotKeyRotateParams, SnapshotKeySource, SnapshotListParams,
 };
+use linpodx_common::types::ContainerId;
 use serde::Deserialize;
 use serde_json::json;
 use std::collections::HashSet;
@@ -84,6 +86,15 @@ pub fn router(
         .route("/sandbox/profiles", get(get_sandbox_profiles))
         .route("/audit", get(get_audit))
         .route("/metrics/:container_id", get(get_metrics))
+        // Phase 25 — dashboard read surface. Inspect / logs / metrics history
+        // reuse existing dispatch arms; system df/info + doctor add the last
+        // pieces the SPA needs. All behind the same bearer middleware below.
+        .route("/containers/:id/inspect", get(get_container_inspect))
+        .route("/containers/:id/logs", get(get_container_logs))
+        .route("/metrics/:container_id/history", get(get_metrics_history))
+        .route("/system/df", get(get_system_df))
+        .route("/system/info", get(get_system_info))
+        .route("/doctor/run", post(post_doctor_run))
         // Phase 17 Stream E — mutating endpoints. They reuse the dispatcher so
         // the underlying Method::* arms (currently Stage 1 placeholders) take
         // over once Stream A/B/C teams wire them in.
@@ -228,18 +239,46 @@ fn unauthorized() -> Response<Body> {
 // ---------------------------------------------------------------------------
 
 async fn dispatch(state: &WebUiState, method: Method) -> Response<Body> {
+    match dispatch_value(state, method).await {
+        Ok(result) => Json(result).into_response(),
+        Err(resp) => resp,
+    }
+}
+
+/// Dispatch through the shared dispatcher and hand back the raw success
+/// `result` JSON, or a ready-to-return 500 error envelope. Used by handlers
+/// that post-process the payload (log tailing, `system/info` composition).
+async fn dispatch_value(
+    state: &WebUiState,
+    method: Method,
+) -> Result<serde_json::Value, Response<Body>> {
     let req = RpcRequest::new(0u32, method);
     let resp = state.dispatcher.dispatch(req).await;
     match resp.payload {
-        ResponsePayload::Success { result } => Json(result).into_response(),
-        ResponsePayload::Error { error } => {
-            warn!(code = error.code, message = %error.message, "web_ui dispatch error");
-            let body = json!({ "error": { "code": error.code, "message": error.message } });
-            let mut response = Json(body).into_response();
-            *response.status_mut() = StatusCode::INTERNAL_SERVER_ERROR;
-            response
-        }
+        ResponsePayload::Success { result } => Ok(result),
+        ResponsePayload::Error { error } => Err(error_to_response(error)),
     }
+}
+
+/// Render a dispatch [`RpcError`] as the standard `{ "error": { code, message } }`
+/// envelope with HTTP 500, matching the existing Web UI error contract.
+fn error_to_response(error: RpcError) -> Response<Body> {
+    warn!(code = error.code, message = %error.message, "web_ui dispatch error");
+    let body = json!({ "error": { "code": error.code, "message": error.message } });
+    let mut response = Json(body).into_response();
+    *response.status_mut() = StatusCode::INTERNAL_SERVER_ERROR;
+    response
+}
+
+/// Build a 500 envelope for an internal (non-dispatch) failure — currently only
+/// used when a well-formed dispatch success payload fails to re-decode.
+fn internal_error(message: impl Into<String>) -> Response<Body> {
+    let message = message.into();
+    warn!(%message, "web_ui internal error");
+    let body = json!({ "error": { "code": error_codes::INTERNAL, "message": message } });
+    let mut response = Json(body).into_response();
+    *response.status_mut() = StatusCode::INTERNAL_SERVER_ERROR;
+    response
 }
 
 async fn get_containers(State(state): State<WebUiState>) -> Response<Body> {
@@ -297,6 +336,162 @@ async fn get_metrics(
         Method::MetricsLatest(MetricsLatestParams { container_id }),
     )
     .await
+}
+
+// ---------------------------------------------------------------------------
+// Phase 25 — dashboard read surface (inspect / logs / history / df / info /
+// doctor). Each reuses an existing dispatch arm except `system/df` (new
+// `Method::SystemDf`) and `system/info` (composed in this layer).
+// ---------------------------------------------------------------------------
+
+/// `GET /api/v1/containers/:id/inspect` — reuses `Method::ContainerInspect`.
+async fn get_container_inspect(
+    State(state): State<WebUiState>,
+    Path(id): Path<String>,
+) -> Response<Body> {
+    dispatch(
+        &state,
+        Method::ContainerInspect(ContainerIdParams {
+            id: ContainerId::new(id),
+        }),
+    )
+    .await
+}
+
+/// Query for `GET /api/v1/containers/:id/logs`. `tail` bounds the returned
+/// buffer to the last N `\n`-delimited lines of each stream (default 500);
+/// `since` is passed through to `ContainerLogsParams.since`.
+#[derive(Debug, Deserialize, Default)]
+pub(crate) struct LogsQuery {
+    #[serde(default)]
+    pub tail: Option<u32>,
+    #[serde(default)]
+    pub since: Option<String>,
+}
+
+/// `GET /api/v1/containers/:id/logs?tail=N&since=<rfc3339>` — reuses
+/// `Method::ContainerLogs`. `tail` is applied here by truncating each stream to
+/// its last N lines (the daemon has no source-side tail knob yet).
+async fn get_container_logs(
+    State(state): State<WebUiState>,
+    Path(id): Path<String>,
+    Query(q): Query<LogsQuery>,
+) -> Response<Body> {
+    let method = Method::ContainerLogs(ContainerLogsParams {
+        id: ContainerId::new(id),
+        since: q.since,
+    });
+    let value = match dispatch_value(&state, method).await {
+        Ok(v) => v,
+        Err(resp) => return resp,
+    };
+    let tail = q.tail.unwrap_or(500);
+    Json(truncate_logs_value(value, tail)).into_response()
+}
+
+/// Truncate the `stdout`/`stderr` of a `LogsResponse` JSON value to the last
+/// `tail` lines each. On any decode mismatch the value is returned unchanged so
+/// the response shape is never corrupted.
+pub(crate) fn truncate_logs_value(value: serde_json::Value, tail: u32) -> serde_json::Value {
+    match serde_json::from_value::<responses::LogsResponse>(value.clone()) {
+        Ok(logs) => {
+            let truncated = responses::LogsResponse {
+                stdout: tail_lines(&logs.stdout, tail),
+                stderr: tail_lines(&logs.stderr, tail),
+            };
+            serde_json::to_value(truncated).unwrap_or(value)
+        }
+        Err(_) => value,
+    }
+}
+
+/// Return the last `n` `\n`-delimited lines of `s`. When `s` already has `<= n`
+/// lines it is returned verbatim (trailing newline preserved); when it is
+/// trimmed the lines are re-joined with `\n`. `n == 0` yields an empty string.
+pub(crate) fn tail_lines(s: &str, n: u32) -> String {
+    if n == 0 {
+        return String::new();
+    }
+    let n = n as usize;
+    let lines: Vec<&str> = s.lines().collect();
+    if lines.len() <= n {
+        return s.to_string();
+    }
+    lines[lines.len() - n..].join("\n")
+}
+
+/// Query for `GET /api/v1/metrics/:id/history`. `since` (RFC3339) bounds the
+/// ring buffer; absent = full buffer.
+#[derive(Debug, Deserialize, Default)]
+pub(crate) struct HistoryQuery {
+    #[serde(default)]
+    pub since: Option<String>,
+}
+
+/// `GET /api/v1/metrics/:id/history?since=<rfc3339>` — reuses
+/// `Method::MetricsHistory`.
+async fn get_metrics_history(
+    State(state): State<WebUiState>,
+    Path(container_id): Path<String>,
+    Query(q): Query<HistoryQuery>,
+) -> Response<Body> {
+    dispatch(
+        &state,
+        Method::MetricsHistory(MetricsHistoryParams {
+            container_id,
+            since: q.since,
+        }),
+    )
+    .await
+}
+
+/// `GET /api/v1/system/df` — backed by the new `Method::SystemDf`.
+async fn get_system_df(State(state): State<WebUiState>) -> Response<Body> {
+    dispatch(&state, Method::SystemDf).await
+}
+
+/// `GET /api/v1/system/info` — composite of `Method::Version` +
+/// `Method::DaemonMgmtStatus`. Version is required; when only the status
+/// dispatch fails the status-derived fields (`socket_path`, `uptime_secs`)
+/// stay `null`. `web_listener_url` is not tracked by `WebUiState`, so it is
+/// currently always `null` (contract-permitted).
+async fn get_system_info(State(state): State<WebUiState>) -> Response<Body> {
+    let version_val = match dispatch_value(&state, Method::Version).await {
+        Ok(v) => v,
+        Err(resp) => return resp,
+    };
+    let version: responses::VersionResponse = match serde_json::from_value(version_val) {
+        Ok(v) => v,
+        Err(e) => return internal_error(format!("system/info: decode version: {e}")),
+    };
+
+    // DaemonMgmtStatus is best-effort — its failure leaves the derived fields null.
+    let (socket_path, uptime_secs) = match dispatch_value(&state, Method::DaemonMgmtStatus).await {
+        Ok(v) => match serde_json::from_value::<responses::DaemonMgmtStatusResponse>(v) {
+            Ok(status) => (
+                status.socket_path.map(|p| p.display().to_string()),
+                status.uptime_secs,
+            ),
+            Err(_) => (None, None),
+        },
+        Err(_) => (None, None),
+    };
+
+    let info = responses::SystemInfoResponse {
+        linpodx_version: version.linpodx_version,
+        ipc_version: version.ipc_version,
+        podman_version: version.podman_version,
+        socket_path,
+        web_listener_url: None,
+        uptime_secs,
+    };
+    Json(info).into_response()
+}
+
+/// `POST /api/v1/doctor/run` — reuses `Method::DoctorRun` with `json: true`.
+/// Any request body is ignored.
+async fn post_doctor_run(State(state): State<WebUiState>) -> Response<Body> {
+    dispatch(&state, Method::DoctorRun(DoctorRunParams { json: true })).await
 }
 
 // ---------------------------------------------------------------------------
@@ -738,6 +933,112 @@ mod tests {
     fn audit_query_parses_limit() {
         let q: AuditQuery = serde_json::from_value(serde_json::json!({"limit": 50})).unwrap();
         assert_eq!(q.limit, Some(50));
+    }
+
+    // ---- Phase 25: dashboard read surface helpers ----
+
+    #[test]
+    fn tail_lines_returns_verbatim_when_under_limit() {
+        let s = "a\nb\nc\n";
+        assert_eq!(tail_lines(s, 500), s);
+        assert_eq!(tail_lines("only-line", 5), "only-line");
+    }
+
+    #[test]
+    fn tail_lines_trims_to_last_n() {
+        let s = "l1\nl2\nl3\nl4\nl5";
+        assert_eq!(tail_lines(s, 2), "l4\nl5");
+        assert_eq!(tail_lines(s, 3), "l3\nl4\nl5");
+    }
+
+    #[test]
+    fn tail_lines_zero_yields_empty() {
+        assert_eq!(tail_lines("a\nb\nc", 0), "");
+    }
+
+    #[test]
+    fn tail_lines_empty_input_is_empty() {
+        assert_eq!(tail_lines("", 10), "");
+    }
+
+    #[test]
+    fn truncate_logs_value_trims_both_streams() {
+        let v = serde_json::json!({
+            "stdout": "o1\no2\no3\no4",
+            "stderr": "e1\ne2\ne3",
+        });
+        let out = truncate_logs_value(v, 2);
+        assert_eq!(out["stdout"], "o3\no4");
+        assert_eq!(out["stderr"], "e2\ne3");
+    }
+
+    #[test]
+    fn truncate_logs_value_passes_through_unexpected_shape() {
+        // A payload that is not a LogsResponse must be returned unchanged.
+        let v = serde_json::json!({ "something": "else" });
+        let out = truncate_logs_value(v.clone(), 10);
+        assert_eq!(out, v);
+    }
+
+    #[test]
+    fn logs_query_defaults_are_none() {
+        let q: LogsQuery = serde_json::from_value(serde_json::json!({})).unwrap();
+        assert!(q.tail.is_none());
+        assert!(q.since.is_none());
+    }
+
+    #[test]
+    fn logs_query_parses_tail_and_since() {
+        let q: LogsQuery = serde_json::from_value(
+            serde_json::json!({"tail": 100, "since": "2026-07-21T12:00:00Z"}),
+        )
+        .unwrap();
+        assert_eq!(q.tail, Some(100));
+        assert_eq!(q.since.as_deref(), Some("2026-07-21T12:00:00Z"));
+    }
+
+    #[test]
+    fn history_query_parses_since() {
+        let q: HistoryQuery =
+            serde_json::from_value(serde_json::json!({"since": "2026-07-21T12:00:00Z"})).unwrap();
+        assert_eq!(q.since.as_deref(), Some("2026-07-21T12:00:00Z"));
+        let empty: HistoryQuery = serde_json::from_value(serde_json::json!({})).unwrap();
+        assert!(empty.since.is_none());
+    }
+
+    #[test]
+    fn error_to_response_is_500_json_envelope() {
+        let resp = error_to_response(RpcError {
+            code: error_codes::NOT_FOUND,
+            message: "no such container".into(),
+            data: None,
+        });
+        assert_eq!(resp.status(), StatusCode::INTERNAL_SERVER_ERROR);
+        let ct = resp
+            .headers()
+            .get(header::CONTENT_TYPE)
+            .and_then(|v| v.to_str().ok())
+            .unwrap_or("");
+        assert!(ct.starts_with("application/json"), "got {ct:?}");
+    }
+
+    #[test]
+    fn system_info_response_serializes_all_keys() {
+        // The frontend binds to every key including the nullable ones.
+        let info = responses::SystemInfoResponse {
+            linpodx_version: "0.1.5".into(),
+            ipc_version: 1,
+            podman_version: "5.8.1".into(),
+            socket_path: Some("/run/user/1000/linpodx.sock".into()),
+            web_listener_url: None,
+            uptime_secs: Some(3625),
+        };
+        let v = serde_json::to_value(&info).unwrap();
+        assert_eq!(v["linpodx_version"], "0.1.5");
+        assert_eq!(v["ipc_version"], 1);
+        assert_eq!(v["socket_path"], "/run/user/1000/linpodx.sock");
+        assert!(v["web_listener_url"].is_null());
+        assert_eq!(v["uptime_secs"], 3625);
     }
 
     #[test]
