@@ -23,7 +23,8 @@ use wasm_bindgen_futures::spawn_local;
 use crate::components::{
     AuditFeed, ClusterView, CommandPalette, ContainerDetail, ContainerList, ContainerLiveSample,
     Dashboard, DashboardShared, Icon, ImageList, NetworkList, PinnedClientsView, PluginsView,
-    SandboxList, SessionTimeline, Settings, SnapshotTree, Sparkline, VolumeList,
+    PodsView, SandboxList, SessionTimeline, Settings, SnapshotTree, Sparkline, StacksView,
+    VolumeList,
 };
 
 const TOKEN_KEY: &str = "linpodx_token";
@@ -34,6 +35,10 @@ pub enum Tab {
     /// App-shell v5 — the at-a-glance home the SPA opens to (new default).
     Dashboard,
     Containers,
+    /// Compose/stack grouping — containers grouped by compose project label.
+    Stacks,
+    /// Pod grouping — containers grouped by podman pod (sibling `pods.rs`).
+    Pods,
     Images,
     Volumes,
     Networks,
@@ -55,6 +60,8 @@ impl Tab {
         match self {
             Tab::Dashboard => "Dashboard",
             Tab::Containers => "Containers",
+            Tab::Stacks => "Stacks",
+            Tab::Pods => "Pods",
             Tab::Images => "Images",
             Tab::Volumes => "Volumes",
             Tab::Networks => "Networks",
@@ -76,6 +83,8 @@ impl Tab {
         match self {
             Tab::Dashboard => "dashboard",
             Tab::Containers => "container",
+            Tab::Stacks => "stack",
+            Tab::Pods => "pod",
             Tab::Images => "image",
             Tab::Volumes => "volume",
             Tab::Networks => "network",
@@ -90,9 +99,11 @@ impl Tab {
         }
     }
 
-    const ALL: [Tab; 13] = [
+    const ALL: [Tab; 15] = [
         Tab::Dashboard,
         Tab::Containers,
+        Tab::Stacks,
+        Tab::Pods,
         Tab::Images,
         Tab::Volumes,
         Tab::Networks,
@@ -516,6 +527,8 @@ pub fn AppRoot() -> impl IntoView {
                     {move || match active.get() {
                         Tab::Dashboard => view! { <Dashboard/> }.into_any(),
                         Tab::Containers => view! { <ContainerList/> }.into_any(),
+                        Tab::Stacks => view! { <StacksView/> }.into_any(),
+                        Tab::Pods => view! { <PodsView/> }.into_any(),
                         Tab::Images => view! { <ImageList/> }.into_any(),
                         Tab::Volumes => view! { <VolumeList/> }.into_any(),
                         Tab::Networks => view! { <NetworkList/> }.into_any(),

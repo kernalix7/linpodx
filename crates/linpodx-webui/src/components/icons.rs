@@ -60,6 +60,27 @@ pub fn Icon(#[prop(into)] name: String) -> impl IntoView {
             </svg>
         }
         .into_any(),
+        // Stacks tab (compose-project grouping) — layered rectangles.
+        "stack" => view! {
+            <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.75"
+                stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+                <path d="M12 3l9 4.5-9 4.5-9-4.5 9-4.5z"></path>
+                <path d="M3 12l9 4.5 9-4.5"></path>
+                <path d="M3 16.5l9 4.5 9-4.5"></path>
+            </svg>
+        }
+        .into_any(),
+        // Pods tab — a shared network namespace grouping containers, drawn as
+        // an outer capsule with two member containers inside.
+        "pod" => view! {
+            <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.75"
+                stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+                <rect x="2.5" y="5" width="19" height="14" rx="4"></rect>
+                <rect x="6" y="9" width="5" height="6" rx="1"></rect>
+                <rect x="13" y="9" width="5" height="6" rx="1"></rect>
+            </svg>
+        }
+        .into_any(),
         "snapshot" => view! {
             <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.75"
                 stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">

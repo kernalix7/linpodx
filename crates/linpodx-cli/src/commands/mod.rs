@@ -21,6 +21,7 @@ pub(crate) mod container;
 // `main.rs`.
 pub(crate) mod image;
 pub(crate) mod network;
+pub(crate) mod pod;
 pub(crate) mod volume;
 
 // Shared helpers reused by more than one domain module.

@@ -17,6 +17,7 @@ use crate::commands::mcp::McpCmd;
 use crate::commands::network::NetworkCmd;
 use crate::commands::passthrough::PassthroughCmd;
 use crate::commands::plugin::PluginCmd;
+use crate::commands::pod::PodCmd;
 use crate::commands::sandbox::SandboxCmd;
 use crate::commands::session::SessionCmd;
 use crate::commands::snapshot::SnapshotCmd;
@@ -133,6 +134,9 @@ enum Cmd {
     /// Manage networks. Accepts both `network` and the docker-compat alias `networks`.
     #[command(subcommand, visible_alias = "networks")]
     Network(NetworkCmd),
+    /// Manage pods (compose-style stacks). Accepts both `pod` and `pods` (Phase 26).
+    #[command(subcommand, visible_alias = "pods")]
+    Pod(PodCmd),
     /// Container lifecycle verbs grouped under one subcommand for users coming
     /// from `docker` / `podman`. Identical behavior to the flat `ps` / `run` /
     /// `start` / `stop` / `rm` / `inspect` / `logs` / `exec` verbs (Phase 18).
@@ -450,6 +454,7 @@ async fn main() -> Result<()> {
         Cmd::Network(cmd) => {
             crate::commands::network::handle_network(&mut client, cli.output, cmd).await?
         }
+        Cmd::Pod(cmd) => crate::commands::pod::handle_pod(&mut client, cli.output, cmd).await?,
         Cmd::Sandbox(cmd) => {
             crate::commands::sandbox::handle_sandbox(&mut client, cli.output, cmd).await?
         }

@@ -192,6 +192,7 @@ async fn handle_cluster_state(
                 created: chrono::Utc::now(),
                 command: None,
                 ports: vec![],
+                labels: Default::default(),
             };
             let params = ClusterStateProposeContainerParams {
                 node_id: node_id.clone(),

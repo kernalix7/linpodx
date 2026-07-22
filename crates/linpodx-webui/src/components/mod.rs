@@ -32,13 +32,19 @@ mod logs_modal;
 mod networks;
 mod pin_clients;
 mod plugins;
+mod pods;
 mod push_modal;
 mod sandbox;
 mod sessions;
 mod settings;
 mod snapshots;
+mod stacks;
 mod volumes;
 mod xterm;
+
+// Compose/stack grouping (Stacks tab) groups the container list by compose
+// project label — see `stacks.rs`. The sibling `pods.rs` (Pods tab) landed, so
+// both `PodsView` and `StacksView` are re-exported and mounted from `app.rs`.
 
 pub use audit::AuditFeed;
 // AreaChart / LineChart / TwoSeriesChart are consumed by the container-drawer
@@ -67,6 +73,7 @@ pub use live_events::LiveEvents;
 pub use networks::NetworkList;
 pub use pin_clients::PinnedClientsView;
 pub use plugins::PluginsView;
+pub use pods::PodsView;
 pub use sandbox::SandboxList;
 pub use sessions::SessionTimeline;
 // `Settings` replaces app.rs's local `SettingsPlaceholder` for `Tab::Settings`
@@ -74,6 +81,7 @@ pub use sessions::SessionTimeline;
 // the re-export to sit unused until then.
 pub use settings::Settings;
 pub use snapshots::SnapshotTree;
+pub use stacks::StacksView;
 pub use volumes::VolumeList;
 
 // Modal components are mounted from their owning panels (containers / images

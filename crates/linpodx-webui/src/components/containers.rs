@@ -53,6 +53,23 @@ fn row_is_running(row: &Value) -> bool {
     row.get("state").and_then(Value::as_str) == Some("running")
 }
 
+/// The compose project a container belongs to, from its `labels` map
+/// (`com.docker.compose.project`, then `io.podman.compose.project`). `None`
+/// for standalone containers. Used to render the Stack badge column — mirrors
+/// `stacks.rs::stack_project` so the two views agree on grouping.
+fn row_stack_project(row: &Value) -> Option<String> {
+    let labels = row.get("labels")?.as_object()?;
+    for key in ["com.docker.compose.project", "io.podman.compose.project"] {
+        if let Some(v) = labels.get(key).and_then(Value::as_str) {
+            let t = v.trim();
+            if !t.is_empty() {
+                return Some(t.to_string());
+            }
+        }
+    }
+    None
+}
+
 /// `window.setTimeout`-backed sleep used to periodically nudge the humanized
 /// "Created" column forward without needing a full data refetch.
 async fn sleep_ms(ms: i32) {
@@ -127,7 +144,7 @@ pub fn ContainerList() -> impl IntoView {
 
     let body_view = move || {
         if loading.get() {
-            return skeleton_rows(7);
+            return skeleton_rows(8);
         }
         match rows.get() {
             Err(msg) => view! {
@@ -165,10 +182,12 @@ pub fn ContainerList() -> impl IntoView {
                             .unwrap_or("")
                             .to_lowercase();
                         let id = row_id(row).to_lowercase();
+                        let stack = row_stack_project(row).unwrap_or_default().to_lowercase();
                         name.contains(&needle)
                             || image.contains(&needle)
                             || status.contains(&needle)
                             || id.contains(&needle)
+                            || stack.contains(&needle)
                     })
                     .collect();
                 if filtered.is_empty() {
@@ -203,6 +222,7 @@ pub fn ContainerList() -> impl IntoView {
                             <thead>
                                 <tr>
                                     <th>"Name"</th>
+                                    <th>"Stack"</th>
                                     <th>"Image"</th>
                                     <th>"Status"</th>
                                     <th>"Created"</th>
@@ -279,6 +299,13 @@ fn render_row(
 ) -> AnyView {
     let id = row_id(row);
     let name = container_display_name(&row_names(row), &id);
+    let stack_view = match row_stack_project(row) {
+        Some(project) => {
+            view! { <span class="badge badge--info" title="Compose project">{project}</span> }
+                .into_any()
+        }
+        None => view! { <span class="cell-muted">"—"</span> }.into_any(),
+    };
     let image = row.get("image").and_then(Value::as_str).unwrap_or("");
     let image_view = if image.is_empty() {
         view! { <span class="cell-muted">"—"</span> }.into_any()
@@ -328,6 +355,7 @@ fn render_row(
                     move || view! { " "<span class="mono cell-id" title=title_id.clone()>{title_id.clone()}</span> }
                 })}
             </td>
+            <td>{stack_view}</td>
             <td>{image_view}</td>
             <td>{status_view}</td>
             <td><span class="cell">{created}</span></td>
