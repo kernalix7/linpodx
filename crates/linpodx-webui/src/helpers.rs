@@ -623,6 +623,174 @@ pub fn split_log_lines(blob: &str) -> Vec<String> {
         .collect()
 }
 
+// ===========================================================================
+// Containers-table live columns — display-name resolution, status chip
+// classification and relative-time humanization. Pure Rust so the mapping
+// logic (wire-format quirks like `names` being an array, or `created` being
+// an RFC3339 string) is pinned by host-side unit tests instead of only being
+// exercised by hand in the browser.
+// ===========================================================================
+
+/// Resolve a container's display name from its `names` array (the daemon /
+/// podman wire shape allows multiple names per container; we show the
+/// first non-blank one). Falls back to a short id, or an em-dash when
+/// neither is available — never an empty string.
+pub fn container_display_name(names: &[String], id: &str) -> String {
+    if let Some(n) = names.iter().find(|n| !n.trim().is_empty()) {
+        return n.clone();
+    }
+    if !id.is_empty() {
+        return short_id(id);
+    }
+    "—".to_string()
+}
+
+/// Map a raw status/state string to a `.chip--*` modifier class. Shared by the
+/// generic [`crate::components`]`::list_table` renderer and the bespoke
+/// containers table so both classify `"Up 3 days (healthy)"` /
+/// `"Exited (0) 3 days ago"` / `"running"` / `"exited"` identically.
+pub fn status_chip_modifier(value: &str) -> &'static str {
+    let v = value.to_lowercase();
+    if v.contains("error") || v.contains("fail") || v.contains("dead") || v.contains("unhealthy") {
+        "chip--error"
+    } else if v.contains("run")
+        || v.contains("healthy")
+        || v.contains("active")
+        || v.contains("online")
+        || v == "up"
+        || v.starts_with("up ")
+    {
+        "chip--running"
+    } else if v.contains("paus")
+        || v.contains("restart")
+        || v.contains("pending")
+        || v.contains("warn")
+        || v.contains("creat")
+    {
+        "chip--warn"
+    } else if v.contains("exit")
+        || v.contains("stop")
+        || v.contains("inactive")
+        || v.contains("offline")
+    {
+        "chip--stopped"
+    } else {
+        "chip--neutral"
+    }
+}
+
+/// Days since the Unix epoch for a proleptic-Gregorian civil date, via Howard
+/// Hinnant's `days_from_civil` algorithm (no external date/time crate needed
+/// for the narrow RFC3339-UTC shape the daemon emits).
+fn days_from_civil(y: i64, m: i64, d: i64) -> i64 {
+    let y = if m <= 2 { y - 1 } else { y };
+    let era = (if y >= 0 { y } else { y - 399 }) / 400;
+    let yoe = y - era * 400; // [0, 399]
+    let mp = (m + 9) % 12; // [0, 11]
+    let doy = (153 * mp + 2) / 5 + d - 1; // [0, 365]
+    let doe = yoe * 365 + yoe / 4 - yoe / 100 + doy; // [0, 146096]
+    era * 146_097 + doe - 719_468
+}
+
+/// Parse an RFC3339 UTC timestamp (`YYYY-MM-DDTHH:MM:SS[.frac](Z|+00:00)`)
+/// into epoch seconds. Returns `None` for any other shape (caller should fall
+/// back to rendering the raw string rather than blanking the cell). Every
+/// daemon-emitted timestamp we render is UTC, so non-zero offsets are
+/// rejected rather than mis-converted.
+pub fn parse_rfc3339_epoch(s: &str) -> Option<i64> {
+    let s = s.trim();
+    if s.len() < 20 {
+        return None;
+    }
+    let bytes = s.as_bytes();
+    let year: i64 = s.get(0..4)?.parse().ok()?;
+    if bytes.get(4) != Some(&b'-') {
+        return None;
+    }
+    let month: i64 = s.get(5..7)?.parse().ok()?;
+    if bytes.get(7) != Some(&b'-') {
+        return None;
+    }
+    let day: i64 = s.get(8..10)?.parse().ok()?;
+    if !matches!(bytes.get(10), Some(&b'T') | Some(&b't')) {
+        return None;
+    }
+    let hour: i64 = s.get(11..13)?.parse().ok()?;
+    if bytes.get(13) != Some(&b':') {
+        return None;
+    }
+    let minute: i64 = s.get(14..16)?.parse().ok()?;
+    if bytes.get(16) != Some(&b':') {
+        return None;
+    }
+    let second: i64 = s.get(17..19)?.parse().ok()?;
+    let rest = &s[19..];
+    let tz_ok = rest == "Z" || rest == "+00:00" || rest == "-00:00" || rest.ends_with('Z');
+    if !tz_ok {
+        return None;
+    }
+    if !(1..=12).contains(&month)
+        || !(1..=31).contains(&day)
+        || !(0..=23).contains(&hour)
+        || !(0..=59).contains(&minute)
+        || !(0..=60).contains(&second)
+    {
+        return None;
+    }
+    let days = days_from_civil(year, month, day);
+    Some(days * 86_400 + hour * 3_600 + minute * 60 + second)
+}
+
+/// Render a relative "N units ago" label. Clamps future timestamps (clock
+/// skew) to `"just now"` rather than printing a negative duration.
+pub fn humanize_relative(now_secs: i64, then_secs: i64) -> String {
+    let delta = (now_secs - then_secs).max(0);
+    if delta < 5 {
+        return "just now".to_string();
+    }
+    fn unit(n: i64, name: &str) -> String {
+        if n == 1 {
+            format!("1 {name} ago")
+        } else {
+            format!("{n} {name}s ago")
+        }
+    }
+    if delta < 60 {
+        return unit(delta, "second");
+    }
+    let mins = delta / 60;
+    if mins < 60 {
+        return unit(mins, "minute");
+    }
+    let hours = delta / 3_600;
+    if hours < 24 {
+        return unit(hours, "hour");
+    }
+    let days = delta / 86_400;
+    if days < 30 {
+        return unit(days, "day");
+    }
+    let months = days / 30;
+    if months < 12 {
+        return unit(months, "month");
+    }
+    let years = days / 365;
+    unit(years, "year")
+}
+
+/// Humanize a raw `created`/`started_at`-style RFC3339 string relative to
+/// `now_secs`. Falls back to the raw string when it doesn't parse (never
+/// blanks the cell), and to an em-dash when the field is empty.
+pub fn humanize_timestamp(now_secs: i64, raw: &str) -> String {
+    if raw.trim().is_empty() {
+        return "—".to_string();
+    }
+    match parse_rfc3339_epoch(raw) {
+        Some(t) => humanize_relative(now_secs, t),
+        None => raw.to_string(),
+    }
+}
+
 /// Convert a cumulative counter series (e.g. `net_rx` total bytes) into a
 /// per-interval delta series for the throughput chart. Negative deltas (counter
 /// reset / container restart) clamp to zero; a series shorter than two points
@@ -1035,6 +1203,98 @@ mod tests {
         assert_eq!(split_log_lines(""), Vec::<String>::new());
         assert_eq!(split_log_lines("a\n\nb\n"), vec!["a", "b"]);
         assert_eq!(split_log_lines("single"), vec!["single"]);
+    }
+
+    // ---- containers-table live-column helpers ---------------------------
+
+    #[test]
+    fn container_display_name_prefers_first_nonblank_name() {
+        assert_eq!(
+            container_display_name(&["open-webui".to_string()], "deadbeef"),
+            "open-webui"
+        );
+        assert_eq!(
+            container_display_name(&["".to_string(), "second".to_string()], "deadbeef"),
+            "second"
+        );
+    }
+
+    #[test]
+    fn container_display_name_falls_back_to_short_id_then_dash() {
+        assert_eq!(
+            container_display_name(&[], "abcdef0123456789"),
+            "abcdef012345"
+        );
+        assert_eq!(container_display_name(&[], ""), "—");
+        assert_eq!(container_display_name(&["  ".to_string()], ""), "—");
+    }
+
+    #[test]
+    fn status_chip_modifier_classifies_podman_and_daemon_strings() {
+        assert_eq!(status_chip_modifier("Up 3 days (healthy)"), "chip--running");
+        assert_eq!(status_chip_modifier("running"), "chip--running");
+        assert_eq!(
+            status_chip_modifier("Exited (-1) 3 days ago (unhealthy)"),
+            "chip--error"
+        );
+        assert_eq!(
+            status_chip_modifier("Exited (0) 3 days ago"),
+            "chip--stopped"
+        );
+        assert_eq!(status_chip_modifier("exited"), "chip--stopped");
+        assert_eq!(status_chip_modifier("paused"), "chip--warn");
+        assert_eq!(status_chip_modifier("weird-value"), "chip--neutral");
+    }
+
+    #[test]
+    fn parse_rfc3339_epoch_matches_known_instants() {
+        assert_eq!(parse_rfc3339_epoch("1970-01-01T00:00:00Z"), Some(0));
+        assert_eq!(
+            parse_rfc3339_epoch("2026-06-13T06:58:43Z"),
+            Some(1_781_333_923)
+        );
+        assert_eq!(
+            parse_rfc3339_epoch("2026-07-21T02:30:02Z"),
+            Some(1_784_601_002)
+        );
+        // +00:00 offset is accepted; fractional seconds before Z are accepted.
+        assert_eq!(parse_rfc3339_epoch("1970-01-01T00:00:00+00:00"), Some(0));
+        assert_eq!(parse_rfc3339_epoch("1970-01-01T00:00:00.123Z"), Some(0));
+    }
+
+    #[test]
+    fn parse_rfc3339_epoch_rejects_malformed_input() {
+        assert_eq!(parse_rfc3339_epoch(""), None);
+        assert_eq!(parse_rfc3339_epoch("not a timestamp"), None);
+        assert_eq!(parse_rfc3339_epoch("2026-13-99T99:99:99Z"), None);
+        // Non-UTC offset — rejected rather than mis-converted.
+        assert_eq!(parse_rfc3339_epoch("2026-06-13T06:58:43+09:00"), None);
+    }
+
+    #[test]
+    fn humanize_relative_covers_all_buckets() {
+        assert_eq!(humanize_relative(100, 100), "just now");
+        assert_eq!(humanize_relative(100, 97), "just now");
+        assert_eq!(humanize_relative(140, 100), "40 seconds ago");
+        assert_eq!(humanize_relative(161, 100), "1 minute ago");
+        assert_eq!(humanize_relative(100 + 300, 100), "5 minutes ago");
+        assert_eq!(humanize_relative(100 + 3_600, 100), "1 hour ago");
+        assert_eq!(humanize_relative(100 + 3 * 86_400, 100), "3 days ago");
+        assert_eq!(humanize_relative(100 + 40 * 86_400, 100), "1 month ago");
+        assert_eq!(humanize_relative(100 + 400 * 86_400, 100), "1 year ago");
+        // Future timestamp (clock skew) clamps rather than going negative.
+        assert_eq!(humanize_relative(100, 200), "just now");
+    }
+
+    #[test]
+    fn humanize_timestamp_falls_back_gracefully() {
+        assert_eq!(humanize_timestamp(1_000, ""), "—");
+        assert_eq!(humanize_timestamp(1_000, "   "), "—");
+        assert_eq!(humanize_timestamp(1_000, "garbage"), "garbage");
+        assert_eq!(
+            humanize_timestamp(1_784_601_002 + 3 * 86_400, "2026-07-21T02:30:02Z"),
+            "3 days ago"
+        );
     }
 
     #[test]

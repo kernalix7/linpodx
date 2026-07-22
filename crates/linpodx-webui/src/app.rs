@@ -21,9 +21,9 @@ use wasm_bindgen::JsCast;
 use wasm_bindgen_futures::spawn_local;
 
 use crate::components::{
-    AuditFeed, ClusterView, CommandPalette, ContainerDetail, ContainerList, Dashboard,
-    DashboardShared, Icon, ImageList, NetworkList, PinnedClientsView, PluginsView, SandboxList,
-    SessionTimeline, Settings, SnapshotTree, Sparkline, VolumeList,
+    AuditFeed, ClusterView, CommandPalette, ContainerDetail, ContainerList, ContainerLiveSample,
+    Dashboard, DashboardShared, Icon, ImageList, NetworkList, PinnedClientsView, PluginsView,
+    SandboxList, SessionTimeline, Settings, SnapshotTree, Sparkline, VolumeList,
 };
 
 const TOKEN_KEY: &str = "linpodx_token";
@@ -236,16 +236,37 @@ fn start_metrics_loop(shared: DashboardShared, token: RwSignal<Option<String>>) 
 
                         let mut cpu_sum = 0.0_f64;
                         let mut mem_sum = 0.0_f64;
+                        // Rebuilt wholesale (not merged into the previous map) so a
+                        // container that stops between polls drops out rather than
+                        // leaving a stale reading behind for the containers table.
+                        let mut per_container = std::collections::HashMap::new();
                         for id in &running_ids {
                             if let Ok(m) = crate::api_client::fetch_metrics_latest(id, &tok).await {
-                                if let Some(c) = m.get("cpu_pct").and_then(|x| x.as_f64()) {
+                                let cpu = m.get("cpu_pct").and_then(|x| x.as_f64());
+                                let mem = m.get("mem_bytes").and_then(|x| x.as_f64());
+                                if let Some(c) = cpu {
                                     cpu_sum += c;
                                 }
-                                if let Some(mm) = m.get("mem_bytes").and_then(|x| x.as_f64()) {
+                                if let Some(mm) = mem {
                                     mem_sum += mm;
+                                }
+                                // Only surface a per-container sample once both fields
+                                // are present — a partial/missing sample means the
+                                // collector hasn't warmed up for this container yet,
+                                // so the table should show "—" rather than a
+                                // half-populated row.
+                                if let (Some(c), Some(mm)) = (cpu, mem) {
+                                    per_container.insert(
+                                        id.clone(),
+                                        ContainerLiveSample {
+                                            cpu_pct: c,
+                                            mem_bytes: mm,
+                                        },
+                                    );
                                 }
                             }
                         }
+                        shared.latest_metrics.set(per_container);
                         let now = js_sys::Date::now() / 1000.0;
                         push_ring(shared.agg_cpu, now, cpu_sum * 100.0);
                         push_ring(shared.agg_mem, now, mem_sum);

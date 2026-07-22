@@ -311,7 +311,7 @@ pub fn ImageList() -> impl IntoView {
                                 </td>
                                 <td><span class="cell">{name}</span></td>
                                 <td><span class="cell-id" title=title_id>{short_id(&id)}</span></td>
-                                <td><span class="cell-num">{format_bytes(size)}</span></td>
+                                <td class="cell-num"><span class="mono">{format_bytes(size)}</span></td>
                                 <td><span class="cell">{created}</span></td>
                                 <td>
                                     {if in_use {

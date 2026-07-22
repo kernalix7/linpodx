@@ -53,7 +53,7 @@ pub use command_palette::CommandPalette;
 // that mount point is wired (mirrors the `Settings` re-export below).
 pub use container_detail::ContainerDetail;
 pub use containers::ContainerList;
-pub use dashboard::{Dashboard, DashboardShared};
+pub use dashboard::{ContainerLiveSample, Dashboard, DashboardShared};
 pub use icons::Icon;
 pub use images::ImageList;
 pub use networks::NetworkList;

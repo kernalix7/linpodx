@@ -239,6 +239,66 @@ pub(super) fn check_cgroup_v2() -> DoctorCheck {
     }
 }
 
+/// Rootless containers only get resource *stats* for controllers systemd
+/// delegates to the user service. Distros commonly delegate just `pids`, in
+/// which case `memory.current` never exists inside container scopes and every
+/// memory reading (podman's and ours) is a silent 0 — CPU% still works because
+/// it isn't derived from the missing controller. Surfacing this here turns an
+/// invisible all-zeros dashboard into an actionable host fix.
+pub(super) fn check_cgroup_delegation() -> DoctorCheck {
+    let id = "cgroup-delegation";
+    let label = "cgroup controller delegation (rootless stats)";
+    let uid = unsafe_free_uid();
+    let path =
+        format!("/sys/fs/cgroup/user.slice/user-{uid}.slice/user@{uid}.service/cgroup.controllers");
+    match std::fs::read_to_string(&path) {
+        Ok(content) => delegation_check_from(id, label, &content),
+        Err(_) => warn(
+            id,
+            label,
+            format!("could not read {path} (non-systemd session or system-level podman?)"),
+            "if running rootless under systemd, verify controller delegation; otherwise this \
+             check does not apply",
+        ),
+    }
+}
+
+/// Classify a `cgroup.controllers` line: pass when both `memory` and `cpu`
+/// are delegated, warn (with the systemd remediation) otherwise.
+fn delegation_check_from(id: &str, label: &str, content: &str) -> DoctorCheck {
+    let controllers: Vec<&str> = content.split_whitespace().collect();
+    let missing: Vec<&str> = ["memory", "cpu"]
+        .iter()
+        .copied()
+        .filter(|c| !controllers.contains(c))
+        .collect();
+    if missing.is_empty() {
+        ok(id, label, format!("delegated: {}", content.trim()))
+    } else {
+        warn(
+            id,
+            label,
+            format!(
+                "user service delegates only [{}] — missing [{}]; container memory/cpu \
+                 stats will read 0",
+                controllers.join(" "),
+                missing.join(" ")
+            ),
+            "create /etc/systemd/system/user@.service.d/delegate.conf with \
+             `[Service]\\nDelegate=cpu cpuset io memory pids`, run \
+             `systemctl daemon-reload`, then log out and back in and restart \
+             your containers",
+        )
+    }
+}
+
+/// `getuid()` without libc: `/proc/self` is owned by the process uid.
+fn unsafe_free_uid() -> u32 {
+    std::fs::metadata("/proc/self")
+        .map(|m| std::os::unix::fs::MetadataExt::uid(&m))
+        .unwrap_or(1000)
+}
+
 /// Confirm the daemon's Unix socket exists, is a socket, and is mode 0700
 /// (or stricter) — the daemon's `server.rs` enforces 0700 on bind.
 pub(super) fn check_socket_permissions() -> DoctorCheck {
@@ -616,6 +676,35 @@ mod tests {
         assert!(is_supported_podman((5, 0, 0)));
         assert!(!is_supported_podman((4, 5, 9)));
         assert!(!is_supported_podman((3, 9, 0)));
+    }
+
+    #[test]
+    fn delegation_full_set_passes() {
+        let c = delegation_check_from("cgroup-delegation", "l", "cpuset cpu io memory pids");
+        assert_eq!(c.outcome, DoctorOutcome::Pass);
+    }
+
+    #[test]
+    fn delegation_pids_only_warns_with_remediation() {
+        let c = delegation_check_from("cgroup-delegation", "l", "pids");
+        assert_eq!(c.outcome, DoctorOutcome::Warn);
+        assert!(c
+            .detail
+            .as_deref()
+            .unwrap_or("")
+            .contains("missing [memory cpu]"));
+        assert!(c
+            .fix_hint
+            .as_deref()
+            .unwrap_or("")
+            .contains("delegate.conf"));
+    }
+
+    #[test]
+    fn delegation_memory_only_missing_cpu_warns() {
+        let c = delegation_check_from("cgroup-delegation", "l", "memory pids");
+        assert_eq!(c.outcome, DoctorOutcome::Warn);
+        assert!(c.detail.as_deref().unwrap_or("").contains("missing [cpu]"));
     }
 
     #[test]

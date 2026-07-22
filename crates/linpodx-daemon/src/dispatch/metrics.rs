@@ -8,6 +8,13 @@ impl Dispatcher {
         p: linpodx_common::ipc::MetricsLatestParams,
     ) -> Result<serde_json::Value> {
         let latest = self.metrics.latest(&p.container_id).await;
+        if latest.is_none() {
+            // Lazy warm-up: no sample buffered yet (e.g. the first UI request
+            // for a container started directly via podman, before the reconcile
+            // loop's next tick). Spawning is idempotent; the next poll returns
+            // data. This call returns `null` this once.
+            self.metrics.spawn_for(p.container_id.clone()).await;
+        }
         Ok(serde_json::to_value(latest)?)
     }
 
@@ -21,6 +28,10 @@ impl Dispatcher {
                 .map(|d| d.with_timezone(&chrono::Utc))
         });
         let samples = self.metrics.history(&p.container_id, since).await;
+        if samples.is_empty() {
+            // Same lazy warm-up as `metrics_latest`.
+            self.metrics.spawn_for(p.container_id.clone()).await;
+        }
         Ok(serde_json::to_value(samples)?)
     }
 }

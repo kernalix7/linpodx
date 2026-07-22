@@ -32,7 +32,7 @@ use tokio::net::UnixListener;
 use tokio::signal::unix::{signal, SignalKind};
 use tokio::sync::RwLock;
 use tokio_util::sync::CancellationToken;
-use tracing::{error, info, warn};
+use tracing::{debug, error, info, warn};
 use tracing_subscriber::EnvFilter;
 
 #[tokio::main(flavor = "multi_thread")]
@@ -340,6 +340,7 @@ async fn main() -> Result<()> {
         .metrics(Arc::clone(&metrics))
         .audit(Arc::clone(&audit_sink))
         .pin_store(pin_store.clone())
+        .socket_path(socket_path.clone())
         // Phase 13: hand the long-lived plugin registry to the dispatcher so the
         // `ContainerCreate` arm can run the `runtime_injector` chain.
         .plugin_registry(Arc::clone(&plugin_registry));
@@ -467,6 +468,42 @@ async fn main() -> Result<()> {
             dead_after_secs = linpodx_cluster::gossip::DEFAULT_DEAD_AFTER_SECS,
             "gossip health loop spawned"
         );
+    }
+
+    // Metrics reconcile loop — collectors are otherwise spawned only for
+    // linpodx-initiated `container_start`s, so containers started directly via
+    // podman (or already running when the daemon booted) would never produce
+    // metrics. Every 5 s we list running containers and `reconcile_running`:
+    // spawn a collector for each running id (idempotent) and prune collectors
+    // whose container has stopped (a direct `podman stop` never routes through
+    // `stop_for`, so their `podman stats` loop would poll a dead container
+    // forever). Best-effort; a failed list is logged and retried next tick.
+    // Aborted cleanly when the shutdown token fires.
+    {
+        let metrics_for_reconcile = Arc::clone(&metrics);
+        let podman_for_reconcile = dispatcher.podman.clone();
+        let reconcile_shutdown = shutdown.clone();
+        tokio::spawn(async move {
+            let mut ticker = tokio::time::interval(Duration::from_secs(5));
+            // Run one pass immediately so already-running containers warm up at
+            // boot without waiting a full period.
+            loop {
+                match podman_for_reconcile.list(false).await {
+                    Ok(list) => {
+                        let ids: Vec<String> = list.iter().map(|c| c.id.0.clone()).collect();
+                        metrics_for_reconcile.reconcile_running(&ids).await;
+                    }
+                    Err(e) => {
+                        debug!(error = %e, "metrics reconcile: container list failed; retrying next tick");
+                    }
+                }
+                tokio::select! {
+                    _ = reconcile_shutdown.cancelled() => break,
+                    _ = ticker.tick() => {}
+                }
+            }
+        });
+        info!("metrics reconcile loop spawned (period=5s)");
     }
 
     let shutdown_for_signals = shutdown.clone();

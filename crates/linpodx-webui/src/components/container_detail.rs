@@ -548,8 +548,25 @@ pub fn ContainerDetail() -> impl IntoView {
             <div class="drawer-pane">
                 {move || stats_err.get().map(|m| view! { <div class="error-state"><span>{m}</span></div> })}
                 {move || {
-                    (!running.get() && cpu.get().is_empty())
-                        .then(|| {
+                    if !cpu.get().is_empty() {
+                        None
+                    } else if running.get() {
+                        // Container is running but the collector hasn't produced a
+                        // sample yet — distinct from "not running" so users don't
+                        // think metrics are broken while they warm up.
+                        Some(
+                            view! {
+                                <div class="empty-state">
+                                    <span class="empty-state__title">"Waiting for the first sample…"</span>
+                                    <span class="empty-state__hint">
+                                        "Samples appear within seconds of the daemon seeing the container run."
+                                    </span>
+                                </div>
+                            }
+                            .into_any(),
+                        )
+                    } else {
+                        Some(
                             view! {
                                 <div class="empty-state">
                                     <span class="empty-state__hint">
@@ -557,7 +574,9 @@ pub fn ContainerDetail() -> impl IntoView {
                                     </span>
                                 </div>
                             }
-                        })
+                            .into_any(),
+                        )
+                    }
                 }}
                 <LineChart data=cpu title="CPU" value_fmt=pct_fmt/>
                 <AreaChart data=mem title="Memory" value_fmt=bytes_fmt/>
@@ -701,6 +720,8 @@ fn overview_pane(v: &Value) -> AnyView {
         })
         .unwrap_or_default();
     let port_links = parse_published_ports(&ports_raw);
+    // Published (host-mapped tcp) ports render as clickable chips; exposed-only
+    // / udp ports render as muted text — they aren't reachable via a link.
     let ports_view = if port_links.is_empty() {
         view! { <span class="cell-muted">"—"</span> }.into_any()
     } else {
@@ -708,11 +729,11 @@ fn overview_pane(v: &Value) -> AnyView {
             .into_iter()
             .map(|pl| match pl.href {
                 Some(href) => view! {
-                    <a class="mono" href=href target="_blank" rel="noreferrer">{pl.display}</a>
+                    <a class="badge badge--info mono" href=href target="_blank" rel="noreferrer">{pl.display}</a>
                     " "
                 }
                 .into_any(),
-                None => view! { <span class="mono">{pl.display}</span>" " }.into_any(),
+                None => view! { <span class="cell-muted mono">{pl.display}</span>" " }.into_any(),
             })
             .collect_view()
             .into_any()

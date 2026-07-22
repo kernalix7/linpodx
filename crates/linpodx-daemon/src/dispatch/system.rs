@@ -116,8 +116,19 @@ fn apply_podman_df(resp: &mut SystemDfResponse, entries: &[serde_json::Value]) {
             .and_then(|v| v.as_str())
             .unwrap_or("")
             .to_lowercase();
-        let size = entry.get("Size").and_then(value_u64);
-        let reclaimable = entry.get("Reclaimable").and_then(value_u64);
+        // Podman 5.x `system df --format json` emits `RawSize` / `RawReclaimable`
+        // as integer bytes while `Size` / `Reclaimable` are human strings
+        // (`"56.44GB"`, `"45.45GB (81%)"`). Prefer the raw integer fields; fall
+        // back to `Size` / `Reclaimable` only when they are themselves integers
+        // (older shapes), never guessing from a human string.
+        let size = entry
+            .get("RawSize")
+            .and_then(value_u64)
+            .or_else(|| entry.get("Size").and_then(value_u64));
+        let reclaimable = entry
+            .get("RawReclaimable")
+            .and_then(value_u64)
+            .or_else(|| entry.get("Reclaimable").and_then(value_u64));
         if kind.contains("image") {
             if let Some(s) = size {
                 resp.images.size_bytes = Some(s);
@@ -218,6 +229,30 @@ mod tests {
         assert_eq!(df.images.reclaimable_bytes, Some(1181116006));
         assert_eq!(df.containers.size_bytes, Some(0));
         assert_eq!(df.volumes.size_bytes, Some(335544320));
+    }
+
+    #[test]
+    fn apply_df_reads_raw_size_from_real_5x_shape() {
+        // Real captured `podman 5.8.2 system df --format json` shape: human
+        // string `Size`/`Reclaimable` alongside integer `RawSize`/`RawReclaimable`.
+        let mut df = build_system_df_from_lists(&[], &[image(1)], 0);
+        let entries = serde_json::json!([
+            { "Type": "Images", "Total": 212, "Active": 17,
+              "Size": "56.44GB", "Reclaimable": "45.45GB (81%)",
+              "RawSize": 56439884628u64, "RawReclaimable": 45448663074u64 },
+            { "Type": "Containers", "Total": 6, "Active": 4,
+              "Size": "95.25MB", "Reclaimable": "1.323MB (1%)",
+              "RawSize": 95245121u64, "RawReclaimable": 1322852u64 },
+            { "Type": "Local Volumes", "Total": 23, "Active": 6,
+              "Size": "24.73GB", "Reclaimable": "12.51GB (51%)",
+              "RawSize": 24732372348u64, "RawReclaimable": 12505502022u64 }
+        ]);
+        apply_podman_df(&mut df, entries.as_array().unwrap());
+
+        assert_eq!(df.images.size_bytes, Some(56439884628));
+        assert_eq!(df.images.reclaimable_bytes, Some(45448663074));
+        assert_eq!(df.containers.size_bytes, Some(95245121));
+        assert_eq!(df.volumes.size_bytes, Some(24732372348));
     }
 
     #[test]

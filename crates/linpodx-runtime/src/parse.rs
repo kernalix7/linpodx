@@ -61,22 +61,15 @@ fn parse_container_summary(v: &Value) -> Result<ContainerSummary> {
         ),
         _ => None,
     });
+    // Podman 5.x `ps --format json` emits `Ports` as either `null` (nothing
+    // published — including exposed-only containers) or an array of objects
+    // `{host_ip, container_port, host_port, range, protocol}`. Older
+    // podman/docker variants sometimes emit a plain string per entry, which we
+    // pass through untouched. `null` yields an empty vec via `unwrap_or_default`.
     let ports = v
         .get("Ports")
         .and_then(Value::as_array)
-        .map(|a| {
-            a.iter()
-                .filter_map(|x| {
-                    x.as_object().map(|o| {
-                        let host_port = o.get("host_port").and_then(Value::as_u64).unwrap_or(0);
-                        let container_port =
-                            o.get("container_port").and_then(Value::as_u64).unwrap_or(0);
-                        let protocol = o.get("protocol").and_then(Value::as_str).unwrap_or("tcp");
-                        format!("{host_port}->{container_port}/{protocol}")
-                    })
-                })
-                .collect()
-        })
+        .map(|a| a.iter().filter_map(parse_port_entry).collect())
         .unwrap_or_default();
 
     Ok(ContainerSummary {
@@ -535,6 +528,46 @@ fn extract_subnet_gateway(v: &Value) -> (Option<String>, Option<String>) {
 // Helpers
 // =========================
 
+/// Render one `podman ps` port entry into the human `host_ip:host->container/proto`
+/// string the UI expects (matching podman's own PORTS column, e.g.
+/// `127.0.0.1:3390->3389/tcp`). Accepts either the Podman 5.x object form
+/// (`{host_ip, container_port, host_port, range, protocol}`) or a pre-formatted
+/// string (passed through). Port ranges (`range > 1`) render as
+/// `host-lo-host_hi->ctr_lo-ctr_hi/proto`. Returns `None` for unrecognized shapes.
+fn parse_port_entry(x: &Value) -> Option<String> {
+    if let Some(s) = x.as_str() {
+        let t = s.trim();
+        return if t.is_empty() {
+            None
+        } else {
+            Some(t.to_string())
+        };
+    }
+    let o = x.as_object()?;
+    let host_ip = o.get("host_ip").and_then(Value::as_str).unwrap_or("");
+    let host_port = o.get("host_port").and_then(Value::as_u64).unwrap_or(0);
+    let container_port = o.get("container_port").and_then(Value::as_u64).unwrap_or(0);
+    let range = o.get("range").and_then(Value::as_u64).unwrap_or(1).max(1);
+    let protocol = o.get("protocol").and_then(Value::as_str).unwrap_or("tcp");
+
+    let host_part = if range > 1 {
+        format!("{host_port}-{}", host_port + range - 1)
+    } else {
+        host_port.to_string()
+    };
+    let container_part = if range > 1 {
+        format!("{container_port}-{}", container_port + range - 1)
+    } else {
+        container_port.to_string()
+    };
+    let mapping = format!("{host_part}->{container_part}/{protocol}");
+    Some(if host_ip.is_empty() {
+        mapping
+    } else {
+        format!("{host_ip}:{mapping}")
+    })
+}
+
 fn string_array(v: Option<&Value>) -> Vec<String> {
     v.and_then(Value::as_array)
         .map(|a| {
@@ -701,6 +734,97 @@ mod tests {
         assert_eq!(parsed[0].id.as_str(), "abc123");
         assert_eq!(parsed[0].state, ContainerState::Running);
         assert_eq!(parsed[0].command.as_deref(), Some("sleep infinity"));
+    }
+
+    #[test]
+    fn parse_ports_null_yields_empty() {
+        // Podman 5.8 emits `Ports: null` for exposed-only / no-publish containers.
+        let v = json!([{
+            "Id": "abc",
+            "Names": ["open-webui"],
+            "Image": "ghcr.io/open-webui/open-webui:latest",
+            "State": "running",
+            "Status": "Up 3 days",
+            "Created": 1746630000,
+            "Command": ["bash", "start.sh"],
+            "Ports": null
+        }]);
+        let parsed = parse_container_list(&v.to_string()).unwrap();
+        assert!(parsed[0].ports.is_empty());
+    }
+
+    #[test]
+    fn parse_ports_object_array_real_5x_sample() {
+        // Real captured `podman 5.8.2 ps --format json` Ports for the
+        // `winpodx-windows` container (host: 127.0.0.1 published, tcp + udp).
+        let v = json!([{
+            "Id": "a65daf879a80",
+            "Names": ["winpodx-windows"],
+            "Image": "docker.io/dockurr/windows",
+            "State": "running",
+            "Status": "Up 24 hours",
+            "Created": 1746630000,
+            "Command": ["/run/entry.sh"],
+            "Ports": [
+                {"host_ip": "127.0.0.1", "container_port": 3389, "host_port": 3390, "range": 1, "protocol": "tcp"},
+                {"host_ip": "127.0.0.1", "container_port": 445, "host_port": 4445, "range": 1, "protocol": "tcp"},
+                {"host_ip": "127.0.0.1", "container_port": 8006, "host_port": 8007, "range": 1, "protocol": "tcp"},
+                {"host_ip": "127.0.0.1", "container_port": 8765, "host_port": 8765, "range": 1, "protocol": "tcp"},
+                {"host_ip": "127.0.0.1", "container_port": 3389, "host_port": 3390, "range": 1, "protocol": "udp"}
+            ]
+        }]);
+        let parsed = parse_container_list(&v.to_string()).unwrap();
+        assert_eq!(
+            parsed[0].ports,
+            vec![
+                "127.0.0.1:3390->3389/tcp",
+                "127.0.0.1:4445->445/tcp",
+                "127.0.0.1:8007->8006/tcp",
+                "127.0.0.1:8765->8765/tcp",
+                "127.0.0.1:3390->3389/udp",
+            ]
+        );
+    }
+
+    #[test]
+    fn parse_ports_wildcard_host_and_range() {
+        // `0.0.0.0` bind (real `graftx-windows-m2` shape) plus a synthetic
+        // multi-port range to exercise range expansion.
+        let v = json!([{
+            "Id": "d5711c995475",
+            "Names": ["graftx-windows-m2"],
+            "Image": "graftx-windows-m2-pod:local",
+            "State": "running",
+            "Status": "Up 3 days",
+            "Created": 1746630000,
+            "Command": ["/run.sh"],
+            "Ports": [
+                {"host_ip": "0.0.0.0", "container_port": 3389, "host_port": 3389, "range": 1, "protocol": "tcp"},
+                {"host_ip": "", "container_port": 8000, "host_port": 8000, "range": 3, "protocol": "tcp"}
+            ]
+        }]);
+        let parsed = parse_container_list(&v.to_string()).unwrap();
+        assert_eq!(
+            parsed[0].ports,
+            vec!["0.0.0.0:3389->3389/tcp", "8000-8002->8000-8002/tcp"]
+        );
+    }
+
+    #[test]
+    fn parse_ports_string_passthrough() {
+        // Legacy string form is passed through verbatim.
+        let v = json!([{
+            "Id": "legacy",
+            "Names": ["old"],
+            "Image": "alpine",
+            "State": "running",
+            "Status": "Up",
+            "Created": 1746630000,
+            "Command": ["sh"],
+            "Ports": ["0.0.0.0:80->80/tcp"]
+        }]);
+        let parsed = parse_container_list(&v.to_string()).unwrap();
+        assert_eq!(parsed[0].ports, vec!["0.0.0.0:80->80/tcp"]);
     }
 
     #[test]

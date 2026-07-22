@@ -9,6 +9,8 @@
 //! (see `app.rs`) — the dashboard and the status footer both read it so we
 //! never double-poll `GET /api/v1/metrics/:id`.
 
+use std::collections::HashMap;
+
 use leptos::prelude::*;
 use serde_json::Value;
 use wasm_bindgen_futures::spawn_local;
@@ -17,6 +19,15 @@ use super::charts::AreaChart;
 use crate::app::{AuthToken, DrawerState, Nav, Tab};
 use crate::helpers::format_bytes;
 use crate::ws::{self, fetch_list};
+
+/// One container's latest metrics sample, as kept in
+/// [`DashboardShared::latest_metrics`]. `cpu_pct` is a fraction (matches the
+/// daemon's `MetricsSample.cpu_pct` wire units — multiply by 100 to display).
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct ContainerLiveSample {
+    pub cpu_pct: f64,
+    pub mem_bytes: f64,
+}
 
 /// Aggregate live-metrics ring buffers + coarse daemon status, shared between
 /// the dashboard body and the status footer via context. All fields are `Copy`
@@ -32,6 +43,12 @@ pub struct DashboardShared {
     /// True after the last metrics-poll fetch succeeded; false on 401 / error.
     pub connected: RwSignal<bool>,
     pub version: RwSignal<String>,
+    /// Per-container latest metrics sample, keyed by container id. Rebuilt
+    /// wholesale on every poll tick (rather than merged) so a container that
+    /// stops or disappears drops out of the map instead of showing a stale
+    /// reading — the Containers table CPU/Mem columns and any other live-cell
+    /// consumer read this directly instead of re-fetching per row.
+    pub latest_metrics: RwSignal<HashMap<String, ContainerLiveSample>>,
 }
 
 impl DashboardShared {
@@ -43,6 +60,7 @@ impl DashboardShared {
             total: RwSignal::new(0),
             connected: RwSignal::new(false),
             version: RwSignal::new(String::new()),
+            latest_metrics: RwSignal::new(HashMap::new()),
         }
     }
 }
@@ -53,9 +71,10 @@ impl Default for DashboardShared {
     }
 }
 
-/// Percent formatter for the CPU chart's big number.
+/// Percent formatter for the CPU chart's big number. One decimal, matching
+/// every other percent rendering in the app (containers table, Stats tab).
 fn fmt_pct(v: f64) -> String {
-    format!("{v:.0}%")
+    format!("{v:.1}%")
 }
 
 /// Byte formatter for the memory chart's big number.

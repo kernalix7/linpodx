@@ -27,6 +27,7 @@ use wasm_bindgen_futures::spawn_local;
 
 use super::icons::Icon;
 use crate::app::AuthToken;
+use crate::helpers::status_chip_modifier;
 use crate::ws::{fetch_list, subscribe};
 
 #[derive(Clone)]
@@ -325,37 +326,6 @@ fn render_cell(row: &Value, col: &str) -> AnyView {
         .into_any();
     }
     view! { <td><span class="cell">{raw}</span></td> }.into_any()
-}
-
-/// Map a raw status string to a `.chip--*` modifier class.
-fn status_chip_modifier(value: &str) -> &'static str {
-    let v = value.to_lowercase();
-    if v.contains("error") || v.contains("fail") || v.contains("dead") || v.contains("unhealthy") {
-        "chip--error"
-    } else if v.contains("run")
-        || v.contains("healthy")
-        || v.contains("active")
-        || v.contains("online")
-        || v == "up"
-        || v.starts_with("up ")
-    {
-        "chip--running"
-    } else if v.contains("paus")
-        || v.contains("restart")
-        || v.contains("pending")
-        || v.contains("warn")
-        || v.contains("creat")
-    {
-        "chip--warn"
-    } else if v.contains("exit")
-        || v.contains("stop")
-        || v.contains("inactive")
-        || v.contains("offline")
-    {
-        "chip--stopped"
-    } else {
-        "chip--neutral"
-    }
 }
 
 /// Turn a snake_case column key into a spaced Title-ish header label.

@@ -67,7 +67,7 @@ impl Dispatcher {
             } else {
                 None
             },
-            socket_path: None,
+            socket_path: self.socket_path.clone(),
             uptime_secs: Some(self.start_time.elapsed().as_secs()),
         };
         Ok(serde_json::to_value(resp)?)

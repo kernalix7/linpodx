@@ -162,6 +162,35 @@ impl MetricsCollector {
             .await;
     }
 
+    /// Reconcile the live collector set against the set of currently-running
+    /// container ids. Spawns a collector for every running id that is not yet
+    /// tracked (covers containers started directly via podman and those already
+    /// running when the daemon booted) and stops collectors whose container is
+    /// no longer running (their `podman stats` loop would otherwise poll a dead
+    /// container forever, since a direct `podman stop` never routes through
+    /// [`stop_for`]). Idempotent — safe to call on a fixed interval.
+    ///
+    /// Matching is prefix-tolerant in both directions so a collector keyed by a
+    /// short id (or name) is not spuriously pruned when the list surface returns
+    /// full ids.
+    pub async fn reconcile_running(&self, running_ids: &[String]) {
+        for id in running_ids {
+            self.spawn_for(id.clone()).await;
+        }
+        let tracked: Vec<String> = {
+            let handles = self.inner.handles.lock().await;
+            handles.keys().cloned().collect()
+        };
+        for id in tracked {
+            let still_running = running_ids
+                .iter()
+                .any(|r| r == &id || r.starts_with(&id) || id.starts_with(r.as_str()));
+            if !still_running {
+                self.stop_for(&id).await;
+            }
+        }
+    }
+
     /// Return the most recent sample for `container_id`, if any.
     pub async fn latest(&self, container_id: &str) -> Option<MetricsSample> {
         let rings = self.inner.rings.lock().await;
@@ -747,6 +776,46 @@ mod tests {
         assert!(!collector.has_handle("c1").await);
         assert!(collector.latest("c1").await.is_none());
         assert!(collector.history("c1", None).await.is_empty());
+    }
+
+    #[tokio::test]
+    async fn reconcile_running_spawns_and_prunes() {
+        let collector = MetricsCollector::new(
+            "/nonexistent/podman".to_string(),
+            Arc::new(NoopEventPublisher),
+            Arc::new(NoopAuditSink),
+        );
+        // First reconcile: two running containers -> both get collectors.
+        collector
+            .reconcile_running(&["aaa".to_string(), "bbb".to_string()])
+            .await;
+        assert!(collector.has_handle("aaa").await);
+        assert!(collector.has_handle("bbb").await);
+
+        // Second reconcile: only "aaa" still running -> "bbb" pruned.
+        collector.reconcile_running(&["aaa".to_string()]).await;
+        assert!(collector.has_handle("aaa").await);
+        assert!(!collector.has_handle("bbb").await);
+
+        // Empty reconcile prunes everything.
+        collector.reconcile_running(&[]).await;
+        assert!(!collector.has_handle("aaa").await);
+    }
+
+    #[tokio::test]
+    async fn reconcile_running_prefix_tolerant() {
+        let collector = MetricsCollector::new(
+            "/nonexistent/podman".to_string(),
+            Arc::new(NoopEventPublisher),
+            Arc::new(NoopAuditSink),
+        );
+        // Collector keyed by a short id (as a lazy UI request might spawn).
+        collector.spawn_for("abc123".to_string()).await;
+        // List surface returns the full id — must NOT prune the short-id handle.
+        collector
+            .reconcile_running(&["abc123def456".to_string()])
+            .await;
+        assert!(collector.has_handle("abc123").await);
     }
 
     #[test]

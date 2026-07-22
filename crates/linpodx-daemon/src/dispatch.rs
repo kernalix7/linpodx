@@ -96,6 +96,11 @@ pub struct Dispatcher {
     /// `Method::DaemonMgmtStatus` to compute `uptime_secs`. `Instant` is
     /// monotonic so this stays sensible across NTP adjustments.
     pub start_time: std::time::Instant,
+    /// The actual bound Unix socket path (`cfg.resolved_socket()`), threaded so
+    /// `Method::DaemonMgmtStatus` — and thus `GET /system/info`'s `socket_path`
+    /// — reports the real path instead of `null`. `None` only in tests that
+    /// build a dispatcher without one.
+    pub socket_path: Option<std::path::PathBuf>,
     /// Phase 24 — cached loopback plaintext Web UI listener for the desktop
     /// shell. Lazily populated by `Method::WebUiEnsure` (see
     /// [`crate::web_ui_local`]); `None` until the shell first asks for it.
@@ -124,6 +129,7 @@ pub struct DispatcherBuilder {
     pin_store: Option<PinnedClientStore>,
     plugin_registry: Option<Arc<RwLock<PluginRegistry>>>,
     raft: Option<Arc<linpodx_cluster::RaftNode>>,
+    socket_path: Option<std::path::PathBuf>,
 }
 
 impl DispatcherBuilder {
@@ -194,6 +200,12 @@ impl DispatcherBuilder {
         self.raft = Some(v);
         self
     }
+    /// Thread the daemon's bound Unix socket path so `DaemonMgmtStatus` reports
+    /// it (surfacing through `GET /system/info`'s `socket_path`).
+    pub fn socket_path(mut self, v: std::path::PathBuf) -> Self {
+        self.socket_path = Some(v);
+        self
+    }
 
     /// Consume the builder and produce a [`Dispatcher`]. Returns
     /// [`Error::InvalidArgument`] when a required subsystem was not set.
@@ -222,6 +234,7 @@ impl DispatcherBuilder {
             raft: self.raft,
             tofu: new_tofu_handle(),
             start_time: std::time::Instant::now(),
+            socket_path: self.socket_path,
             web_ui_local: Arc::new(Mutex::new(None)),
         })
     }
@@ -474,6 +487,7 @@ impl Dispatcher {
 
         // 4. cgroup v2 — required for podman's rootless lifecycle on modern kernels.
         checks.push(doctor::check_cgroup_v2());
+        checks.push(doctor::check_cgroup_delegation());
 
         // 5. Daemon socket — exists, is a Unix socket, and permissions look sane.
         checks.push(doctor::check_socket_permissions());
