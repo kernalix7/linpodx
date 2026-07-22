@@ -9,6 +9,7 @@ pub mod oci_tar;
 pub mod overlayfs;
 pub mod parse;
 pub mod passthrough;
+pub mod pod;
 pub mod podman;
 pub mod snapshot;
 pub mod snapshot_crypto;
@@ -26,6 +27,7 @@ pub use overlayfs::{
     store_root, write_meta, LayerDirs, MountedRoot, OverlayMeta,
 };
 pub use passthrough::{apply_passthrough, HostEnv, SystemHostEnv};
+pub use pod::{pod_create, pod_list, pod_remove, pod_start, pod_stop};
 pub use podman::{
     exec_pty, make_bridge_id, ExecOptions, ExecOutput, LogOptions, LogsOutput, Podman,
     PodmanConfig, PtyExecOptions, PtyHandle, StreamKind,

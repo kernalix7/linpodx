@@ -281,6 +281,15 @@ pub enum Method {
     // `GET /api/v1/system/df`. Unit-like (no params) — the daemon owns the
     // podman invocation + list fallback. Appended, never renumbered.
     SystemDf,
+    // Phase 26 — pod (compose-style stack) management. Backs `GET /api/v1/pods`
+    // and the pod lifecycle REST routes. Grouping keys for stacks are read from
+    // the container labels (`com.docker.compose.project`, then
+    // `io.podman.compose.project`). Appended, never renumbered.
+    PodList,
+    PodCreate(PodCreateParams),
+    PodStart(PodActionParams),
+    PodStop(PodActionParams),
+    PodRemove(PodRemoveParams),
 }
 
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
@@ -1305,6 +1314,37 @@ fn default_true() -> bool {
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub struct WebUiEnsureParams {}
 
+// ----- Pod (compose-style stack) management (Phase 26) -----
+
+/// Params for [`Method::PodCreate`]. Creates an infra pod that later containers
+/// can be attached to. `ports` are published on the pod's infra container;
+/// `labels` are stamped onto the pod (podman `--label`) so stack tooling can
+/// group by `com.docker.compose.project` / `io.podman.compose.project`.
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+pub struct PodCreateParams {
+    pub name: String,
+    #[serde(default)]
+    pub ports: Vec<PortMapping>,
+    #[serde(default)]
+    pub labels: std::collections::HashMap<String, String>,
+}
+
+/// Params for [`Method::PodStart`] and [`Method::PodStop`]. `id_or_name`
+/// accepts either the pod id or its name (podman resolves both).
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct PodActionParams {
+    pub id_or_name: String,
+}
+
+/// Params for [`Method::PodRemove`]. `force` maps to podman `pod rm --force`
+/// (removes the pod even if it holds running containers).
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct PodRemoveParams {
+    pub id_or_name: String,
+    #[serde(default)]
+    pub force: bool,
+}
+
 /// Successful response payload helpers (typed views over the JSON `result`).
 pub mod responses {
     use super::*;
@@ -2193,6 +2233,48 @@ pub mod responses {
         pub socket_path: Option<String>,
         pub web_listener_url: Option<String>,
         pub uptime_secs: Option<u64>,
+    }
+
+    // ----- Pod (compose-style stack) responses (Phase 26) -----
+
+    /// One row in [`PodListResponse`]. `created` is RFC3339. `infra_id` is the
+    /// pod's infra container id when podman reports one. `labels` carries the
+    /// stack grouping keys (`com.docker.compose.project` /
+    /// `io.podman.compose.project`) and is `#[serde(default)]` so older peers
+    /// that omit it deserialize as an empty map.
+    #[derive(Debug, Clone, Serialize, Deserialize)]
+    pub struct PodSummary {
+        pub id: String,
+        pub name: String,
+        pub status: String,
+        /// RFC3339 creation timestamp.
+        pub created: String,
+        pub num_containers: u32,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        pub infra_id: Option<String>,
+        #[serde(default)]
+        pub labels: std::collections::HashMap<String, String>,
+    }
+
+    #[derive(Debug, Clone, Default, Serialize, Deserialize)]
+    pub struct PodListResponse {
+        pub pods: Vec<PodSummary>,
+    }
+
+    #[derive(Debug, Clone, Serialize, Deserialize)]
+    pub struct PodCreateResponse {
+        pub id: String,
+        pub name: String,
+    }
+
+    /// Shared response for [`super::Method::PodStart`],
+    /// [`super::Method::PodStop`], and [`super::Method::PodRemove`]. `status` is
+    /// the pod's post-action state string (e.g. "Running", "Exited",
+    /// "Removed").
+    #[derive(Debug, Clone, Serialize, Deserialize)]
+    pub struct PodActionResponse {
+        pub id: String,
+        pub status: String,
     }
 }
 

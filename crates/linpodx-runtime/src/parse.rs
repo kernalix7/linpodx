@@ -81,6 +81,10 @@ fn parse_container_summary(v: &Value) -> Result<ContainerSummary> {
         created,
         command,
         ports,
+        // Podman 5.x `ps --format json` emits container labels under `Labels`
+        // (object of string→string), e.g. the `com.docker.compose.project`
+        // key stacks are grouped by. `null` / absent yields an empty map.
+        labels: string_map(v.get("Labels")),
     })
 }
 
@@ -734,6 +738,54 @@ mod tests {
         assert_eq!(parsed[0].id.as_str(), "abc123");
         assert_eq!(parsed[0].state, ContainerState::Running);
         assert_eq!(parsed[0].command.as_deref(), Some("sleep infinity"));
+    }
+
+    #[test]
+    fn parse_container_labels_from_ps_json() {
+        // Real captured `podman 5.8.2 ps --format json` `Labels` object for a
+        // compose-managed container. The daemon returns these in the summary so
+        // the Web UI can group containers into stacks by compose project.
+        let v = json!([{
+            "Id": "d6fd8e2a7ec4",
+            "Names": ["open-webui"],
+            "Image": "ghcr.io/open-webui/open-webui:latest",
+            "State": "running",
+            "Status": "Up 5 weeks",
+            "Created": 1746630000,
+            "Command": ["bash", "start.sh"],
+            "Ports": null,
+            "Labels": {
+                "com.docker.compose.project": "00ct_open-webui",
+                "com.docker.compose.service": "open-webui",
+                "org.opencontainers.image.title": "open-webui"
+            }
+        }]);
+        let parsed = parse_container_list(&v.to_string()).unwrap();
+        assert_eq!(
+            parsed[0].labels.get("com.docker.compose.project"),
+            Some(&"00ct_open-webui".to_string())
+        );
+        assert_eq!(
+            parsed[0].labels.get("com.docker.compose.service"),
+            Some(&"open-webui".to_string())
+        );
+    }
+
+    #[test]
+    fn parse_container_labels_absent_yields_empty() {
+        // No `Labels` key at all — must not error, just yields an empty map.
+        let v = json!([{
+            "Id": "nolabels",
+            "Names": ["bare"],
+            "Image": "alpine",
+            "State": "running",
+            "Status": "Up",
+            "Created": 1746630000,
+            "Command": ["sh"],
+            "Ports": null
+        }]);
+        let parsed = parse_container_list(&v.to_string()).unwrap();
+        assert!(parsed[0].labels.is_empty());
     }
 
     #[test]

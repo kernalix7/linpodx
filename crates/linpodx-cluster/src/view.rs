@@ -119,6 +119,7 @@ mod tests {
             created: Utc::now(),
             command: None,
             ports: vec![],
+            labels: Default::default(),
         }
     }
 

@@ -57,6 +57,12 @@ pub struct ContainerSummary {
     pub command: Option<String>,
     #[serde(default)]
     pub ports: Vec<String>,
+    /// OCI labels attached to the container (`--label`). Additive field — older
+    /// peers that predate this field deserialize it as an empty map via
+    /// `#[serde(default)]`, so the wire stays backward compatible. Consumers use
+    /// it for stack grouping (e.g. `com.docker.compose.project`).
+    #[serde(default)]
+    pub labels: std::collections::HashMap<String, String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

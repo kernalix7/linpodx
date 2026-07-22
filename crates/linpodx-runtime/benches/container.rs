@@ -15,6 +15,7 @@ fn fixture() -> ContainerSummary {
         created: Utc::now(),
         command: Some("sleep infinity".into()),
         ports: vec!["8080->80/tcp".into(), "9090->90/tcp".into()],
+        labels: Default::default(),
     }
 }
 
