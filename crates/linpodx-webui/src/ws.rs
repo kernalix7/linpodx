@@ -38,31 +38,57 @@ pub async fn fetch_list(path: &str, token: &str) -> Result<Value, String> {
         .map_err(|e| format!("parse error: {e}"))
 }
 
-/// Open `/ipc`, send a Subscribe for one topic, and invoke `on_event` for every
-/// `event` notification we receive. The connection lives until the page is
-/// unloaded; failures are logged but never panic.
-pub fn subscribe<F>(topic: &'static str, mut on_event: F)
-where
-    F: FnMut(Value) + 'static,
-{
-    let location = match web_sys::window().and_then(|w| w.location().host().ok()) {
-        Some(h) => h,
-        None => return,
-    };
-    let proto = match web_sys::window()
-        .and_then(|w| w.location().protocol().ok())
-        .as_deref()
-    {
+/// Build the `/ipc` WebSocket URL for the current origin, appending a
+/// `?token=<t>` query when a non-empty bearer token is in `localStorage`.
+///
+/// Returns `None` only when there is no `window` / `location` (non-browser
+/// host build), so callers can bail cleanly. Shared by every socket opener
+/// below so the token / scheme handling stays in one place.
+fn ipc_url() -> Option<String> {
+    let window = web_sys::window()?;
+    let location = window.location().host().ok()?;
+    let proto = match window.location().protocol().ok().as_deref() {
         Some("https:") => "wss",
         _ => "ws",
     };
     let token = gloo_storage::LocalStorage::get::<String>(TOKEN_KEY)
         .ok()
         .filter(|s| !s.trim().is_empty());
-    let url = match token.as_deref() {
+    Some(match token.as_deref() {
         Some(t) => format!("{proto}://{location}/ipc?token={}", url_encode_component(t)),
         None => format!("{proto}://{location}/ipc"),
+    })
+}
+
+/// Open `/ipc`, send a Subscribe for one topic, and invoke `on_event` for every
+/// `event` notification we receive. The connection lives until the page is
+/// unloaded; failures are logged but never panic.
+///
+/// Thin wrapper over [`subscribe_multi`] for the common single-topic case.
+pub fn subscribe<F>(topic: &'static str, on_event: F)
+where
+    F: FnMut(Value) + 'static,
+{
+    subscribe_multi(&[topic], on_event);
+}
+
+/// Open one `/ipc` socket, Subscribe to *several* topics in a single frame, and
+/// invoke `on_event` for every server-pushed notification. Preferred over N
+/// calls to [`subscribe`] when a panel wants a fan-in feed across topics: the
+/// daemon already accepts a multi-topic `subscribe` (`SubscribeParams.topics`),
+/// so this avoids opening one socket per topic.
+///
+/// The connection lives until the page is unloaded; failures are logged but
+/// never panic.
+pub fn subscribe_multi<F>(topics: &[&'static str], mut on_event: F)
+where
+    F: FnMut(Value) + 'static,
+{
+    let url = match ipc_url() {
+        Some(u) => u,
+        None => return,
     };
+    let topics: Vec<&'static str> = topics.to_vec();
 
     let ws = match WebSocket::open(&url) {
         Ok(w) => w,
@@ -78,7 +104,7 @@ where
             "jsonrpc": "2.0",
             "id": 1,
             "method": "subscribe",
-            "params": { "topics": [topic] },
+            "params": { "topics": topics },
         });
         let payload = match serde_json::to_string(&req) {
             Ok(s) => s,
@@ -120,23 +146,7 @@ where
 /// Used by panels that need to trigger a write action (e.g. Images "Push").
 /// The websocket is closed after the response — we don't pool them.
 pub async fn send_rpc(method: &str, params: Value) -> Result<Value, String> {
-    let location = web_sys::window()
-        .and_then(|w| w.location().host().ok())
-        .ok_or_else(|| "no window/location".to_string())?;
-    let proto = match web_sys::window()
-        .and_then(|w| w.location().protocol().ok())
-        .as_deref()
-    {
-        Some("https:") => "wss",
-        _ => "ws",
-    };
-    let token = gloo_storage::LocalStorage::get::<String>(TOKEN_KEY)
-        .ok()
-        .filter(|s| !s.trim().is_empty());
-    let url = match token.as_deref() {
-        Some(t) => format!("{proto}://{location}/ipc?token={}", url_encode_component(t)),
-        None => format!("{proto}://{location}/ipc"),
-    };
+    let url = ipc_url().ok_or_else(|| "no window/location".to_string())?;
 
     let ws = WebSocket::open(&url).map_err(|e| format!("ws open failed: {e:?}"))?;
     let (mut tx, mut rx) = ws.split();

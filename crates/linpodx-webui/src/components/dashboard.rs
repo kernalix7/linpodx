@@ -16,9 +16,10 @@ use serde_json::Value;
 use wasm_bindgen_futures::spawn_local;
 
 use super::charts::AreaChart;
-use crate::app::{AuthToken, DrawerState, Nav, Tab};
+use super::live_events::LiveEvents;
+use crate::app::{AuthToken, Nav, Tab};
 use crate::helpers::format_bytes;
-use crate::ws::{self, fetch_list};
+use crate::ws::fetch_list;
 
 /// One container's latest metrics sample, as kept in
 /// [`DashboardShared::latest_metrics`]. `cpu_pct` is a fraction (matches the
@@ -96,7 +97,6 @@ pub fn Dashboard() -> impl IntoView {
     let auth = use_context::<AuthToken>().expect("AuthToken context provided by AppRoot");
     let shared = use_context::<DashboardShared>().expect("DashboardShared provided by AppRoot");
     let nav = use_context::<Nav>().expect("Nav context provided by AppRoot");
-    let drawer = use_context::<DrawerState>().expect("DrawerState provided by AppRoot");
 
     // Per-tile fetch state. `None` = loading; `Some(Ok)` / `Some(Err)`.
     let images = RwSignal::new(None::<Result<Value, String>>);
@@ -104,8 +104,6 @@ pub fn Dashboard() -> impl IntoView {
     let networks = RwSignal::new(None::<Result<Value, String>>);
     let df = RwSignal::new(None::<Result<Value, String>>);
     let info = RwSignal::new(None::<Result<Value, String>>);
-    // Recent-events ring (newest first, capped at 50).
-    let events = RwSignal::new(Vec::<Value>::new());
 
     // One-shot fetch driver, reusable by the "Refresh" quick action.
     let refresh = move || {
@@ -124,20 +122,6 @@ pub fn Dashboard() -> impl IntoView {
         });
     };
     refresh();
-
-    // Recent-events feed: subscribe to the highest-signal topics; each pushes
-    // into the same ring. (ws::subscribe takes a single &'static str topic, so
-    // we open one socket per topic — the daemon fans them independently.)
-    for topic in ["container", "image", "session", "snapshot"] {
-        ws::subscribe(topic, move |note| {
-            events.update(|v| {
-                v.insert(0, note);
-                if v.len() > 50 {
-                    v.truncate(50);
-                }
-            });
-        });
-    }
 
     // ---- stat tiles ----------------------------------------------------
     let tile_containers = move || {
@@ -229,68 +213,6 @@ pub fn Dashboard() -> impl IntoView {
         }
     };
 
-    // ---- recent events feed --------------------------------------------
-    let events_view = move || {
-        let items = events.get();
-        if items.is_empty() {
-            return view! {
-                <div class="empty-state">
-                    <div class="empty-state__title">"No recent events"</div>
-                    <div class="empty-state__hint">"Events appear here as the daemon emits them."</div>
-                </div>
-            }
-            .into_any();
-        }
-        let rows = items
-            .into_iter()
-            .map(|note| {
-                let params = note.get("params").cloned().unwrap_or(Value::Null);
-                let kind = params
-                    .get("kind")
-                    .and_then(|k| k.as_str())
-                    .or_else(|| note.get("method").and_then(|m| m.as_str()))
-                    .unwrap_or("event")
-                    .to_string();
-                let target = params
-                    .get("target")
-                    .or_else(|| params.get("container_id"))
-                    .or_else(|| params.get("id"))
-                    .and_then(|t| t.as_str())
-                    .unwrap_or("")
-                    .to_string();
-                let ts = params
-                    .get("ts")
-                    .and_then(|t| t.as_str())
-                    .unwrap_or("")
-                    .to_string();
-                let topic = note
-                    .get("params")
-                    .and_then(|p| p.get("topic"))
-                    .and_then(|t| t.as_str())
-                    .unwrap_or("event")
-                    .to_string();
-                let line_cls = format!("log-line log-line--{topic}");
-                let clickable = !target.is_empty();
-                let target_for_click = target.clone();
-                view! {
-                    <div
-                        class=line_cls
-                        style=if clickable { "cursor:pointer" } else { "" }
-                        on:click=move |_| {
-                            if clickable {
-                                drawer.0.set(Some(target_for_click.clone()));
-                            }
-                        }
-                    >
-                        <span class="mono">{ts}</span>" · "{kind}" · "
-                        <span class="mono">{target}</span>
-                    </div>
-                }
-            })
-            .collect_view();
-        view! { <div class="log-block">{rows}</div> }.into_any()
-    };
-
     // ---- quick actions -------------------------------------------------
     let run_doctor = move |_| nav.0.set(Tab::Settings);
     let open_terminal = move |_| nav.0.set(Tab::Containers);
@@ -341,10 +263,7 @@ pub fn Dashboard() -> impl IntoView {
                 />
             </div>
 
-            <div class="surface-card">
-                <div class="section-title">"Recent events"</div>
-                {events_view}
-            </div>
+            <LiveEvents/>
         </div>
     }
 }
