@@ -398,12 +398,19 @@ spec:
     #[ignore]
     async fn scale_deployment_real_cluster() {
         let adapter = K8sAdapter::try_default().await.expect("kube init");
-        // Caller must have a deployment named `linpodx-scale-fixture` in the
-        // `default` namespace before running this test.
-        let resp = adapter
+        // Requires a pre-provisioned deployment named `linpodx-scale-fixture`
+        // in `default` (we have no deployment-create API to make our own).
+        // Soft-skip when the fixture is absent so a full `--ignored` sweep on
+        // a host with a live cluster but no fixture doesn't abort the run.
+        match adapter
             .scale_deployment("default", "linpodx-scale-fixture", 2)
             .await
-            .expect("scale deployment");
-        assert_eq!(resp.replicas, 2);
+        {
+            Ok(resp) => assert_eq!(resp.replicas, 2),
+            Err(e) if format!("{e}").contains("NotFound") => {
+                eprintln!("skipped: linpodx-scale-fixture deployment not provisioned ({e})");
+            }
+            Err(e) => panic!("scale deployment: {e}"),
+        }
     }
 }
