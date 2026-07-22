@@ -58,6 +58,9 @@ workflow extracts the whole section for the GitHub Release body.
 - Typed IPC error taxonomy: `PERMISSION_DENIED`, `CONFLICT`, `TIMEOUT`, `UNSUPPORTED`, `UNAVAILABLE`, `INTERNAL` codes join the original four (wire-compatible); CLI prints `daemon error [NAME] (code n): …`.
 - Cluster: gossip health loop actually runs (peers transition alive → stale → dead), and `ClusterJoin`/`Leave` register/remove Raft learners.
 - Distro instances stay alive: non-systemd templates get a keep-alive command instead of exiting immediately after create.
+- **procfs PSS memory fallback**: on rootless hosts where systemd delegates only the `pids` cgroup controller (not `memory`), `memory.current` doesn't exist and cgroup-based memory reads were always 0. The metrics collector now falls back to userspace accounting — it walks the container's `libpod-*.scope` cgroup subtree via the delegated `pids` controller and sums per-process PSS from `/proc/<pid>/smaps_rollup` (falling back to `VmRSS`), prorating shared pages so the total stays honest. No root, host reconfiguration, or re-login required; memory *limits* remain unknowable without real `memory` delegation.
+- `linpodx doctor` gains a `cgroup-delegation` check that warns when the systemd user service delegates neither `memory` nor `cpu` (the condition that triggers the PSS fallback above), with the `delegate.conf` remediation.
+- Web UI containers table shows live CPU% and Mem columns, fed from a per-container sample map on the existing 2s poll.
 
 ### Changed
 
@@ -73,6 +76,7 @@ workflow extracts the whole section for the GitHub Release body.
 - Desktop shell ↔ SPA token handoff: the shell navigated to `/ui/` (404; the router serves `/ui`) and the SPA never ingested `?token=` — both ends fixed, so the desktop app signs in seamlessly.
 - Netfilter helper logs a warning when an egress rule is dropped due to failed address resolution (was a silent skip).
 - Distro `enter` no longer carries a dead UID heuristic that read the daemon's environment.
+- **Dashboard values are real again**: the metrics collector previously only spawned for containers linpodx itself started, so externally-started containers (e.g. `podman start`) reported null metrics forever; a 5s reconcile loop now spawns an idempotent collector for every running container and prunes stopped ones. Podman 5.x's `ps --format json` `Ports` field (null or an object array under 5.x, previously dropped) is now parsed and emits `host_ip:host->container/proto`. Podman 5.x's `system df` shape (`[{Type,RawSize,RawReclaimable},...]`) is now parsed correctly (with a `tracing::warn` on any shape mismatch) instead of silently falling back to zeroed totals. `system info`'s `socket_path` was hardcoded to `None`; it is now threaded through from the resolved daemon socket.
 
 ## [0.1.4] - 2026-05-15
 

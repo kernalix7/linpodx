@@ -84,6 +84,44 @@ DNS-only filtering is applied. `network egress apply` reports
 `helper_applied: false` when the helper has not been installed with
 `CAP_NET_ADMIN`.
 
+## Metrics
+
+### Metrics/memory always show 0
+
+On rootless hosts, systemd may delegate only the `pids` cgroup controller and
+not `memory` (or `cpu`). When `memory` isn't delegated, the container's
+`memory.current` file doesn't exist anywhere in its cgroup subtree, so
+cgroup-based memory reads (podman's included) are always 0.
+
+linpodx detects this automatically and falls back to userspace PSS
+accounting: it walks the container's `libpod-*.scope` subtree via the
+delegated `pids` controller's `cgroup.procs` and sums per-process PSS from
+`/proc/<pid>/smaps_rollup` (falling back to `VmRSS` when that's unreadable).
+Shared pages are prorated, so the total stays honest. This means metrics work
+with no root access, no host reconfiguration, and no re-login required — but
+real memory *limits* and cgroup-based enforcement remain unavailable without
+actual `memory` delegation.
+
+Run `linpodx doctor` to check; its `cgroup-delegation` check flags exactly
+this condition. To get real delegation (recommended for production hosts
+that need memory limits enforced), apply the following and re-login:
+
+```bash
+# /etc/systemd/system/user@.service.d/delegate.conf
+# (or ~/.config/systemd/user/user@.service.d/delegate.conf for a
+# user-local override)
+sudo mkdir -p /etc/systemd/system/user@.service.d
+sudo tee /etc/systemd/system/user@.service.d/delegate.conf <<'EOF'
+[Service]
+Delegate=memory pids cpu io
+EOF
+
+sudo systemctl daemon-reload
+# Then start a new user manager session, e.g.:
+loginctl terminate-user "$USER"
+# ...and log back in.
+```
+
 ## Desktop GUI
 
 ### `linpodx-gui` exits immediately with a `libwebkit2gtk` / `libgtk-3` / `librsvg2` error

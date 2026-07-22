@@ -84,6 +84,20 @@ UI 자체도 처음부터 다시 설계한 dark-first 디자인 시스템을 갖
   전이), `ClusterJoin`/`Leave` 가 Raft learner 를 등록/제거.
 - 디스트로 인스턴스가 살아있음: non-systemd 템플릿이 create 직후 종료되는
   대신 keep-alive 명령을 받습니다.
+- **procfs PSS 메모리 폴백**: systemd 가 `pids` cgroup 컨트롤러만 위임하고
+  `memory` 는 위임하지 않는 루트리스 환경에서는 `memory.current` 파일이
+  존재하지 않아 cgroup 기반 메모리 읽기가 항상 0 이었습니다. 메트릭
+  수집기가 이제 사용자 공간 계산으로 폴백합니다 — 위임된 `pids` 컨트롤러의
+  cgroup 하위에서 컨테이너의 `libpod-*.scope` 서브트리를 탐색하여 각
+  프로세스의 `/proc/<pid>/smaps_rollup` PSS(읽을 수 없으면 `VmRSS`)를
+  합산하며, 공유 페이지를 비례 배분하므로 합계가 정확합니다. 루트 권한,
+  호스트 재설정, 재로그인 없이 동작합니다; 다만 실제 메모리 *limit* 은
+  `memory` 컨트롤러 위임 없이는 알 수 없습니다.
+- `linpodx doctor` 에 `cgroup-delegation` 검사가 추가되어, systemd 사용자
+  서비스가 `memory` 와 `cpu` 를 모두 위임하지 않을 때(위 PSS 폴백이
+  발동하는 조건) 경고하고 `delegate.conf` 수정 방법을 안내합니다.
+- 웹 UI 컨테이너 테이블에 기존 2초 폴링 기반의 실시간 CPU% 및 메모리
+  열이 추가되었습니다.
 
 ### 변경됨
 
@@ -117,6 +131,18 @@ UI 자체도 처음부터 다시 설계한 dark-first 디자인 시스템을 갖
   기록합니다 (이전에는 조용히 스킵).
 - 디스트로 `enter` 가 데몬의 환경 변수를 읽는 죽은 UID 휴리스틱을 더 이상
   갖지 않습니다.
+- **대시보드 값이 다시 실제 값으로 표시됩니다**: 메트릭 수집기가 이전에는
+  linpodx 가 직접 시작한 컨테이너에만 붙었기 때문에, 외부에서 시작한
+  컨테이너(예: `podman start`)는 항상 null 메트릭을 반환했습니다 — 5초
+  reconcile 루프가 실행 중인 모든 컨테이너에 대해 멱등 수집기를 생성하고
+  중지된 컨테이너의 수집기는 제거합니다. Podman 5.x 의 `ps --format json`
+  `Ports` 필드(5.x 부터 null 이거나 객체 배열로 바뀌어 이전에는 값이
+  버려졌음)를 이제 파싱하여 `host_ip:host->container/proto` 형태로
+  내보냅니다. Podman 5.x 의 `system df` 형태(`[{Type,RawSize,
+  RawReclaimable},...]`)도 이제 올바르게 파싱되어(형식 불일치 시
+  `tracing::warn`) 0 으로 조용히 폴백하지 않습니다. `system info` 의
+  `socket_path` 가 `None` 으로 하드코딩되어 있던 것을, 실제 해결된 데몬
+  소켓 경로로 전달하도록 수정했습니다.
 
 ## [0.1.1] - 2026-05-14
 
