@@ -35,10 +35,11 @@ use axum::Router;
 use linpodx_common::audit_sink::{AuditSink, AuditSinkKind};
 use linpodx_common::ipc::{
     error_codes, responses, AuditQueryParams, ContainerIdParams, ContainerListParams,
-    ContainerLogsParams, DaemonPinClientTofuExpirySetParams, DoctorRunParams, ImageListParams,
-    Method, MetricsHistoryParams, MetricsLatestParams, PluginKeyRevokePropagateParams,
-    ResponsePayload, RpcError, RpcRequest, SandboxSnapshotAutoTriggerEnableParams,
-    SessionListParams, SnapshotKeyRotateParams, SnapshotKeySource, SnapshotListParams,
+    ContainerLogsParams, CreateOptions, DaemonPinClientTofuExpirySetParams, DoctorRunParams,
+    ImageListParams, Method, MetricsHistoryParams, MetricsLatestParams,
+    PluginKeyRevokePropagateParams, ResponsePayload, RpcError, RpcRequest,
+    SandboxSnapshotAutoTriggerEnableParams, SessionListParams, SnapshotKeyRotateParams,
+    SnapshotKeySource, SnapshotListParams,
 };
 use linpodx_common::types::ContainerId;
 use serde::Deserialize;
@@ -78,6 +79,7 @@ pub fn router(
     };
     Router::new()
         .route("/containers", get(get_containers))
+        .route("/containers/create", post(post_container_create))
         .route("/images", get(get_images))
         .route("/volumes", get(get_volumes))
         .route("/networks", get(get_networks))
@@ -287,6 +289,13 @@ async fn get_containers(State(state): State<WebUiState>) -> Response<Body> {
         Method::ContainerList(ContainerListParams { all: true }),
     )
     .await
+}
+
+async fn post_container_create(
+    State(state): State<WebUiState>,
+    Json(options): Json<CreateOptions>,
+) -> Response<Body> {
+    dispatch(&state, Method::ContainerCreate(options)).await
 }
 
 async fn get_images(State(state): State<WebUiState>) -> Response<Body> {

@@ -78,6 +78,7 @@ pub fn build_auto_encrypt_body(enabled: bool) -> Value {
 /// Stable path constants for the v5 endpoints. Pinned so a daemon-side route
 /// rename is caught by `paths_v5_are_stable`.
 pub mod paths_v5 {
+    pub const CONTAINER_CREATE: &str = "/api/v1/containers/create";
     pub const SYSTEM_DF: &str = "/api/v1/system/df";
     pub const SYSTEM_INFO: &str = "/api/v1/system/info";
     pub const DOCTOR_RUN: &str = "/api/v1/doctor/run";
@@ -178,6 +179,11 @@ pub async fn fetch_system_info(token: &str) -> Result<Value, String> {
 #[cfg(target_arch = "wasm32")]
 pub async fn run_doctor(token: &str) -> Result<Value, String> {
     send_post_json(paths_v5::DOCTOR_RUN, json!({}), token).await
+}
+
+#[cfg(target_arch = "wasm32")]
+pub async fn create_container(body: Value, token: &str) -> Result<Value, String> {
+    send_post_json(paths_v5::CONTAINER_CREATE, body, token).await
 }
 
 // ---------------------------------------------------------------------------
@@ -377,6 +383,7 @@ mod tests {
 
     #[test]
     fn paths_v5_are_stable() {
+        assert_eq!(paths_v5::CONTAINER_CREATE, "/api/v1/containers/create");
         assert_eq!(paths_v5::SYSTEM_DF, "/api/v1/system/df");
         assert_eq!(paths_v5::SYSTEM_INFO, "/api/v1/system/info");
         assert_eq!(paths_v5::DOCTOR_RUN, "/api/v1/doctor/run");

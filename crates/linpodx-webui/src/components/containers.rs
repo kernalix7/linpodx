@@ -18,6 +18,7 @@ use leptos::prelude::*;
 use serde_json::Value;
 use wasm_bindgen_futures::spawn_local;
 
+use super::create_modal::CreateContainerModal;
 use super::exec_modal::ExecModal;
 use super::exec_pty_modal::ExecPtyModal;
 use super::icons::Icon;
@@ -79,6 +80,7 @@ pub fn ContainerList() -> impl IntoView {
     let exec_open: RwSignal<Option<String>> = RwSignal::new(None);
     let exec_pty_open: RwSignal<Option<String>> = RwSignal::new(None);
     let logs_open: RwSignal<Option<String>> = RwSignal::new(None);
+    let create_open = RwSignal::new(false);
 
     let reload = move || {
         let token = match auth.0.get_untracked() {
@@ -100,6 +102,7 @@ pub fn ContainerList() -> impl IntoView {
             loading.set(false);
         });
     };
+    let refresh_containers = Callback::new(move |_| reload());
 
     Effect::new(move |_| {
         let _ = auth.0.get();
@@ -222,6 +225,22 @@ pub fn ContainerList() -> impl IntoView {
 
     view! {
         <div class="containers-panel">
+            <div class="page-header">
+                <div class="page-header__titles">
+                    <h2 class="page-title">"Containers"</h2>
+                    <p class="page-subtitle">"Create, inspect, and operate local containers."</p>
+                </div>
+                <div class="page-actions">
+                    <button
+                        type="button"
+                        class="btn btn--primary"
+                        on:click=move |_| create_open.set(true)
+                    >
+                        <Icon name="container"/>
+                        "New container"
+                    </button>
+                </div>
+            </div>
             <section class="panel">
                 <div class="panel-toolbar">
                     <span class="search-box">
@@ -239,6 +258,7 @@ pub fn ContainerList() -> impl IntoView {
             <ExecModal open=exec_open/>
             <ExecPtyModal open=exec_pty_open/>
             <LogsModal open=logs_open/>
+            <CreateContainerModal open=create_open refresh_containers=refresh_containers/>
         </div>
     }
 }

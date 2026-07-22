@@ -20,12 +20,14 @@ mod cluster;
 mod command_palette;
 mod container_detail;
 mod containers;
+mod create_modal;
 mod dashboard;
 mod exec_modal;
 mod exec_pty_modal;
 mod icons;
 mod images;
 mod list_table;
+mod live_events;
 mod logs_modal;
 mod networks;
 mod pin_clients;
@@ -56,6 +58,12 @@ pub use containers::ContainerList;
 pub use dashboard::{ContainerLiveSample, Dashboard, DashboardShared};
 pub use icons::Icon;
 pub use images::ImageList;
+// `LiveEvents` is the dashboard's real-time daemon event feed (subscribes to
+// the container-lifecycle topics over one `/ipc` socket). Consumed by
+// `dashboard.rs` via `super::live_events::LiveEvents`; re-exported here for
+// symmetry with the other panels.
+#[allow(unused_imports)]
+pub use live_events::LiveEvents;
 pub use networks::NetworkList;
 pub use pin_clients::PinnedClientsView;
 pub use plugins::PluginsView;
