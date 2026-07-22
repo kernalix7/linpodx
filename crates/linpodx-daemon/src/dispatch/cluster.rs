@@ -271,14 +271,27 @@ impl Dispatcher {
         Ok(serde_json::to_value(resp)?)
     }
 
+    /// Lazily construct the K8s adapter once and cache it on `self.k8s`
+    /// (kubeconfig parse + TLS handshake are expensive to redo per request —
+    /// all six `k8s_*` arms below funnel through this). Only a *successful*
+    /// init is cached: a broken kubeconfig must not permanently poison later
+    /// retries once the environment is fixed (e.g. `KUBECONFIG` gets set
+    /// after the daemon has already served one failed request).
+    async fn k8s_adapter(&self) -> Result<linpodx_cluster::K8sAdapter> {
+        cache_or_init(&self.k8s, || async {
+            linpodx_cluster::K8sAdapter::try_default()
+                .await
+                .map_err(k8s_unavailable_err)
+        })
+        .await
+    }
+
     // ----- Phase 10: K8s read-only adapter (Stream C) -----
     pub(crate) async fn k8s_pod_list(
         &self,
         p: linpodx_common::ipc::K8sNamespaceParams,
     ) -> Result<serde_json::Value> {
-        let adapter = linpodx_cluster::K8sAdapter::try_default()
-            .await
-            .map_err(k8s_unavailable_err)?;
+        let adapter = self.k8s_adapter().await?;
         let pods = adapter
             .list_pods(p.namespace.as_deref())
             .await
@@ -297,9 +310,7 @@ impl Dispatcher {
         &self,
         p: linpodx_common::ipc::K8sNamespaceParams,
     ) -> Result<serde_json::Value> {
-        let adapter = linpodx_cluster::K8sAdapter::try_default()
-            .await
-            .map_err(k8s_unavailable_err)?;
+        let adapter = self.k8s_adapter().await?;
         let svcs = adapter
             .list_services(p.namespace.as_deref())
             .await
@@ -321,9 +332,7 @@ impl Dispatcher {
         &self,
         p: linpodx_common::ipc::K8sPodCreateParams,
     ) -> Result<serde_json::Value> {
-        let adapter = linpodx_cluster::K8sAdapter::try_default()
-            .await
-            .map_err(k8s_unavailable_err)?;
+        let adapter = self.k8s_adapter().await?;
         let resp = adapter
             .create_pod(&p.namespace, &p.pod_spec_yaml)
             .await
@@ -349,9 +358,7 @@ impl Dispatcher {
         &self,
         p: linpodx_common::ipc::K8sPodDeleteParams,
     ) -> Result<serde_json::Value> {
-        let adapter = linpodx_cluster::K8sAdapter::try_default()
-            .await
-            .map_err(k8s_unavailable_err)?;
+        let adapter = self.k8s_adapter().await?;
         let resp = adapter
             .delete_pod(&p.namespace, &p.name)
             .await
@@ -377,9 +384,7 @@ impl Dispatcher {
         &self,
         p: linpodx_common::ipc::K8sNamespaceCreateParams,
     ) -> Result<serde_json::Value> {
-        let adapter = linpodx_cluster::K8sAdapter::try_default()
-            .await
-            .map_err(k8s_unavailable_err)?;
+        let adapter = self.k8s_adapter().await?;
         let resp = adapter
             .create_namespace(&p.name)
             .await
@@ -402,9 +407,7 @@ impl Dispatcher {
         &self,
         p: linpodx_common::ipc::K8sDeploymentScaleParams,
     ) -> Result<serde_json::Value> {
-        let adapter = linpodx_cluster::K8sAdapter::try_default()
-            .await
-            .map_err(k8s_unavailable_err)?;
+        let adapter = self.k8s_adapter().await?;
         let resp = adapter
             .scale_deployment(&p.namespace, &p.name, p.replicas)
             .await

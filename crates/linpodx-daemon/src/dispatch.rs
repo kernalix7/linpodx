@@ -106,6 +106,12 @@ pub struct Dispatcher {
     /// [`crate::web_ui_local`]); `None` until the shell first asks for it.
     /// Independent of the `remote` field / `--remote-listen` listener.
     pub web_ui_local: Arc<Mutex<Option<crate::web_ui_local::WebUiLocalHandle>>>,
+    /// Lazily-constructed, cached `K8sAdapter` (kubeconfig parse + TLS
+    /// handshake happen once, not per request). Populated by
+    /// `Dispatcher::k8s_adapter` in `dispatch/cluster.rs`; only a
+    /// *successful* init is ever stored here — a broken kubeconfig must not
+    /// permanently poison later retries once the environment is fixed.
+    pub k8s: Arc<Mutex<Option<linpodx_cluster::K8sAdapter>>>,
 }
 
 /// Builder for [`Dispatcher`] (CLAUDE.md §4 — builder pattern for complex
@@ -236,6 +242,7 @@ impl DispatcherBuilder {
             start_time: std::time::Instant::now(),
             socket_path: self.socket_path,
             web_ui_local: Arc::new(Mutex::new(None)),
+            k8s: Arc::new(Mutex::new(None)),
         })
     }
 }
@@ -534,6 +541,33 @@ fn make_job_id(reference: &str) -> String {
     let now = chrono::Utc::now().timestamp_nanos_opt().unwrap_or(0) as u64;
     now.hash(&mut h);
     format!("pull-{:016x}", h.finish())
+}
+
+/// Generic "cache success only, never poison on failure" lazy-init helper.
+/// Backs [`Dispatcher::k8s_adapter`] (see `dispatch/cluster.rs`) but is kept
+/// free-standing and generic so the caching behaviour itself — hit reuses
+/// the cached value, miss calls `init`, a failed `init` is never stored — can
+/// be unit-tested without standing up a real `K8sAdapter` (which needs a
+/// live kubeconfig / TLS handshake).
+///
+/// Locking note: the mutex is only held for the cheap "read cached value" /
+/// "store freshly-built value" steps, never across the `init` future itself.
+/// A slow `init` (e.g. a TLS handshake) therefore never blocks concurrent
+/// callers from also racing to initialize on a cold cache; at most a few
+/// redundant `init` calls happen, and the last store wins. That's fine here
+/// since `init` is expected to be idempotent and its output cheap to clone.
+pub(crate) async fn cache_or_init<T, F, Fut>(cache: &Mutex<Option<T>>, init: F) -> Result<T>
+where
+    T: Clone,
+    F: FnOnce() -> Fut,
+    Fut: std::future::Future<Output = Result<T>>,
+{
+    if let Some(v) = cache.lock().await.as_ref() {
+        return Ok(v.clone());
+    }
+    let v = init().await?;
+    *cache.lock().await = Some(v.clone());
+    Ok(v)
 }
 
 /// Translate a K8s adapter init failure into a user-friendly `Error::Runtime`.
@@ -901,5 +935,61 @@ mod tests {
         let g = h.lock().unwrap();
         assert!(g.enabled_at.is_some());
         assert_eq!(g.max_age_secs, Some(60));
+    }
+
+    // ----- cache_or_init (backs Dispatcher::k8s_adapter caching) -----
+
+    /// `K8sAdapter::try_default` needs a live kubeconfig / TLS handshake, so
+    /// these tests exercise the generic caching wrapper in isolation with a
+    /// call-counting `String` stand-in instead.
+    #[tokio::test]
+    async fn cache_or_init_hit_reuses_cached_value_without_calling_init_again() {
+        let cache: Mutex<Option<String>> = Mutex::new(None);
+        let calls = std::sync::atomic::AtomicUsize::new(0);
+
+        let first = cache_or_init(&cache, || {
+            calls.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+            async { Ok::<_, Error>("adapter-instance".to_string()) }
+        })
+        .await
+        .expect("first init succeeds");
+        assert_eq!(first, "adapter-instance");
+        assert_eq!(calls.load(std::sync::atomic::Ordering::SeqCst), 1);
+
+        // Second call must hit the cache: `init` is not invoked again, and
+        // the same value comes back.
+        let second = cache_or_init(&cache, || {
+            calls.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+            async { Ok::<_, Error>("should-not-be-used".to_string()) }
+        })
+        .await
+        .expect("second call hits cache");
+        assert_eq!(second, "adapter-instance");
+        assert_eq!(calls.load(std::sync::atomic::Ordering::SeqCst), 1);
+    }
+
+    #[tokio::test]
+    async fn cache_or_init_failure_is_not_cached_and_retries_on_next_call() {
+        let cache: Mutex<Option<String>> = Mutex::new(None);
+
+        // First attempt fails (e.g. a broken kubeconfig) and must not poison
+        // the cache.
+        let err = cache_or_init(&cache, || async {
+            Err::<String, _>(Error::Unavailable("kubeconfig missing".into()))
+        })
+        .await
+        .expect_err("first init fails");
+        assert!(matches!(err, Error::Unavailable(_)));
+        assert!(cache.lock().await.is_none());
+
+        // A later call with a working `init` must succeed and populate the
+        // cache — the earlier failure was not sticky.
+        let ok = cache_or_init(&cache, || async {
+            Ok::<_, Error>("adapter-instance".to_string())
+        })
+        .await
+        .expect("retry after fix succeeds");
+        assert_eq!(ok, "adapter-instance");
+        assert_eq!(cache.lock().await.as_deref(), Some("adapter-instance"));
     }
 }
