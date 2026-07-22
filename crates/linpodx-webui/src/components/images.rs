@@ -16,6 +16,14 @@
 //! channel exactly like the CLI would; "bulk remove" and "prune unused" are
 //! just client-side loops over that same per-item call — no new daemon
 //! surface is required, keeping the "read-only Web UI; CLI mutates" posture.
+//!
+//! "Pull image" (private `pull_modal` submodule below) is the one write path
+//! that talks to an async daemon job rather than a single request/response
+//! call: `image_pull_job` returns a `job_id` immediately, and progress lines
+//! stream back as `EventKind::Progress` notifications on the same `image`
+//! topic this panel already subscribes to. The panel's existing `subscribe`
+//! callback is tightened to skip `kind == "progress"` reloads so a running
+//! pull doesn't thrash `GET /api/v1/images` on every line.
 
 use std::collections::HashSet;
 
@@ -29,6 +37,7 @@ use crate::api_client::fetch_system_df;
 use crate::app::AuthToken;
 use crate::helpers::{format_bytes, short_id};
 use crate::ws::{fetch_list, send_rpc, subscribe};
+use pull_modal::PullModal;
 
 /// What a pending confirm-modal / bulk removal is about to act on.
 #[derive(Clone, Copy, PartialEq, Eq)]
@@ -94,6 +103,7 @@ pub fn ImageList() -> impl IntoView {
     let toasts: RwSignal<Vec<Toast>> = RwSignal::new(Vec::new());
     let toast_seq: RwSignal<u64> = RwSignal::new(0);
     let push_open: RwSignal<Option<String>> = RwSignal::new(None);
+    let pull_open: RwSignal<bool> = RwSignal::new(false);
 
     let push_toast = move |text: String, kind: &'static str| {
         let id = toast_seq.get_untracked() + 1;
@@ -148,7 +158,17 @@ pub fn ImageList() -> impl IntoView {
         if prev.is_some() {
             return;
         }
-        subscribe("image", move |_e| reload());
+        subscribe("image", move |e| {
+            // `image_pull_job` progress lines fire many times per second while
+            // a pull is running — only the terminal / state-changing kinds
+            // (created/pulled/removed/tagged/succeeded/failed) represent a
+            // list worth re-fetching; skip "progress" so we don't thrash
+            // `GET /api/v1/images` + `/system/df` on every line.
+            if e.pointer("/params/kind").and_then(|v| v.as_str()) == Some("progress") {
+                return;
+            }
+            reload();
+        });
     });
     Effect::new(move |prev: Option<()>| {
         if prev.is_some() {
@@ -220,6 +240,18 @@ pub fn ImageList() -> impl IntoView {
             }
             s
         })
+    };
+
+    // Reclaimable-space callout shown next to "Prune unused" — `None` hides
+    // the badge (no df loaded yet, or nothing reclaimable).
+    let reclaim_label = move || {
+        df.get()
+            .and_then(|d| {
+                d.pointer("/images/reclaimable_bytes")
+                    .and_then(|v| v.as_u64())
+            })
+            .filter(|&b| b > 0)
+            .map(|b| format!("{} reclaimable", format_bytes(b)))
     };
 
     let body_view = move || {
@@ -391,6 +423,19 @@ pub fn ImageList() -> impl IntoView {
                     />
                 </span>
                 <span class="toolbar__spacer"></span>
+                {move || {
+                    reclaim_label()
+                        .map(|t| {
+                            view! {
+                                <span
+                                    class="badge badge--info"
+                                    title="Space podman would free by pruning unused images"
+                                >
+                                    {t}
+                                </span>
+                            }
+                        })
+                }}
                 <button
                     type="button"
                     class="btn btn--secondary btn--sm"
@@ -398,6 +443,13 @@ pub fn ImageList() -> impl IntoView {
                     on:click=move |_| pending_bulk.set(Some(BulkKind::Unused))
                 >
                     "Prune unused"
+                </button>
+                <button
+                    type="button"
+                    class="btn btn--primary btn--sm"
+                    on:click=move |_| pull_open.set(true)
+                >
+                    "Pull image"
                 </button>
                 <button
                     type="button"
@@ -467,6 +519,7 @@ pub fn ImageList() -> impl IntoView {
                 }).collect_view()}
             </div>
             <PushModal open=push_open/>
+            <PullModal open=pull_open/>
         </div>
     }
 }
@@ -487,4 +540,238 @@ fn skeleton_rows(n_cols: usize) -> AnyView {
         </div>
     }
     .into_any()
+}
+
+/// Pull-image modal — `image_pull_job` async job + `EventKind::Progress`
+/// notifications on the `image` topic.
+///
+/// Kept as a private submodule of `images.rs` rather than a sibling file:
+/// this Sonnet-lane task owns only `images.rs`, and the daemon side already
+/// exposes everything needed through the existing `/ipc` JSON-RPC channel —
+/// `Method::ImagePullJob` starts the pull and returns `{job_id, status}`
+/// immediately, then streams `EventKind::Progress` (one line per podman
+/// progress update) followed by a terminal `EventKind::Succeeded` /
+/// `EventKind::Failed`, all under `EventTopic::Image` with
+/// `resource_id == job_id` (see `crates/linpodx-daemon/src/dispatch/images.rs`
+/// `image_pull_job`). There is no separate REST route for this — the Web
+/// UI's `/api/v1/*` surface is read-only-by-design (see `web_ui.rs`'s module
+/// doc); mutations already go over the same `/ipc` socket the CLI uses
+/// (`image_remove`, `image_push` in this same file), so this follows suit
+/// rather than waiting on a REST endpoint that isn't part of that surface.
+mod pull_modal {
+    use leptos::prelude::*;
+    use leptos::reactive::owner::{LocalStorage, StoredValue};
+    use serde_json::{json, Value};
+    use wasm_bindgen_futures::spawn_local;
+
+    use crate::ws::{send_rpc, subscribe};
+
+    /// Cap on retained progress lines — podman's pull output for a large
+    /// image can run into the hundreds of lines (one per layer per tick);
+    /// keep only the most recent so the modal never grows unbounded.
+    const MAX_LINES: usize = 200;
+
+    #[derive(Clone)]
+    enum Phase {
+        Idle,
+        Pulling,
+        Succeeded,
+        Failed(String),
+    }
+
+    /// Client-side sanity check only — non-empty, no embedded whitespace, and
+    /// not obviously malformed (leading `:`/`/`, trailing `/`). Podman is the
+    /// real validator (registry reachability, tag existence, …); this exists
+    /// purely to catch typos before round-tripping to the daemon.
+    fn validate_reference(raw: &str) -> Result<(), String> {
+        let r = raw.trim();
+        if r.is_empty() {
+            return Err("image reference is required".to_string());
+        }
+        if r.chars().any(char::is_whitespace) {
+            return Err("image reference cannot contain whitespace".to_string());
+        }
+        if r.starts_with(':') || r.starts_with('/') || r.ends_with('/') {
+            return Err("image reference looks malformed".to_string());
+        }
+        Ok(())
+    }
+
+    fn notif_kind(notif: &Value) -> Option<&str> {
+        notif.pointer("/params/kind").and_then(|v| v.as_str())
+    }
+
+    fn notif_resource_id(notif: &Value) -> Option<&str> {
+        notif
+            .pointer("/params/resource_id")
+            .and_then(|v| v.as_str())
+    }
+
+    fn notif_progress_message(notif: &Value) -> Option<String> {
+        notif
+            .pointer("/params/details/message")
+            .and_then(|v| v.as_str())
+            .map(str::to_string)
+    }
+
+    #[component]
+    pub fn PullModal(open: RwSignal<bool>) -> impl IntoView {
+        let reference = RwSignal::new(String::new());
+        let error: RwSignal<Option<String>> = RwSignal::new(None);
+        let phase = RwSignal::new(Phase::Idle);
+        let lines: RwSignal<Vec<String>> = RwSignal::new(Vec::new());
+
+        // Shared between the persistent subscribe callback below and the
+        // submit handler so a fresh pull's job id is visible to the socket
+        // listener without re-opening a second `/ipc` connection per pull.
+        // `StoredValue<_, LocalStorage>` (rather than `Rc<RefCell<_>>`) keeps
+        // this `Copy` so it can be captured into the view tree's reactive
+        // closures, which leptos requires to be `Send + Sync` — the same fix
+        // `logs_modal.rs` / `exec_pty_modal.rs` use for their non-`Send`
+        // handles.
+        let active_job: StoredValue<Option<String>, LocalStorage> = StoredValue::new_local(None);
+
+        Effect::new(move |prev: Option<()>| {
+            if prev.is_some() {
+                return;
+            }
+            subscribe("image", move |notif| {
+                let current = match active_job.with_value(Clone::clone) {
+                    Some(id) => id,
+                    None => return,
+                };
+                if notif_resource_id(&notif) != Some(current.as_str()) {
+                    return;
+                }
+                match notif_kind(&notif) {
+                    Some("progress") => {
+                        if let Some(msg) = notif_progress_message(&notif) {
+                            lines.update(|l| {
+                                l.push(msg);
+                                let overflow = l.len().saturating_sub(MAX_LINES);
+                                if overflow > 0 {
+                                    l.drain(0..overflow);
+                                }
+                            });
+                        }
+                    }
+                    Some("succeeded") => phase.set(Phase::Succeeded),
+                    Some("failed") => {
+                        phase.set(Phase::Failed(
+                            "pull failed — see progress log above for details".to_string(),
+                        ));
+                    }
+                    _ => {}
+                }
+            });
+        });
+
+        // Reset to a blank form every time the modal is (re)opened.
+        Effect::new(move |_| {
+            if open.get() {
+                reference.set(String::new());
+                error.set(None);
+                phase.set(Phase::Idle);
+                lines.set(Vec::new());
+            }
+        });
+
+        let close = move |_| open.set(false);
+
+        let submit = move |_| {
+            let raw = reference.get_untracked();
+            match validate_reference(&raw) {
+                Ok(()) => error.set(None),
+                Err(e) => {
+                    error.set(Some(e));
+                    return;
+                }
+            }
+            let r = raw.trim().to_string();
+            phase.set(Phase::Pulling);
+            lines.set(Vec::new());
+            spawn_local(async move {
+                match send_rpc("image_pull_job", json!({ "reference": r })).await {
+                    Ok(v) => match v.get("job_id").and_then(|v| v.as_str()) {
+                        Some(jid) => {
+                            active_job.update_value(|slot| *slot = Some(jid.to_string()));
+                        }
+                        None => {
+                            phase.set(Phase::Failed("daemon did not return a job id".to_string()));
+                        }
+                    },
+                    Err(e) => phase.set(Phase::Failed(e)),
+                }
+            });
+        };
+
+        view! {
+            <Show when=move || open.get() fallback=|| view! { <></> }>
+                <div class="modal-backdrop">
+                    <div class="modal-card">
+                        <h3>"Pull image"</h3>
+                        <div class="modal-form">
+                            <div class="field-group">
+                                <label class="label">"Image reference"</label>
+                                <input
+                                    class="input"
+                                    type="text"
+                                    placeholder="docker.io/library/alpine:latest"
+                                    prop:disabled=move || matches!(phase.get(), Phase::Pulling)
+                                    prop:value=move || reference.get()
+                                    on:input=move |ev| reference.set(event_target_value(&ev))
+                                />
+                            </div>
+                            {move || error.get().map(|msg| view! { <p class="modal-error">{msg}</p> })}
+                            {move || match phase.get() {
+                                Phase::Idle => None,
+                                Phase::Pulling => Some(
+                                    view! {
+                                        <p class="loading-inline">
+                                            <span class="spinner"></span>
+                                            "pulling…"
+                                        </p>
+                                    }
+                                    .into_any(),
+                                ),
+                                Phase::Succeeded => Some(
+                                    view! { <p class="status">"pulled successfully"</p> }.into_any(),
+                                ),
+                                Phase::Failed(msg) => {
+                                    Some(view! { <p class="modal-error">{msg}</p> }.into_any())
+                                }
+                            }}
+                            <Show when=move || !lines.get().is_empty() fallback=|| view! { <></> }>
+                                <div class="log-block">
+                                    {move || {
+                                        lines
+                                            .get()
+                                            .into_iter()
+                                            .map(|l| view! { <span class="log-line">{l}</span> })
+                                            .collect_view()
+                                    }}
+                                </div>
+                            </Show>
+                            <p class="modal-hint">
+                                "Progress streams live from the daemon; closing this dialog does not cancel the pull."
+                            </p>
+                        </div>
+                        <div class="modal-actions">
+                            <button
+                                type="button"
+                                class="btn btn--primary"
+                                prop:disabled=move || matches!(phase.get(), Phase::Pulling)
+                                on:click=submit
+                            >
+                                {move || {
+                                    if matches!(phase.get(), Phase::Pulling) { "Pulling…" } else { "Pull" }
+                                }}
+                            </button>
+                            <button type="button" class="btn" on:click=close>"Close"</button>
+                        </div>
+                    </div>
+                </div>
+            </Show>
+        }
+    }
 }

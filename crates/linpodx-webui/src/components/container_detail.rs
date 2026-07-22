@@ -8,7 +8,10 @@
 //!
 //!   * **Overview** — `GET /containers/:id/inspect`; published tcp ports become
 //!     clickable `http://localhost:<port>` links (see
-//!     [`crate::helpers::parse_published_ports`]).
+//!     [`crate::helpers::parse_published_ports`]). A Healthcheck section
+//!     ([`healthcheck_section`]) reads `raw.Config.Healthcheck` /
+//!     `raw.State.Health` — the verbatim `podman inspect` object — since
+//!     `ContainerInspect` does not model healthcheck fields itself.
 //!   * **Logs** — `GET /containers/:id/logs?tail=500`, plus an optional live
 //!     follow that subscribes to the `container` topic and appends `Log` events.
 //!   * **Terminal** — reuses [`super::exec_pty_modal::PtyTerminal`] (the same
@@ -654,6 +657,111 @@ pub fn ContainerDetail() -> impl IntoView {
     }
 }
 
+/// Render the healthcheck section: config (test/interval/timeout/retries/
+/// start-period) + current health-state chip, sourced entirely from
+/// `raw.Config.Healthcheck` / `raw.State.Health` (the verbatim `podman
+/// inspect` object — `ContainerInspect` does not model healthcheck fields).
+/// Falls back to the top-level `status` string's `(healthy)`/`(unhealthy)`/
+/// `(starting)` suffix when `raw.State.Health.Status` is absent (container
+/// never ran, or podman omitted the field). Renders a clean empty-state when
+/// the container defines no `HEALTHCHECK` at all.
+fn healthcheck_section(v: &Value) -> AnyView {
+    let raw = v.get("raw");
+    let hc = raw.and_then(|r| r.pointer("/Config/Healthcheck"));
+    let test = hc.and_then(|h| h.get("Test")).and_then(Value::as_array);
+    let has_test = test.map(|a| !a.is_empty()).unwrap_or(false);
+
+    if !has_test {
+        return view! {
+            <div class="empty-state">
+                <span class="empty-state__title">"No healthcheck configured"</span>
+                <span class="empty-state__hint">
+                    "This container's image does not define a HEALTHCHECK."
+                </span>
+            </div>
+        }
+        .into_any();
+    }
+
+    let test_cmd = test
+        .into_iter()
+        .flatten()
+        .filter_map(Value::as_str)
+        .collect::<Vec<_>>()
+        .join(" ");
+
+    let status_word = raw
+        .and_then(|r| r.pointer("/State/Health/Status"))
+        .and_then(Value::as_str)
+        .map(str::to_string)
+        .or_else(|| {
+            let status = v.get("status").and_then(Value::as_str).unwrap_or("");
+            if status.contains("(healthy)") {
+                Some("healthy".to_string())
+            } else if status.contains("(unhealthy)") {
+                Some("unhealthy".to_string())
+            } else if status.contains("(starting)") {
+                Some("starting".to_string())
+            } else {
+                None
+            }
+        })
+        .unwrap_or_else(|| "unknown".to_string());
+
+    let chip_class = match status_word.as_str() {
+        "healthy" => "chip chip--running",
+        "unhealthy" => "chip chip--error",
+        "starting" => "chip chip--warn",
+        _ => "chip chip--neutral",
+    };
+
+    let ns_to_secs = |ns: i64| format!("{:.1}s", ns as f64 / 1_000_000_000.0);
+    let interval = hc
+        .and_then(|h| h.get("Interval"))
+        .and_then(Value::as_i64)
+        .map(ns_to_secs)
+        .unwrap_or_else(|| "—".to_string());
+    let timeout = hc
+        .and_then(|h| h.get("Timeout"))
+        .and_then(Value::as_i64)
+        .map(ns_to_secs)
+        .unwrap_or_else(|| "—".to_string());
+    let retries = hc
+        .and_then(|h| h.get("Retries"))
+        .and_then(Value::as_i64)
+        .map(|n| n.to_string())
+        .unwrap_or_else(|| "—".to_string());
+    let start_period = hc
+        .and_then(|h| h.get("StartPeriod"))
+        .and_then(Value::as_i64)
+        .filter(|ns| *ns != 0)
+        .map(ns_to_secs)
+        .unwrap_or_else(|| "—".to_string());
+
+    view! {
+        <div class="detail-grid">
+            <div class="detail-grid__key">"Health"</div>
+            <div class="detail-grid__val"><span class=chip_class>{status_word}</span></div>
+
+            <div class="detail-grid__key">"Test command"</div>
+            <div class="detail-grid__val"><span class="mono">{test_cmd}</span></div>
+
+            <div class="detail-grid__key">"Interval"</div>
+            <div class="detail-grid__val"><span class="mono">{interval}</span></div>
+
+            <div class="detail-grid__key">"Timeout"</div>
+            <div class="detail-grid__val"><span class="mono">{timeout}</span></div>
+
+            <div class="detail-grid__key">"Retries"</div>
+            <div class="detail-grid__val"><span class="mono">{retries}</span></div>
+
+            <div class="detail-grid__key">"Start period"</div>
+            <div class="detail-grid__val"><span class="mono">{start_period}</span></div>
+        </div>
+    }
+    .into_any()
+}
+
 /// Render the Overview detail-grid from an inspect record.
 fn overview_pane(v: &Value) -> AnyView {
     let image = v
@@ -822,6 +930,8 @@ fn overview_pane(v: &Value) -> AnyView {
                     </details>
                 </div>
             </div>
+            <div class="section-title">"Healthcheck"</div>
+            {healthcheck_section(v)}
         </div>
     }
     .into_any()
