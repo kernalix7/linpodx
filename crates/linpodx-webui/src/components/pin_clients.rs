@@ -41,6 +41,10 @@ pub fn PinnedClientsView() -> impl IntoView {
     let input = RwSignal::new(String::new());
     let error: RwSignal<Option<String>> = RwSignal::new(None);
     let busy = RwSignal::new(false);
+    // Covers only the initial fetch; a later refresh failure (e.g. after
+    // "Apply") still leaves the last-known `status` on screen and surfaces
+    // via the `.error-state` block below the input row.
+    let loading = RwSignal::new(true);
 
     let reload = move || {
         spawn_local(async move {
@@ -51,6 +55,7 @@ pub fn PinnedClientsView() -> impl IntoView {
                 }
                 Err(e) => error.set(Some(e)),
             }
+            loading.set(false);
         });
     };
 
@@ -100,9 +105,14 @@ pub fn PinnedClientsView() -> impl IntoView {
             <div class="surface-card">
                 <p class="rest-hint">{format!("REST: PUT {}", paths::TOFU_EXPIRY)}</p>
                 {move || match status.get() {
-                    None => view! {
-                        <p class="status-empty">"status not yet loaded"</p>
-                    }.into_any(),
+                    None if loading.get() => view! {
+                        <div class="loading-inline"><span class="spinner"></span>"Loading status…"</div>
+                    }
+                    .into_any(),
+                    // Loaded, but never got a successful response — the
+                    // `.error-state` block below already surfaces the
+                    // failure, so this branch stays silent.
+                    None => ().into_any(),
                     Some(s) => {
                         let now = js_now_secs();
                         let countdown = tofu_countdown_label(s.enabled, s.max_age_secs, s.enabled_at, now);

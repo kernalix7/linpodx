@@ -75,12 +75,16 @@ pub fn PluginsView() -> impl IntoView {
         RwSignal::new(HashMap::new());
     let busy = RwSignal::new(false);
     let status: RwSignal<Option<String>> = RwSignal::new(None);
+    // Distinguishes "still fetching" from "fetched, genuinely zero keys" so
+    // the empty-state doesn't flash before the first response lands.
+    let loading = RwSignal::new(true);
 
     let reload = move || {
         let token = match auth.0.get_untracked() {
             Some(t) => t,
             None => {
                 error.set(Some("set a bearer token to load plugin keys".into()));
+                loading.set(false);
                 return;
             }
         };
@@ -107,6 +111,7 @@ pub fn PluginsView() -> impl IntoView {
                     }
                 }
             }
+            loading.set(false);
         });
     };
 
@@ -174,7 +179,15 @@ pub fn PluginsView() -> impl IntoView {
                         <p class="modal-confirm">{format!("Publisher: {}", publisher_for_view)}</p>
                         <p class="modal-confirm">{format!("Fingerprint: {}", fingerprint_for_view)}</p>
                         <p class="rest-hint">{format!("REST: POST {}", paths::PLUGIN_REVOKE_CLUSTER)}</p>
-                        {st.map(|m| view! { <p class="status">{m}</p> })}
+                        {st.map(|m| {
+                            if let Some(msg) = m.strip_prefix("error: ") {
+                                view! { <p class="modal-error">{msg.to_string()}</p> }.into_any()
+                            } else if busy.get() {
+                                view! { <div class="loading-inline"><span class="spinner"></span>{m}</div> }.into_any()
+                            } else {
+                                view! { <p class="status">{m}</p> }.into_any()
+                            }
+                        })}
                         <div class="modal-actions">
                             <button
                                 type="button"
@@ -193,12 +206,34 @@ pub fn PluginsView() -> impl IntoView {
     };
 
     let body_view = move || {
+        if loading.get() {
+            // Skeleton cards — matches the shape the real rows render into,
+            // wrapped by the caller's own `.card-stack` div below.
+            return (0..3)
+                .map(|_| {
+                    view! {
+                        <div class="card">
+                            <div class="field">
+                                <span class="field-label">"publisher"</span>
+                                <span class="skeleton-line" style="width:120px"></span>
+                            </div>
+                            <div class="field">
+                                <span class="field-label">"fingerprint"</span>
+                                <span class="skeleton-line" style="width:160px"></span>
+                            </div>
+                        </div>
+                    }
+                })
+                .collect_view()
+                .into_any();
+        }
         let items = rows.get();
         if items.is_empty() {
             return view! {
                 <div class="empty-state">
                     <span class="empty-state__icon"><Icon name="plugin"/></span>
                     <span class="empty-state__title">"No plugin keys registered"</span>
+                    <span class="empty-state__hint">"Install a signed plugin with the linpodx CLI to register a publisher key."</span>
                 </div>
             }
             .into_any();

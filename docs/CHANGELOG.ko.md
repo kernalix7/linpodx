@@ -62,6 +62,16 @@ UI 자체도 처음부터 다시 설계한 dark-first 디자인 시스템을 갖
 
 ### 추가됨
 
+- **데스크톱급 UI**: 대시보드 홈(스탯 타일, 실시간 집계 CPU/메모리 차트,
+  최근 이벤트 피드, 퀵 액션), 컨테이너 상세 슬라이드오버(클릭 가능한 포트
+  링크가 있는 Overview, 로그 tail+follow, 내장 PTY 터미널, 컨테이너별 통계
+  차트, raw inspect), Ctrl/Cmd-K 커맨드 팔레트(퍼지 검색 + 액션 동사),
+  설정·진단 페이지(데몬 정보 + doctor 러너), 이미지/볼륨/네트워크의 벌크
+  선택·prune 과 in-use 배지, 실시간 상태 푸터.
+- 대시보드 REST 표면: `GET /containers/:id/inspect`,
+  `GET /containers/:id/logs?tail=`, `GET /metrics/:id/history`,
+  `GET /system/df` (신규 `SystemDf` IPC), `GET /system/info`,
+  `POST /doctor/run` — 전부 기존 bearer 인증 뒤에 마운트.
 - `linpodx-gui`: Tauri 2 데스크톱 셸 — 데몬 소켓에 연결하고, 데몬이 없으면
   자동으로 기동하며, 원샷 토큰 핸드오프로 웹 UI 를 엽니다. 실패 시 재시도
   가능한 스플래시 화면.

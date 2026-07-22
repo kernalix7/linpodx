@@ -199,7 +199,15 @@ pub fn SnapshotTree() -> impl IntoView {
                                 />
                             </div>
                         })}
-                        {st.map(|m| view! { <p class="status">{m}</p> })}
+                        {st.map(|m| {
+                            if let Some(msg) = m.strip_prefix("error: ") {
+                                view! { <p class="modal-error">{msg.to_string()}</p> }.into_any()
+                            } else if busy.get() {
+                                view! { <div class="loading-inline"><span class="spinner"></span>{m}</div> }.into_any()
+                            } else {
+                                view! { <p class="status">{m}</p> }.into_any()
+                            }
+                        })}
                         <div class="modal-actions">
                             <button
                                 type="button"

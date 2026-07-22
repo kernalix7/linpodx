@@ -51,6 +51,8 @@ workflow extracts the whole section for the GitHub Release body.
 
 ### Added
 
+- **Desktop-grade UI**: a Dashboard home (stat tiles, live aggregate CPU/memory charts, recent-events feed, quick actions), a container detail slide-over (Overview with clickable port links, log tail+follow, an embedded PTY terminal, per-container stats charts, raw inspect), a Ctrl/Cmd-K command palette (fuzzy search + action verbs), a Settings & Diagnostics page (daemon info + doctor runner), bulk selection/prune with in-use badges on images/volumes/networks, and a live status footer.
+- Dashboard REST surface: `GET /containers/:id/inspect`, `GET /containers/:id/logs?tail=`, `GET /metrics/:id/history`, `GET /system/df` (new `SystemDf` IPC), `GET /system/info`, `POST /doctor/run` — all behind the existing bearer auth.
 - `linpodx-gui`: Tauri 2 desktop shell — connects to the daemon socket, auto-spawns the daemon when absent, and opens the web UI with a one-shot token handoff. Splash screen with retry on failure.
 - Daemon `WebUiEnsure` IPC: on-demand loopback web-UI listener (ephemeral port, per-daemon-lifetime token), independent of `--remote-listen`.
 - Typed IPC error taxonomy: `PERMISSION_DENIED`, `CONFLICT`, `TIMEOUT`, `UNSUPPORTED`, `UNAVAILABLE`, `INTERNAL` codes join the original four (wire-compatible); CLI prints `daemon error [NAME] (code n): …`.

@@ -67,9 +67,15 @@ pub fn SessionTimeline() -> impl IntoView {
         Err(msg) => view! { <p class="modal-error">{msg}</p> }.into_any(),
         Ok(items) if items.is_empty() => {
             if busy.get() {
-                view! { <p class="modal-empty">"loading…"</p> }.into_any()
+                view! { <div class="loading-inline"><span class="spinner"></span>"Loading timeline…"</div> }.into_any()
             } else {
-                view! { <p class="modal-empty">"no events"</p> }.into_any()
+                view! {
+                    <div class="empty-state">
+                        <span class="empty-state__title">"No events"</span>
+                        <span class="empty-state__hint">"This session hasn't recorded any timeline events yet."</span>
+                    </div>
+                }
+                .into_any()
             }
         }
         Ok(items) => {

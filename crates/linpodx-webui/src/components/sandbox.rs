@@ -41,6 +41,10 @@ fn AutoEncryptCard() -> impl IntoView {
     let status: RwSignal<Option<AutoEncryptStatus>> = RwSignal::new(None);
     let busy = RwSignal::new(false);
     let error: RwSignal<Option<String>> = RwSignal::new(None);
+    // `loading` covers only the *initial* fetch; a toggle-time error lands in
+    // `error` and is rendered by the block below the button, alongside a
+    // still-visible (stale-but-useful) last-known `status`.
+    let loading = RwSignal::new(true);
 
     let reload = move || {
         spawn_local(async move {
@@ -51,6 +55,7 @@ fn AutoEncryptCard() -> impl IntoView {
                 }
                 Err(e) => error.set(Some(e)),
             }
+            loading.set(false);
         });
     };
 
@@ -92,7 +97,14 @@ fn AutoEncryptCard() -> impl IntoView {
             <div class="section-title">"Sandbox auto-encrypt snapshots"</div>
             <p class="rest-hint">{format!("REST: PUT {}", paths::SANDBOX_AUTO_ENCRYPT)}</p>
             {move || match status.get() {
-                None => view! { <p class="status-empty">"status not yet loaded"</p> }.into_any(),
+                None if loading.get() => view! {
+                    <div class="loading-inline"><span class="spinner"></span>"Loading status…"</div>
+                }
+                .into_any(),
+                // Loaded, but never got a successful response — the error
+                // block below the button already surfaces the failure, so
+                // this branch stays silent rather than duplicating it.
+                None => ().into_any(),
                 Some(s) => view! {
                     <div class="detail-grid">
                         <span class="detail-grid__key">"Enabled"</span>
