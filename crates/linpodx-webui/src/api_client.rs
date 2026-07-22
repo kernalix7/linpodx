@@ -68,6 +68,118 @@ pub fn build_auto_encrypt_body(enabled: bool) -> Value {
     json!({ "enabled": enabled })
 }
 
+// ===========================================================================
+// App-shell v5 — REST surface consumed by the dashboard / drawer / settings.
+// URL builders are host-compiled + unit-tested; the wasm fetch wrappers below
+// call the shared `send_get` / `send_post_json` helpers. Zero renumbering:
+// these are all new axum routes (plus the one new `Method::SystemDf`).
+// ===========================================================================
+
+/// Stable path constants for the v5 endpoints. Pinned so a daemon-side route
+/// rename is caught by `paths_v5_are_stable`.
+pub mod paths_v5 {
+    pub const SYSTEM_DF: &str = "/api/v1/system/df";
+    pub const SYSTEM_INFO: &str = "/api/v1/system/info";
+    pub const DOCTOR_RUN: &str = "/api/v1/doctor/run";
+}
+
+/// Percent-encode an RFC3339 timestamp for use as a query-string value. Mirrors
+/// `encodeURIComponent` (alnum + `-_.~` intact) so `:` / `+` in the timestamp
+/// survive proxies. Kept host-side so the shaping is unit-testable.
+pub fn encode_query_component(raw: &str) -> String {
+    let mut out = String::with_capacity(raw.len());
+    for b in raw.as_bytes() {
+        let c = *b;
+        if c.is_ascii_alphanumeric() || matches!(c, b'-' | b'_' | b'.' | b'~') {
+            out.push(c as char);
+        } else {
+            out.push_str(&format!("%{c:02X}"));
+        }
+    }
+    out
+}
+
+/// `GET /api/v1/containers/:id/inspect` — full container inspect record.
+pub fn container_inspect_url(id: &str) -> String {
+    format!("/api/v1/containers/{}/inspect", encode_query_component(id))
+}
+
+/// `GET /api/v1/containers/:id/logs?tail=N&since=<rfc3339>`.
+pub fn container_logs_url(id: &str, tail: Option<u32>, since: Option<&str>) -> String {
+    let mut url = format!("/api/v1/containers/{}/logs", encode_query_component(id));
+    let mut sep = '?';
+    if let Some(t) = tail {
+        url.push(sep);
+        url.push_str(&format!("tail={t}"));
+        sep = '&';
+    }
+    if let Some(s) = since {
+        url.push(sep);
+        url.push_str(&format!("since={}", encode_query_component(s)));
+    }
+    url
+}
+
+/// `GET /api/v1/metrics/:id` — latest single `MetricsSample` (or null).
+pub fn metrics_latest_url(id: &str) -> String {
+    format!("/api/v1/metrics/{}", encode_query_component(id))
+}
+
+/// `GET /api/v1/metrics/:id/history?since=<rfc3339>` — the ring buffer.
+pub fn metrics_history_url(id: &str, since: Option<&str>) -> String {
+    let base = format!("/api/v1/metrics/{}/history", encode_query_component(id));
+    match since {
+        Some(s) => format!("{base}?since={}", encode_query_component(s)),
+        None => base,
+    }
+}
+
+#[cfg(target_arch = "wasm32")]
+pub async fn fetch_container_inspect(id: &str, token: &str) -> Result<Value, String> {
+    send_get(&container_inspect_url(id), token).await
+}
+
+#[cfg(target_arch = "wasm32")]
+pub async fn fetch_container_logs(
+    id: &str,
+    tail: Option<u32>,
+    since: Option<&str>,
+    token: &str,
+) -> Result<Value, String> {
+    send_get(&container_logs_url(id, tail, since), token).await
+}
+
+#[cfg(target_arch = "wasm32")]
+pub async fn fetch_metrics_latest(id: &str, token: &str) -> Result<Value, String> {
+    send_get(&metrics_latest_url(id), token).await
+}
+
+#[cfg(target_arch = "wasm32")]
+pub async fn fetch_metrics_history(
+    id: &str,
+    since: Option<&str>,
+    token: &str,
+) -> Result<Value, String> {
+    send_get(&metrics_history_url(id, since), token).await
+}
+
+#[cfg(target_arch = "wasm32")]
+pub async fn fetch_system_df(token: &str) -> Result<Value, String> {
+    send_get(paths_v5::SYSTEM_DF, token).await
+}
+
+#[cfg(target_arch = "wasm32")]
+pub async fn fetch_system_info(token: &str) -> Result<Value, String> {
+    send_get(paths_v5::SYSTEM_INFO, token).await
+}
+
+/// `POST /api/v1/doctor/run` — triggers the doctor sweep. Body is `{}`; the
+/// daemon hard-codes `DoctorRunParams { json: true }`.
+#[cfg(target_arch = "wasm32")]
+pub async fn run_doctor(token: &str) -> Result<Value, String> {
+    send_post_json(paths_v5::DOCTOR_RUN, json!({}), token).await
+}
+
 // ---------------------------------------------------------------------------
 // wasm32 (browser) request helpers. Each builds the request via gloo-net and
 // returns the decoded JSON body or a user-facing error string.
@@ -259,5 +371,64 @@ mod tests {
             "/api/v1/plugin/key/revoke-cluster"
         );
         assert_eq!(paths::SANDBOX_AUTO_ENCRYPT, "/api/v1/sandbox/auto-encrypt");
+    }
+
+    // ---- app-shell v5 URL builders -------------------------------------
+
+    #[test]
+    fn paths_v5_are_stable() {
+        assert_eq!(paths_v5::SYSTEM_DF, "/api/v1/system/df");
+        assert_eq!(paths_v5::SYSTEM_INFO, "/api/v1/system/info");
+        assert_eq!(paths_v5::DOCTOR_RUN, "/api/v1/doctor/run");
+    }
+
+    #[test]
+    fn container_inspect_url_is_nested_under_id() {
+        assert_eq!(
+            container_inspect_url("abc123"),
+            "/api/v1/containers/abc123/inspect"
+        );
+    }
+
+    #[test]
+    fn container_logs_url_composes_query() {
+        assert_eq!(
+            container_logs_url("c1", None, None),
+            "/api/v1/containers/c1/logs"
+        );
+        assert_eq!(
+            container_logs_url("c1", Some(500), None),
+            "/api/v1/containers/c1/logs?tail=500"
+        );
+        // `?` opens the query, `&` joins the second param; the `:` in the
+        // timestamp is percent-encoded.
+        assert_eq!(
+            container_logs_url("c1", Some(200), Some("2026-07-21T12:00:00Z")),
+            "/api/v1/containers/c1/logs?tail=200&since=2026-07-21T12%3A00%3A00Z"
+        );
+        assert_eq!(
+            container_logs_url("c1", None, Some("2026-07-21T12:00:00Z")),
+            "/api/v1/containers/c1/logs?since=2026-07-21T12%3A00%3A00Z"
+        );
+    }
+
+    #[test]
+    fn metrics_urls_shape() {
+        assert_eq!(metrics_latest_url("m1"), "/api/v1/metrics/m1");
+        assert_eq!(
+            metrics_history_url("m1", None),
+            "/api/v1/metrics/m1/history"
+        );
+        assert_eq!(
+            metrics_history_url("m1", Some("2026-07-21T00:00:00+00:00")),
+            "/api/v1/metrics/m1/history?since=2026-07-21T00%3A00%3A00%2B00%3A00"
+        );
+    }
+
+    #[test]
+    fn encode_query_component_leaves_unreserved() {
+        assert_eq!(encode_query_component("abc-DEF_1.9~"), "abc-DEF_1.9~");
+        assert_eq!(encode_query_component("a b"), "a%20b");
+        assert_eq!(encode_query_component(":+"), "%3A%2B");
     }
 }

@@ -284,6 +284,362 @@ pub fn plugin_propagation_label(state: &str, log_index: Option<u64>) -> String {
     }
 }
 
+// ===========================================================================
+// App-shell v5 — pure helpers shared by dashboard / command-palette / charts.
+// All of the following are `web-sys`/`leptos`-free so the host `cargo test`
+// covers the geometry + scoring + formatting logic without a wasm toolchain.
+// ===========================================================================
+
+/// Human-readable byte size, base-1024, one decimal for >= 1 KiB.
+///
+/// Rendered with SI-ish suffixes (`KB`/`MB`/`GB`) even though the divisor is
+/// 1024 — this matches how Docker Desktop / `podman system df` present sizes.
+pub fn format_bytes(bytes: u64) -> String {
+    const UNITS: [&str; 6] = ["B", "KB", "MB", "GB", "TB", "PB"];
+    if bytes < 1024 {
+        return format!("{bytes} B");
+    }
+    let mut val = bytes as f64;
+    let mut unit = 0usize;
+    while val >= 1024.0 && unit < UNITS.len() - 1 {
+        val /= 1024.0;
+        unit += 1;
+    }
+    format!("{val:.1} {}", UNITS[unit])
+}
+
+/// Trim an id / hash to a short display form (first 12 chars, or the whole
+/// string when shorter). Never panics on multi-byte input — it walks chars.
+pub fn short_id(id: &str) -> String {
+    id.chars().take(12).collect()
+}
+
+/// Subsequence fuzzy score for the command palette.
+///
+/// Returns `Some(score)` when every char of `query` appears in `hay` in order
+/// (case-insensitive), `None` otherwise. Higher scores are better. The scoring
+/// rewards contiguous runs, word-boundary hits (`/`, `-`, `_`, ` `, `.` or the
+/// first char) and a prefix match, so `"cnt"` ranks `container` above a
+/// scattered hit. An empty query scores `0` (matches everything, neutral rank).
+pub fn fuzzy_score(query: &str, hay: &str) -> Option<i32> {
+    if query.is_empty() {
+        return Some(0);
+    }
+    let q: Vec<char> = query.to_lowercase().chars().collect();
+    let h: Vec<char> = hay.to_lowercase().chars().collect();
+    if q.len() > h.len() {
+        return None;
+    }
+
+    let is_boundary = |i: usize| -> bool {
+        if i == 0 {
+            return true;
+        }
+        matches!(h[i - 1], '/' | '-' | '_' | ' ' | '.' | ':')
+    };
+
+    let mut qi = 0usize;
+    let mut score = 0i32;
+    let mut prev_match: Option<usize> = None;
+    for (i, &hc) in h.iter().enumerate() {
+        if qi >= q.len() {
+            break;
+        }
+        if hc == q[qi] {
+            score += 1;
+            if is_boundary(i) {
+                score += 8;
+            }
+            if let Some(p) = prev_match {
+                if p + 1 == i {
+                    // Contiguous run — the strongest signal.
+                    score += 6;
+                }
+            }
+            if qi == 0 && i == 0 {
+                // Whole-query prefix bonus.
+                score += 10;
+            }
+            prev_match = Some(i);
+            qi += 1;
+        }
+    }
+    if qi == q.len() {
+        // Shorter haystacks with the same run rank slightly higher.
+        Some(score - (h.len() as i32 - q.len() as i32).min(20))
+    } else {
+        None
+    }
+}
+
+// --------------------------------------------------------------------------
+// Inline-SVG chart geometry. Charts render into a caller-chosen `w`×`h` pixel
+// viewBox with a uniform `pad` inset. Every function is a pure transform over
+// `&[(f64 ts, f64 value)]` samples so the component layer stays declarative.
+// --------------------------------------------------------------------------
+
+/// (min, max) of the sample values. Empty → `(0.0, 1.0)`. A flat series is
+/// padded to a unit span so a horizontal line still has vertical headroom.
+/// When `zero_floor` is set the minimum is pinned to `0.0` (area charts read
+/// better from a zero baseline for CPU / memory / throughput).
+pub fn value_bounds(pts: &[(f64, f64)], zero_floor: bool) -> (f64, f64) {
+    if pts.is_empty() {
+        return (0.0, 1.0);
+    }
+    let mut lo = f64::INFINITY;
+    let mut hi = f64::NEG_INFINITY;
+    for &(_, v) in pts {
+        if v < lo {
+            lo = v;
+        }
+        if v > hi {
+            hi = v;
+        }
+    }
+    if zero_floor && lo > 0.0 {
+        lo = 0.0;
+    }
+    if (hi - lo).abs() < f64::EPSILON {
+        // Flat line: give it a symmetric unit span (or [0,1] at the origin).
+        if hi.abs() < f64::EPSILON {
+            return (0.0, 1.0);
+        }
+        return (lo - hi.abs() * 0.5, hi + hi.abs() * 0.5);
+    }
+    (lo, hi)
+}
+
+/// (min, max) of the sample timestamps. Empty → `(0.0, 1.0)`. A single point
+/// gets a unit span so the x-projection doesn't divide by zero.
+pub fn ts_bounds(pts: &[(f64, f64)]) -> (f64, f64) {
+    if pts.is_empty() {
+        return (0.0, 1.0);
+    }
+    let mut lo = f64::INFINITY;
+    let mut hi = f64::NEG_INFINITY;
+    for &(t, _) in pts {
+        if t < lo {
+            lo = t;
+        }
+        if t > hi {
+            hi = t;
+        }
+    }
+    if (hi - lo).abs() < f64::EPSILON {
+        return (lo, lo + 1.0);
+    }
+    (lo, hi)
+}
+
+/// Project one `(ts, value)` sample into the `w`×`h` viewBox with `pad` inset.
+/// Values are clamped into `vb`; the y-axis is inverted (SVG origin top-left).
+pub fn project_point(
+    ts: f64,
+    val: f64,
+    tb: (f64, f64),
+    vb: (f64, f64),
+    w: f64,
+    h: f64,
+    pad: f64,
+) -> (f64, f64) {
+    let (t0, t1) = tb;
+    let (v0, v1) = vb;
+    let plot_w = (w - pad * 2.0).max(1.0);
+    let plot_h = (h - pad * 2.0).max(1.0);
+    let tx = if (t1 - t0).abs() < f64::EPSILON {
+        0.5
+    } else {
+        ((ts - t0) / (t1 - t0)).clamp(0.0, 1.0)
+    };
+    let vclamped = val.clamp(v0.min(v1), v0.max(v1));
+    let vy = if (v1 - v0).abs() < f64::EPSILON {
+        0.5
+    } else {
+        ((vclamped - v0) / (v1 - v0)).clamp(0.0, 1.0)
+    };
+    let x = pad + tx * plot_w;
+    let y = pad + (1.0 - vy) * plot_h; // invert
+    (x, y)
+}
+
+/// Map a whole series to viewBox coordinates.
+pub fn project_series(
+    pts: &[(f64, f64)],
+    w: f64,
+    h: f64,
+    pad: f64,
+    zero_floor: bool,
+) -> Vec<(f64, f64)> {
+    let tb = ts_bounds(pts);
+    let vb = value_bounds(pts, zero_floor);
+    pts.iter()
+        .map(|&(t, v)| project_point(t, v, tb, vb, w, h, pad))
+        .collect()
+}
+
+/// `M …L…` polyline path for projected coordinates. Empty → empty string.
+pub fn line_path(coords: &[(f64, f64)]) -> String {
+    if coords.is_empty() {
+        return String::new();
+    }
+    let mut out = String::with_capacity(coords.len() * 14);
+    for (i, &(x, y)) in coords.iter().enumerate() {
+        if i == 0 {
+            out.push_str(&format!("M{x:.2} {y:.2}"));
+        } else {
+            out.push_str(&format!(" L{x:.2} {y:.2}"));
+        }
+    }
+    out
+}
+
+/// Closed area path: the polyline dropped to `baseline_y` and closed. Empty
+/// input → empty string; a single point becomes a 1px-wide sliver so the fill
+/// is still visible.
+pub fn area_path(coords: &[(f64, f64)], baseline_y: f64) -> String {
+    if coords.is_empty() {
+        return String::new();
+    }
+    if coords.len() == 1 {
+        let (x, y) = coords[0];
+        return format!(
+            "M{x:.2} {by:.2} L{x:.2} {y:.2} L{x2:.2} {y:.2} L{x2:.2} {by:.2} Z",
+            by = baseline_y,
+            x2 = x + 1.0
+        );
+    }
+    let mut out = line_path(coords);
+    let (last_x, _) = coords[coords.len() - 1];
+    let (first_x, _) = coords[0];
+    out.push_str(&format!(
+        " L{last_x:.2} {by:.2} L{first_x:.2} {by:.2} Z",
+        by = baseline_y
+    ));
+    out
+}
+
+/// Format an epoch-seconds timestamp as a `HH:MM:SS` UTC clock for chart
+/// tooltips. Avoids a `chrono` dependency in the wasm build by doing the
+/// modular arithmetic directly. Negative / absurd inputs clamp to `00:00:00`.
+pub fn clock_hms(epoch_secs: i64) -> String {
+    if epoch_secs < 0 {
+        return "00:00:00".to_string();
+    }
+    let secs_of_day = epoch_secs.rem_euclid(86_400);
+    let h = secs_of_day / 3_600;
+    let m = (secs_of_day % 3_600) / 60;
+    let s = secs_of_day % 60;
+    format!("{h:02}:{m:02}:{s:02}")
+}
+
+/// Index of the sample whose projected x is nearest to `mouse_x`. Part of the
+/// pure hover hit-testing API (host-tested); charts may drive the crosshair
+/// from either this or per-sample hit-rects, so it can read as unused on wasm.
+#[allow(dead_code)]
+pub fn nearest_index_by_x(coords: &[(f64, f64)], mouse_x: f64) -> Option<usize> {
+    if coords.is_empty() {
+        return None;
+    }
+    let mut best = 0usize;
+    let mut best_d = f64::INFINITY;
+    for (i, &(x, _)) in coords.iter().enumerate() {
+        let d = (x - mouse_x).abs();
+        if d < best_d {
+            best_d = d;
+            best = i;
+        }
+    }
+    Some(best)
+}
+
+// ===========================================================================
+// Container-detail drawer — pure helpers (port-link builder, log-line
+// classification, cumulative→delta throughput). Host-compiled + unit-tested so
+// the wasm-only drawer component consumes proven logic.
+// ===========================================================================
+
+/// A parsed published-port entry for the container-detail Overview tab. When
+/// `href` is `Some`, the drawer renders a clickable `localhost:<port>` anchor;
+/// otherwise the `display` string is emitted as plain text (udp / unpublished).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct PortLink {
+    pub display: String,
+    pub href: Option<String>,
+}
+
+/// Turn podman-form port strings (`0.0.0.0:8080->80/tcp`, `:::8080->80/tcp`,
+/// `53->53/udp`, `80/tcp`) into renderable [`PortLink`]s. Only host-published
+/// **tcp** ports get an `http://localhost:<hostport>` href; udp and
+/// non-published container ports render as plain text.
+pub fn parse_published_ports(ports: &[String]) -> Vec<PortLink> {
+    ports
+        .iter()
+        .map(|raw| {
+            let s = raw.trim();
+            let Some((host_side, cont_side)) = s.split_once("->") else {
+                // No host mapping → not published.
+                return PortLink {
+                    display: s.to_string(),
+                    href: None,
+                };
+            };
+            let cont = cont_side.trim();
+            // Host side is `ip:port`, `[::]:port` or a bare `port`; the port is
+            // always the final `:`-delimited segment.
+            let host_port = host_side.rsplit(':').next().unwrap_or("").trim();
+            let proto = cont.rsplit('/').next().unwrap_or("tcp").trim();
+            let is_tcp = proto.eq_ignore_ascii_case("tcp");
+            match host_port.parse::<u32>() {
+                Ok(p) if is_tcp => PortLink {
+                    display: format!("localhost:{p} \u{2192} {cont}"),
+                    href: Some(format!("http://localhost:{p}")),
+                },
+                Ok(p) => PortLink {
+                    display: format!("localhost:{p} \u{2192} {cont}"),
+                    href: None,
+                },
+                Err(_) => PortLink {
+                    display: s.to_string(),
+                    href: None,
+                },
+            }
+        })
+        .collect()
+}
+
+/// True when a streamed follow-log line carries the `[stderr]` stream tag
+/// produced by [`extract_log_line`]. Drives the `.log-line--stderr` modifier.
+pub fn log_line_is_stderr(line: &str) -> bool {
+    line.starts_with("[stderr]")
+}
+
+/// Split a raw multi-line log stream string into its non-empty lines, trimming
+/// a single trailing newline. Used to fan a `{stdout}`/`{stderr}` blob into
+/// per-line `<div class="log-line">` rows.
+pub fn split_log_lines(blob: &str) -> Vec<String> {
+    blob.lines()
+        .map(str::to_string)
+        .filter(|l| !l.is_empty())
+        .collect()
+}
+
+/// Convert a cumulative counter series (e.g. `net_rx` total bytes) into a
+/// per-interval delta series for the throughput chart. Negative deltas (counter
+/// reset / container restart) clamp to zero; a series shorter than two points
+/// yields flat-zero points so the chart still has a baseline.
+pub fn cumulative_to_delta(pts: &[(f64, f64)]) -> Vec<(f64, f64)> {
+    if pts.len() < 2 {
+        return pts.iter().map(|&(t, _)| (t, 0.0)).collect();
+    }
+    pts.windows(2)
+        .map(|w| {
+            let (_, v0) = w[0];
+            let (t1, v1) = w[1];
+            (t1, (v1 - v0).max(0.0))
+        })
+        .collect()
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -516,5 +872,185 @@ mod tests {
         // Unknown variants are echoed verbatim so the daemon can introduce new
         // states without breaking the renderer.
         assert_eq!(plugin_propagation_label("future", None), "future");
+    }
+
+    // ---- app-shell v5 helpers ------------------------------------------
+
+    #[test]
+    fn format_bytes_scales_by_1024() {
+        assert_eq!(format_bytes(0), "0 B");
+        assert_eq!(format_bytes(512), "512 B");
+        assert_eq!(format_bytes(1024), "1.0 KB");
+        assert_eq!(format_bytes(1536), "1.5 KB");
+        assert_eq!(format_bytes(4_509_715_660), "4.2 GB");
+    }
+
+    #[test]
+    fn short_id_truncates_and_is_utf8_safe() {
+        assert_eq!(short_id("abcdef0123456789"), "abcdef012345");
+        assert_eq!(short_id("short"), "short");
+        assert_eq!(short_id(""), "");
+        // Multi-byte input must not panic or split a codepoint.
+        assert_eq!(short_id("héllo"), "héllo");
+    }
+
+    #[test]
+    fn fuzzy_score_empty_query_matches_neutral() {
+        assert_eq!(fuzzy_score("", "anything"), Some(0));
+    }
+
+    #[test]
+    fn fuzzy_score_requires_subsequence() {
+        assert!(fuzzy_score("cnt", "container").is_some());
+        assert!(fuzzy_score("xyz", "container").is_none());
+        // Out-of-order chars never match.
+        assert!(fuzzy_score("tac", "cat").is_none());
+        // Query longer than the haystack cannot match.
+        assert!(fuzzy_score("containers", "cat").is_none());
+    }
+
+    #[test]
+    fn fuzzy_score_prefers_prefix_and_contiguous() {
+        let prefix = fuzzy_score("con", "container").unwrap();
+        let scattered = fuzzy_score("con", "beacon").unwrap();
+        assert!(
+            prefix > scattered,
+            "prefix {prefix} should beat scattered {scattered}"
+        );
+    }
+
+    #[test]
+    fn fuzzy_score_word_boundary_beats_midword() {
+        let boundary = fuzzy_score("web", "my-web-app").unwrap();
+        let midword = fuzzy_score("web", "cobweb").unwrap();
+        assert!(boundary > midword);
+    }
+
+    #[test]
+    fn value_bounds_handles_empty_flat_and_range() {
+        assert_eq!(value_bounds(&[], false), (0.0, 1.0));
+        // Flat non-zero series gets symmetric headroom.
+        let (lo, hi) = value_bounds(&[(0.0, 4.0), (1.0, 4.0)], false);
+        assert!(lo < 4.0 && hi > 4.0);
+        // Flat zero series pins to the unit origin span.
+        assert_eq!(value_bounds(&[(0.0, 0.0)], false), (0.0, 1.0));
+        // Ranged series is returned verbatim.
+        assert_eq!(value_bounds(&[(0.0, 2.0), (1.0, 8.0)], false), (2.0, 8.0));
+        // zero_floor pulls the min down to 0.
+        assert_eq!(value_bounds(&[(0.0, 2.0), (1.0, 8.0)], true), (0.0, 8.0));
+    }
+
+    #[test]
+    fn ts_bounds_handles_empty_and_single() {
+        assert_eq!(ts_bounds(&[]), (0.0, 1.0));
+        assert_eq!(ts_bounds(&[(5.0, 9.0)]), (5.0, 6.0));
+        assert_eq!(ts_bounds(&[(2.0, 0.0), (10.0, 0.0)]), (2.0, 10.0));
+    }
+
+    #[test]
+    fn project_point_inverts_y_and_clamps() {
+        let tb = (0.0, 10.0);
+        let vb = (0.0, 100.0);
+        // Max value maps near the top (small y); min value near the bottom.
+        let (_, y_hi) = project_point(0.0, 100.0, tb, vb, 100.0, 100.0, 5.0);
+        let (_, y_lo) = project_point(0.0, 0.0, tb, vb, 100.0, 100.0, 5.0);
+        assert!(y_hi < y_lo, "higher value must sit higher (smaller y)");
+        // Out-of-range value is clamped, not extrapolated past the plot.
+        let (_, y_over) = project_point(0.0, 500.0, tb, vb, 100.0, 100.0, 5.0);
+        assert!((y_over - y_hi).abs() < 1e-9);
+    }
+
+    #[test]
+    fn line_and_area_paths_handle_edge_cases() {
+        assert_eq!(line_path(&[]), "");
+        assert_eq!(area_path(&[], 50.0), "");
+        let one = line_path(&[(1.0, 2.0)]);
+        assert!(one.starts_with("M1.00 2.00"));
+        let two = line_path(&[(0.0, 0.0), (10.0, 5.0)]);
+        assert!(two.contains(" L10.00 5.00"));
+        // Single-point area still produces a closed, fillable sliver.
+        let a1 = area_path(&[(4.0, 9.0)], 50.0);
+        assert!(a1.starts_with('M') && a1.ends_with('Z'));
+        let a2 = area_path(&[(0.0, 0.0), (10.0, 5.0)], 50.0);
+        assert!(a2.ends_with("50.00 Z") || a2.ends_with(" Z"));
+    }
+
+    #[test]
+    fn clock_hms_formats_utc_time_of_day() {
+        assert_eq!(clock_hms(0), "00:00:00");
+        assert_eq!(clock_hms(-5), "00:00:00");
+        // 2026-07-21T12:00:00Z is a whole number of days plus 12h.
+        assert_eq!(clock_hms(3_600 + 120 + 5), "01:02:05");
+        assert_eq!(clock_hms(86_400 + 45_296), "12:34:56");
+    }
+
+    #[test]
+    fn nearest_index_by_x_picks_closest() {
+        let coords = vec![(0.0, 0.0), (10.0, 0.0), (20.0, 0.0)];
+        assert_eq!(nearest_index_by_x(&coords, 9.0), Some(1));
+        assert_eq!(nearest_index_by_x(&coords, 0.0), Some(0));
+        assert_eq!(nearest_index_by_x(&coords, 100.0), Some(2));
+        assert_eq!(nearest_index_by_x(&[], 5.0), None);
+    }
+
+    // ---- container-detail drawer helpers -------------------------------
+
+    #[test]
+    fn parse_published_ports_links_only_tcp() {
+        let links = parse_published_ports(&[
+            "0.0.0.0:8080->80/tcp".to_string(),
+            ":::9090->90/tcp".to_string(),
+            "0.0.0.0:53->53/udp".to_string(),
+            "80/tcp".to_string(),
+        ]);
+        assert_eq!(links[0].href.as_deref(), Some("http://localhost:8080"));
+        assert!(links[0].display.starts_with("localhost:8080"));
+        // IPv6 host mapping still resolves the trailing port.
+        assert_eq!(links[1].href.as_deref(), Some("http://localhost:9090"));
+        // udp is published but never gets an http link.
+        assert_eq!(links[2].href, None);
+        assert!(links[2].display.starts_with("localhost:53"));
+        // Unpublished container port renders verbatim, no link.
+        assert_eq!(links[3].href, None);
+        assert_eq!(links[3].display, "80/tcp");
+    }
+
+    #[test]
+    fn parse_published_ports_handles_empty_and_bare() {
+        assert!(parse_published_ports(&[]).is_empty());
+        let links = parse_published_ports(&["garbage".to_string()]);
+        assert_eq!(links[0].href, None);
+        assert_eq!(links[0].display, "garbage");
+    }
+
+    #[test]
+    fn log_line_is_stderr_matches_stream_tag() {
+        assert!(log_line_is_stderr("[stderr] boom"));
+        assert!(!log_line_is_stderr("[stdout] ok"));
+        assert!(!log_line_is_stderr("plain line"));
+    }
+
+    #[test]
+    fn split_log_lines_drops_blanks() {
+        assert_eq!(split_log_lines(""), Vec::<String>::new());
+        assert_eq!(split_log_lines("a\n\nb\n"), vec!["a", "b"]);
+        assert_eq!(split_log_lines("single"), vec!["single"]);
+    }
+
+    #[test]
+    fn cumulative_to_delta_diffs_and_clamps() {
+        // Fewer than two points → flat-zero baseline.
+        assert_eq!(cumulative_to_delta(&[]), Vec::<(f64, f64)>::new());
+        assert_eq!(cumulative_to_delta(&[(1.0, 500.0)]), vec![(1.0, 0.0)]);
+        // Normal increasing counter → per-interval deltas keyed on the later ts.
+        assert_eq!(
+            cumulative_to_delta(&[(1.0, 100.0), (2.0, 250.0), (3.0, 300.0)]),
+            vec![(2.0, 150.0), (3.0, 50.0)]
+        );
+        // Counter reset (v decreases) clamps the delta to zero.
+        assert_eq!(
+            cumulative_to_delta(&[(1.0, 900.0), (2.0, 10.0)]),
+            vec![(2.0, 0.0)]
+        );
     }
 }

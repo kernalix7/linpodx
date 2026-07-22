@@ -16,10 +16,14 @@
 
 use gloo_storage::Storage;
 use leptos::prelude::*;
+use wasm_bindgen::closure::Closure;
+use wasm_bindgen::JsCast;
+use wasm_bindgen_futures::spawn_local;
 
 use crate::components::{
-    AuditFeed, ClusterView, ContainerList, Icon, ImageList, NetworkList, PinnedClientsView,
-    PluginsView, SandboxList, SessionTimeline, SnapshotTree, VolumeList,
+    AuditFeed, ClusterView, CommandPalette, ContainerDetail, ContainerList, Dashboard,
+    DashboardShared, Icon, ImageList, NetworkList, PinnedClientsView, PluginsView, SandboxList,
+    SessionTimeline, Settings, SnapshotTree, Sparkline, VolumeList,
 };
 
 const TOKEN_KEY: &str = "linpodx_token";
@@ -27,6 +31,8 @@ const THEME_KEY: &str = "linpodx_theme";
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Tab {
+    /// App-shell v5 — the at-a-glance home the SPA opens to (new default).
+    Dashboard,
     Containers,
     Images,
     Volumes,
@@ -40,11 +46,14 @@ pub enum Tab {
     PinnedClients,
     /// Phase 17 — plugin key registry + cluster-wide revocation.
     Plugins,
+    /// App-shell v5 — daemon info + doctor diagnostics.
+    Settings,
 }
 
 impl Tab {
     fn label(self) -> &'static str {
         match self {
+            Tab::Dashboard => "Dashboard",
             Tab::Containers => "Containers",
             Tab::Images => "Images",
             Tab::Volumes => "Volumes",
@@ -56,12 +65,16 @@ impl Tab {
             Tab::Cluster => "Cluster",
             Tab::PinnedClients => "Pinned Clients",
             Tab::Plugins => "Plugins",
+            Tab::Settings => "Settings",
         }
     }
 
-    /// Icon name understood by [`crate::components::Icon`].
+    /// Icon name understood by [`crate::components::Icon`]. Unknown names fall
+    /// back to a neutral dot (see `icons.rs`), so `"dashboard"` is safe even
+    /// before a bespoke glyph exists.
     fn icon(self) -> &'static str {
         match self {
+            Tab::Dashboard => "dashboard",
             Tab::Containers => "container",
             Tab::Images => "image",
             Tab::Volumes => "volume",
@@ -73,10 +86,12 @@ impl Tab {
             Tab::Cluster => "daemon",
             Tab::PinnedClients => "pin",
             Tab::Plugins => "plugin",
+            Tab::Settings => "settings",
         }
     }
 
-    const ALL: [Tab; 11] = [
+    const ALL: [Tab; 13] = [
+        Tab::Dashboard,
         Tab::Containers,
         Tab::Images,
         Tab::Volumes,
@@ -88,6 +103,7 @@ impl Tab {
         Tab::Cluster,
         Tab::PinnedClients,
         Tab::Plugins,
+        Tab::Settings,
     ];
 }
 
@@ -95,6 +111,19 @@ impl Tab {
 /// fetches will surface an auth-needed message".
 #[derive(Clone, Copy)]
 pub struct AuthToken(pub RwSignal<Option<String>>);
+
+/// Navigation handle — lets overlay components (command palette, dashboard
+/// quick actions) switch the active tab without threading props everywhere.
+#[derive(Clone, Copy)]
+pub struct Nav(pub RwSignal<Tab>);
+
+/// Detail-drawer host slot. `Some(container_id)` opens the right slide-over;
+/// this crate renders the host shell + backdrop and owns the open/close +
+/// deep-link `#container/<id>` sync — the drawer *body* (tabs) is filled by the
+/// container-drawer component another agent provides, which consumes this
+/// context.
+#[derive(Clone, Copy)]
+pub struct DrawerState(pub RwSignal<Option<String>>);
 
 /// Pull a `?token=<t>` bearer token out of the current URL, if present.
 ///
@@ -136,9 +165,133 @@ fn apply_theme(theme: &str) {
     let _ = gloo_storage::LocalStorage::set(THEME_KEY, theme);
 }
 
+/// Resolve after `ms` milliseconds via `window.setTimeout` — a `gloo-timers`-free
+/// sleep so the metrics poll loop can `await` between ticks.
+async fn sleep_ms(ms: i32) {
+    let promise = js_sys::Promise::new(&mut |resolve, _reject| {
+        if let Some(win) = web_sys::window() {
+            let _ = win.set_timeout_with_callback_and_timeout_and_arguments_0(&resolve, ms);
+        }
+    });
+    let _ = wasm_bindgen_futures::JsFuture::from(promise).await;
+}
+
+/// Push a sample onto a fixed-capacity (60) ring buffer signal.
+fn push_ring(sig: RwSignal<Vec<(f64, f64)>>, ts: f64, val: f64) {
+    sig.update(|buf| {
+        buf.push((ts, val));
+        if buf.len() > 60 {
+            let excess = buf.len() - 60;
+            buf.drain(0..excess);
+        }
+    });
+}
+
+/// A container is "running" if its status string reads like podman's `Up …` /
+/// `running`. The metrics endpoint only has samples for running containers, so
+/// this keeps us from polling stopped ones.
+fn is_running(status: &str) -> bool {
+    let s = status.to_lowercase();
+    s.contains("up") || s.contains("running")
+}
+
+/// The single app-wide metrics poll loop. Every 2 s it lists containers,
+/// updates the shared running/total counts, sums `cpu_pct` / `mem_bytes` across
+/// running containers and pushes one aggregate sample into each ring. Both the
+/// dashboard charts and the status-footer sparkline read these rings, so the
+/// poll happens exactly once.
+fn start_metrics_loop(shared: DashboardShared, token: RwSignal<Option<String>>) {
+    spawn_local(async move {
+        loop {
+            match token.get_untracked() {
+                None => shared.connected.set(false),
+                Some(tok) => match crate::ws::fetch_list("containers?all=true", &tok).await {
+                    Ok(v) => {
+                        shared.connected.set(true);
+                        // Fetch the version once (cheap composite endpoint).
+                        if shared.version.get_untracked().is_empty() {
+                            if let Ok(info) = crate::api_client::fetch_system_info(&tok).await {
+                                if let Some(ver) =
+                                    info.get("linpodx_version").and_then(|s| s.as_str())
+                                {
+                                    shared.version.set(ver.to_string());
+                                }
+                            }
+                        }
+                        let arr = v.as_array().cloned().unwrap_or_default();
+                        shared.total.set(arr.len() as u32);
+                        let running_ids: Vec<String> = arr
+                            .iter()
+                            .filter(|c| {
+                                c.get("status")
+                                    .and_then(|s| s.as_str())
+                                    .map(is_running)
+                                    .unwrap_or(false)
+                            })
+                            .filter_map(|c| {
+                                c.get("id").and_then(|x| x.as_str()).map(str::to_string)
+                            })
+                            .collect();
+                        shared.running.set(running_ids.len() as u32);
+
+                        let mut cpu_sum = 0.0_f64;
+                        let mut mem_sum = 0.0_f64;
+                        for id in &running_ids {
+                            if let Ok(m) = crate::api_client::fetch_metrics_latest(id, &tok).await {
+                                if let Some(c) = m.get("cpu_pct").and_then(|x| x.as_f64()) {
+                                    cpu_sum += c;
+                                }
+                                if let Some(mm) = m.get("mem_bytes").and_then(|x| x.as_f64()) {
+                                    mem_sum += mm;
+                                }
+                            }
+                        }
+                        let now = js_sys::Date::now() / 1000.0;
+                        push_ring(shared.agg_cpu, now, cpu_sum * 100.0);
+                        push_ring(shared.agg_mem, now, mem_sum);
+                    }
+                    Err(_) => shared.connected.set(false),
+                },
+            }
+            sleep_ms(2_000).await;
+        }
+    });
+}
+
+/// Parse a `#container/<id>[/<tab>]` deep-link fragment into the drawer target
+/// container id. Returns `None` for any other fragment shape.
+fn drawer_id_from_hash(hash: &str) -> Option<String> {
+    let frag = hash.trim_start_matches('#');
+    let mut parts = frag.splitn(3, '/');
+    match (parts.next(), parts.next()) {
+        (Some("container"), Some(id)) if !id.is_empty() => Some(id.to_string()),
+        _ => None,
+    }
+}
+
+/// Read the current `location.hash`.
+fn current_hash() -> String {
+    web_sys::window()
+        .and_then(|w| w.location().hash().ok())
+        .unwrap_or_default()
+}
+
+/// Write (or clear) the drawer deep-link fragment without triggering a reload.
+fn set_drawer_hash(target: Option<&str>) {
+    if let Some(win) = web_sys::window() {
+        let next = match target {
+            Some(id) => format!("#container/{id}"),
+            None => String::new(),
+        };
+        if current_hash() != next {
+            let _ = win.location().set_hash(&next);
+        }
+    }
+}
+
 #[component]
 pub fn AppRoot() -> impl IntoView {
-    let active = RwSignal::new(Tab::Containers);
+    let active = RwSignal::new(Tab::Dashboard);
     let collapsed = RwSignal::new(false);
     let theme = RwSignal::new(current_theme());
 
@@ -163,6 +316,63 @@ pub fn AppRoot() -> impl IntoView {
     });
     let token = RwSignal::new(initial_token);
     provide_context(AuthToken(token));
+
+    // Navigation + detail-drawer + shared live-metrics contexts.
+    provide_context(Nav(active));
+    let drawer = RwSignal::new(None::<String>);
+    provide_context(DrawerState(drawer));
+    let shared = DashboardShared::new();
+    provide_context(shared);
+
+    // Pre-open the drawer from a `#container/<id>` deep-link on first load.
+    if let Some(id) = drawer_id_from_hash(&current_hash()) {
+        drawer.set(Some(id));
+    }
+
+    // Keep the URL fragment in sync with the drawer state (deep-linking).
+    Effect::new(move |_| {
+        set_drawer_hash(drawer.get().as_deref());
+    });
+
+    // React to browser back/forward (hashchange) by re-syncing the drawer.
+    {
+        let cb = Closure::<dyn Fn()>::new(move || {
+            let next = drawer_id_from_hash(&current_hash());
+            if drawer.get_untracked() != next {
+                drawer.set(next);
+            }
+        });
+        if let Some(win) = web_sys::window() {
+            let _ = win.add_event_listener_with_callback("hashchange", cb.as_ref().unchecked_ref());
+        }
+        cb.forget();
+    }
+
+    // The single app-wide metrics poll loop feeding dashboard + footer.
+    start_metrics_loop(shared, token);
+
+    // Command palette open-state + global Cmd/Ctrl-K + Escape keydown.
+    let palette_open = RwSignal::new(false);
+    {
+        let cb =
+            Closure::<dyn Fn(web_sys::KeyboardEvent)>::new(move |ev: web_sys::KeyboardEvent| {
+                let key = ev.key();
+                if key == "k" && (ev.meta_key() || ev.ctrl_key()) {
+                    ev.prevent_default();
+                    palette_open.update(|o| *o = !*o);
+                } else if key == "Escape" {
+                    if palette_open.get_untracked() {
+                        palette_open.set(false);
+                    } else if drawer.get_untracked().is_some() {
+                        drawer.set(None);
+                    }
+                }
+            });
+        if let Some(win) = web_sys::window() {
+            let _ = win.add_event_listener_with_callback("keydown", cb.as_ref().unchecked_ref());
+        }
+        cb.forget();
+    }
 
     let prompt_token = move |_| {
         let window = match web_sys::window() {
@@ -283,6 +493,7 @@ pub fn AppRoot() -> impl IntoView {
 
                 <main class="content">
                     {move || match active.get() {
+                        Tab::Dashboard => view! { <Dashboard/> }.into_any(),
                         Tab::Containers => view! { <ContainerList/> }.into_any(),
                         Tab::Images => view! { <ImageList/> }.into_any(),
                         Tab::Volumes => view! { <VolumeList/> }.into_any(),
@@ -294,14 +505,81 @@ pub fn AppRoot() -> impl IntoView {
                         Tab::Cluster => view! { <ClusterView/> }.into_any(),
                         Tab::PinnedClients => view! { <PinnedClientsView/> }.into_any(),
                         Tab::Plugins => view! { <PluginsView/> }.into_any(),
+                        Tab::Settings => view! { <Settings/> }.into_any(),
                     }}
                 </main>
 
-                <footer class="statusbar">
-                    <span>"linpodx web UI"</span>
-                    <span>"leptos SPA"</span>
-                </footer>
+                <StatusFooter shared=shared token=token/>
             </div>
+
+            // Detail-drawer host — a right-anchored slide-over + backdrop. The
+            // body (tabs) is filled by the container-drawer component another
+            // agent mounts against the same `DrawerState` context.
+            <Show when=move || drawer.get().is_some() fallback=|| view! { <></> }>
+                <div class="drawer-backdrop" on:click=move |_| drawer.set(None)></div>
+                <aside class="drawer">
+                    <div class="drawer-head">
+                        <span class="mono">
+                            {move || drawer.get().unwrap_or_default()}
+                        </span>
+                        <button
+                            type="button"
+                            class="btn btn--icon btn--sm"
+                            aria-label="Close drawer"
+                            on:click=move |_| drawer.set(None)
+                        >
+                            <Icon name="close"/>
+                        </button>
+                    </div>
+                    <div class="drawer-body" id="drawer-host-slot">
+                        <ContainerDetail/>
+                    </div>
+                </aside>
+            </Show>
+
+            <CommandPalette open=palette_open/>
         </div>
+    }
+}
+
+/// Live status footer — daemon health dot, version, running/total and an
+/// aggregate CPU sparkline. All read-only, sourced from the shared metrics
+/// context so nothing here re-polls.
+#[component]
+fn StatusFooter(shared: DashboardShared, token: RwSignal<Option<String>>) -> impl IntoView {
+    let health = move || {
+        if token.get().is_none() {
+            ("dot dot--warn", "no token".to_string())
+        } else if shared.connected.get() {
+            ("dot dot--success", "connected".to_string())
+        } else {
+            ("dot dot--danger", "unreachable".to_string())
+        }
+    };
+    let version = move || {
+        let v = shared.version.get();
+        if v.is_empty() {
+            "—".to_string()
+        } else {
+            format!("v{v}")
+        }
+    };
+    let counts = move || {
+        let r = shared.running.get();
+        let t = shared.total.get();
+        format!("{r}/{t} running")
+    };
+    view! {
+        <footer class="statusbar">
+            <span class="statusbar-metric">
+                <span class=move || health().0></span>
+                {move || health().1}
+            </span>
+            <span class="statusbar-metric mono">{version}</span>
+            <span class="statusbar-metric mono">{counts}</span>
+            <span class="statusbar-metric">
+                <Sparkline data=Signal::derive(move || shared.agg_cpu.get())/>
+            </span>
+        </footer>
     }
 }

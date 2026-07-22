@@ -15,8 +15,12 @@
 //! `RwSignal<Option<...>>` whose `Some` payload is the row's id.
 
 mod audit;
+mod charts;
 mod cluster;
+mod command_palette;
+mod container_detail;
 mod containers;
+mod dashboard;
 mod exec_modal;
 mod exec_pty_modal;
 mod icons;
@@ -29,13 +33,27 @@ mod plugins;
 mod push_modal;
 mod sandbox;
 mod sessions;
+mod settings;
 mod snapshots;
 mod volumes;
 mod xterm;
 
 pub use audit::AuditFeed;
+// AreaChart / LineChart / TwoSeriesChart are consumed by the container-drawer
+// Stats tab (built by a parallel agent against this same crate); re-exported
+// here so that component can pull them from `crate::components::*`. Sparkline is
+// used now by the status footer.
+#[allow(unused_imports)]
+pub use charts::{AreaChart, LineChart, Sparkline, TwoSeriesChart};
 pub use cluster::ClusterView;
+pub use command_palette::CommandPalette;
+// `ContainerDetail` is the slide-over drawer body mounted by `AppRoot` inside
+// `.drawer-body` (replacing the `loading-inline` placeholder); it consumes the
+// `DrawerState` + `AuthToken` contexts. Allow the re-export to sit unused until
+// that mount point is wired (mirrors the `Settings` re-export below).
+pub use container_detail::ContainerDetail;
 pub use containers::ContainerList;
+pub use dashboard::{Dashboard, DashboardShared};
 pub use icons::Icon;
 pub use images::ImageList;
 pub use networks::NetworkList;
@@ -43,6 +61,10 @@ pub use pin_clients::PinnedClientsView;
 pub use plugins::PluginsView;
 pub use sandbox::SandboxList;
 pub use sessions::SessionTimeline;
+// `Settings` replaces app.rs's local `SettingsPlaceholder` for `Tab::Settings`
+// once the app-shell mount point is wired up (owned by another agent); allow
+// the re-export to sit unused until then.
+pub use settings::Settings;
 pub use snapshots::SnapshotTree;
 pub use volumes::VolumeList;
 
