@@ -279,12 +279,14 @@ fn delegation_check_from(id: &str, label: &str, content: &str) -> DoctorCheck {
             id,
             label,
             format!(
-                "user service delegates only [{}] — missing [{}]; container memory/cpu \
-                 stats will read 0",
+                "user service delegates only [{}] — missing [{}]; linpodx approximates \
+                 container memory from per-process PSS (works, but memory limits are \
+                 invisible and podman's own `stats` reads 0)",
                 controllers.join(" "),
                 missing.join(" ")
             ),
-            "create /etc/systemd/system/user@.service.d/delegate.conf with \
+            "for exact cgroup accounting create \
+             /etc/systemd/system/user@.service.d/delegate.conf with \
              `[Service]\\nDelegate=cpu cpuset io memory pids`, run \
              `systemctl daemon-reload`, then log out and back in and restart \
              your containers",

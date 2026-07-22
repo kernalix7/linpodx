@@ -379,10 +379,15 @@ fn sample_from_roots(
     let cpu_stat = std::fs::read_to_string(cgroup_dir.join("cpu.stat")).ok();
     let _cpu_usec = cpu_stat.as_deref().and_then(parse_usage_usec).unwrap_or(0);
 
-    let mem_bytes = std::fs::read_to_string(cgroup_dir.join("memory.current"))
-        .ok()
-        .and_then(|s| s.trim().parse::<u64>().ok())
-        .unwrap_or(0);
+    let mem_bytes = match std::fs::read_to_string(cgroup_dir.join("memory.current")) {
+        Ok(s) => s.trim().parse::<u64>().unwrap_or(0),
+        // The memory controller isn't delegated (common rootless default is
+        // `Delegate=pids` only), so `memory.current` does not exist anywhere in
+        // the container's subtree. Approximate from the pids controller we DO
+        // have: sum PSS (fallback RSS) over every process in the container's
+        // scope. PSS prorates shared pages, so the sum stays honest.
+        Err(_) => procfs_mem_fallback(proc_root, &cgroup_dir).unwrap_or(0),
+    };
 
     let mem_limit = std::fs::read_to_string(cgroup_dir.join("memory.max"))
         .ok()
@@ -409,6 +414,83 @@ fn sample_from_roots(
         block_in: 0,
         block_out: 0,
     })
+}
+
+/// Userspace memory approximation for hosts without memory-controller
+/// delegation. Walks the container's scope subtree (starting from the
+/// `libpod-*.scope` ancestor of the sampled cgroup when present, else the
+/// sampled cgroup itself), collects every pid from `cgroup.procs`, and sums
+/// per-process PSS from `smaps_rollup` (falling back to `VmRSS` from `status`
+/// when `smaps_rollup` is unreadable). Returns `None` when no process could be
+/// measured, so callers can distinguish "no data" from a genuine 0.
+fn procfs_mem_fallback(proc_root: &Path, cgroup_dir: &Path) -> Option<u64> {
+    let walk_root = libpod_scope_ancestor(cgroup_dir).unwrap_or_else(|| cgroup_dir.to_path_buf());
+    let mut total: u64 = 0;
+    let mut counted = false;
+    for dir in walk_cgroup_dirs(&walk_root, 6) {
+        let Ok(procs) = std::fs::read_to_string(dir.join("cgroup.procs")) else {
+            continue;
+        };
+        for pid in procs.lines().filter_map(|l| l.trim().parse::<u32>().ok()) {
+            if let Some(bytes) = mem_bytes_for_pid(proc_root, pid) {
+                total = total.saturating_add(bytes);
+                counted = true;
+            }
+        }
+    }
+    counted.then_some(total)
+}
+
+/// Nearest ancestor path component named `libpod-*.scope` (podman's per-container
+/// systemd scope), so the walk covers sibling cgroups of the sampled leaf (e.g.
+/// systemd-in-container splits processes across `init.scope`/`system.slice`).
+fn libpod_scope_ancestor(cgroup_dir: &Path) -> Option<PathBuf> {
+    let mut current = cgroup_dir;
+    loop {
+        let name = current.file_name()?.to_string_lossy();
+        if name.starts_with("libpod-") && name.ends_with(".scope") {
+            return Some(current.to_path_buf());
+        }
+        current = current.parent()?;
+    }
+}
+
+/// Depth-limited recursive listing of a cgroup directory and its sub-cgroups.
+fn walk_cgroup_dirs(root: &Path, depth_left: u32) -> Vec<PathBuf> {
+    let mut out = vec![root.to_path_buf()];
+    if depth_left == 0 {
+        return out;
+    }
+    if let Ok(entries) = std::fs::read_dir(root) {
+        for entry in entries.flatten() {
+            let p = entry.path();
+            if p.is_dir() {
+                out.extend(walk_cgroup_dirs(&p, depth_left - 1));
+            }
+        }
+    }
+    out
+}
+
+/// Per-process memory: PSS (shared pages prorated) when `smaps_rollup` is
+/// readable, else VmRSS. Values in the source files are kB.
+fn mem_bytes_for_pid(proc_root: &Path, pid: u32) -> Option<u64> {
+    let base = proc_root.join(pid.to_string());
+    if let Ok(rollup) = std::fs::read_to_string(base.join("smaps_rollup")) {
+        if let Some(kb) = parse_kb_field(&rollup, "Pss:") {
+            return Some(kb.saturating_mul(1024));
+        }
+    }
+    let status = std::fs::read_to_string(base.join("status")).ok()?;
+    parse_kb_field(&status, "VmRSS:").map(|kb| kb.saturating_mul(1024))
+}
+
+/// Extract the numeric kB value from a `Key:   1234 kB` procfs line.
+fn parse_kb_field(text: &str, key: &str) -> Option<u64> {
+    text.lines()
+        .find(|l| l.starts_with(key))
+        .and_then(|l| l.split_whitespace().nth(1))
+        .and_then(|v| v.parse::<u64>().ok())
 }
 
 /// Read `<proc_root>/<pid>/cgroup` and return the v2 unified cgroup path (the line
@@ -926,6 +1008,58 @@ mod tests {
 
         let s = sample_from_roots(proc_dir.path(), cgroup_dir.path(), pid, "c").expect("sample");
         assert_eq!(s.mem_limit, None);
+    }
+
+    #[test]
+    fn procfs_fallback_sums_pss_when_memory_controller_missing() {
+        let proc_dir = tempfile::tempdir().unwrap();
+        let cgroup_dir = tempfile::tempdir().unwrap();
+        let pid: u32 = 11;
+        let pid_dir = proc_dir.path().join(format!("{pid}"));
+        std::fs::create_dir_all(pid_dir.join("net")).unwrap();
+        std::fs::write(pid_dir.join("cgroup"), "0::/libpod-abc.scope/container\n").unwrap();
+        std::fs::write(pid_dir.join("net/dev"), "Inter-|\nface |\n").unwrap();
+        // Two processes in the scope: pid 11 (smaps_rollup Pss) + pid 12
+        // (no smaps_rollup -> VmRSS fallback), pid 12 in a SIBLING cgroup so
+        // the libpod-scope ancestor walk is exercised.
+        std::fs::write(pid_dir.join("smaps_rollup"), "Pss:      10 kB\n").unwrap();
+        let pid12_dir = proc_dir.path().join("12");
+        std::fs::create_dir_all(&pid12_dir).unwrap();
+        std::fs::write(pid12_dir.join("status"), "Name:\tx\nVmRSS:\t     5 kB\n").unwrap();
+
+        // cgroup tree WITHOUT memory.current anywhere (pids-only delegation).
+        let scope = cgroup_dir.path().join("libpod-abc.scope");
+        let leaf = scope.join("container");
+        let sibling = scope.join("init.scope");
+        std::fs::create_dir_all(&leaf).unwrap();
+        std::fs::create_dir_all(&sibling).unwrap();
+        std::fs::write(leaf.join("cpu.stat"), "usage_usec 1\n").unwrap();
+        std::fs::write(leaf.join("cgroup.procs"), "11\n").unwrap();
+        std::fs::write(sibling.join("cgroup.procs"), "12\n").unwrap();
+
+        let s = sample_from_roots(proc_dir.path(), cgroup_dir.path(), pid, "c").expect("sample");
+        assert_eq!(s.mem_bytes, 15 * 1024, "10kB Pss + 5kB VmRSS");
+        assert_eq!(s.mem_limit, None);
+    }
+
+    #[test]
+    fn parse_kb_field_extracts_value() {
+        assert_eq!(
+            parse_kb_field("Pss:            1234 kB\n", "Pss:"),
+            Some(1234)
+        );
+        assert_eq!(parse_kb_field("VmRSS:\t  77 kB\n", "VmRSS:"), Some(77));
+        assert_eq!(parse_kb_field("nothing here\n", "Pss:"), None);
+    }
+
+    #[test]
+    fn libpod_scope_ancestor_finds_scope() {
+        let p = Path::new("/sys/fs/cgroup/user.slice/libpod-deadbeef.scope/container");
+        assert_eq!(
+            libpod_scope_ancestor(p).unwrap().file_name().unwrap(),
+            "libpod-deadbeef.scope"
+        );
+        assert!(libpod_scope_ancestor(Path::new("/sys/fs/cgroup/user.slice")).is_none());
     }
 
     #[test]
