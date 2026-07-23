@@ -76,6 +76,7 @@ pub(crate) enum NetworkEgressCmd {
 pub(crate) async fn handle_network(
     client: &mut Client,
     fmt: OutputFormat,
+    profiles_dir_override: Option<PathBuf>,
     cmd: NetworkCmd,
 ) -> Result<()> {
     match cmd {
@@ -130,7 +131,8 @@ pub(crate) async fn handle_network(
             )?;
         }
         NetworkCmd::Egress(NetworkEgressCmd::Set { domains, profile }) => {
-            handle_network_egress_set(client, &profile, &domains).await?;
+            handle_network_egress_set(client, &profile, &domains, profiles_dir_override.as_deref())
+                .await?;
         }
         NetworkCmd::Egress(NetworkEgressCmd::Status { profile }) => {
             handle_network_egress_status(client, &profile).await?;
@@ -143,10 +145,8 @@ async fn handle_network_egress_set(
     client: &mut Client,
     profile: &str,
     domains: &[String],
+    profiles_dir_override: Option<&std::path::Path>,
 ) -> Result<()> {
-    let cli_profiles_dir = std::env::var("LINPODX_SANDBOX_PROFILES_DIR")
-        .ok()
-        .map(PathBuf::from);
     let mut value = fetch_profile_yaml(client, profile).await?;
     let domains_clean: Vec<String> = domains
         .iter()
@@ -174,7 +174,7 @@ async fn handle_network_egress_set(
         serde_norway::Value::String("network".into()),
         serde_norway::Value::Mapping(net_map),
     );
-    persist_profile_and_reload(client, profile, cli_profiles_dir.as_deref(), &value).await?;
+    persist_profile_and_reload(client, profile, profiles_dir_override, &value).await?;
     println!(
         "{}: egress allowlist set ({} domain(s))",
         profile,

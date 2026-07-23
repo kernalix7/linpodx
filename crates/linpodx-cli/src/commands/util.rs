@@ -72,15 +72,24 @@ pub(crate) fn default_profiles_dir() -> PathBuf {
     base.join("linpodx").join("profiles")
 }
 
+/// Resolve the sandbox profiles directory to use for a client-side
+/// write-back, applying precedence: an explicit `--profiles-dir` /
+/// `LINPODX_SANDBOX_PROFILES_DIR`-populated CLI flag (`profiles_dir_override`,
+/// threaded in from `Cli::profiles_dir`) always wins; only when it is `None`
+/// do we fall back to [`default_profiles_dir`]'s own env/XDG heuristic.
+pub(crate) fn resolve_profiles_dir(profiles_dir_override: Option<&Path>) -> PathBuf {
+    profiles_dir_override
+        .map(PathBuf::from)
+        .unwrap_or_else(default_profiles_dir)
+}
+
 pub(crate) async fn persist_profile_and_reload(
     client: &mut Client,
     profile: &str,
     profiles_dir_override: Option<&Path>,
     value: &serde_norway::Value,
 ) -> Result<()> {
-    let dir = profiles_dir_override
-        .map(PathBuf::from)
-        .unwrap_or_else(default_profiles_dir);
+    let dir = resolve_profiles_dir(profiles_dir_override);
     std::fs::create_dir_all(&dir)
         .with_context(|| format!("creating profiles dir {}", dir.display()))?;
 
@@ -101,4 +110,57 @@ pub(crate) fn pick_profile_path(dir: &Path, profile: &str) -> PathBuf {
         }
     }
     dir.join(format!("{profile}.yaml"))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::sync::Mutex;
+
+    // `default_profiles_dir` reads process-global env vars; serialize the
+    // tests that touch them so parallel `cargo test` threads don't race.
+    static ENV_LOCK: Mutex<()> = Mutex::new(());
+
+    #[test]
+    fn resolve_profiles_dir_prefers_explicit_override_over_env_default() {
+        let _guard = ENV_LOCK.lock().unwrap();
+        // Even with the env var populated (as clap's `env = ...` fallback
+        // would leave it for a flag-only invocation), an explicit override
+        // — e.g. `cli.profiles_dir` threaded in from a `--profiles-dir` flag
+        // — must win. This is the exact precedence the `network egress set`
+        // handler was previously getting wrong by reading the env var
+        // directly instead of accepting the resolved CLI value.
+        std::env::set_var("LINPODX_SANDBOX_PROFILES_DIR", "/env/wrong/dir");
+        let resolved = resolve_profiles_dir(Some(Path::new("/explicit/override/dir")));
+        std::env::remove_var("LINPODX_SANDBOX_PROFILES_DIR");
+        assert_eq!(resolved, PathBuf::from("/explicit/override/dir"));
+    }
+
+    #[test]
+    fn resolve_profiles_dir_falls_back_to_env_default_when_no_override() {
+        let _guard = ENV_LOCK.lock().unwrap();
+        std::env::set_var("LINPODX_SANDBOX_PROFILES_DIR", "/env/default/dir");
+        let resolved = resolve_profiles_dir(None);
+        std::env::remove_var("LINPODX_SANDBOX_PROFILES_DIR");
+        assert_eq!(resolved, PathBuf::from("/env/default/dir"));
+    }
+
+    #[test]
+    fn resolve_profiles_dir_falls_back_to_xdg_when_nothing_set() {
+        let _guard = ENV_LOCK.lock().unwrap();
+        let prior_env = std::env::var("LINPODX_SANDBOX_PROFILES_DIR").ok();
+        std::env::remove_var("LINPODX_SANDBOX_PROFILES_DIR");
+        std::env::set_var("XDG_CONFIG_HOME", "/xdg/config");
+        let resolved = resolve_profiles_dir(None);
+        std::env::remove_var("XDG_CONFIG_HOME");
+        if let Some(v) = prior_env {
+            std::env::set_var("LINPODX_SANDBOX_PROFILES_DIR", v);
+        }
+        assert_eq!(
+            resolved,
+            PathBuf::from("/xdg/config")
+                .join("linpodx")
+                .join("profiles")
+        );
+    }
 }

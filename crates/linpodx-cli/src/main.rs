@@ -452,7 +452,13 @@ async fn main() -> Result<()> {
             crate::commands::volume::handle_volume(&mut client, cli.output, cmd).await?
         }
         Cmd::Network(cmd) => {
-            crate::commands::network::handle_network(&mut client, cli.output, cmd).await?
+            crate::commands::network::handle_network(
+                &mut client,
+                cli.output,
+                cli.profiles_dir.clone(),
+                cmd,
+            )
+            .await?
         }
         Cmd::Pod(cmd) => crate::commands::pod::handle_pod(&mut client, cli.output, cmd).await?,
         Cmd::Sandbox(cmd) => {
