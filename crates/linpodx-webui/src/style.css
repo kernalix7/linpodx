@@ -3075,3 +3075,68 @@ mark.log-hl--active,
     scroll-behavior: auto !important;
   }
 }
+
+/* ==========================================================================
+ * V6.1 — fable direct-review polish pass
+ * ========================================================================== */
+
+/* Page heads get a soft section-tinted wash so each page opens with its
+ * section's identity instead of bare text on bg. --section-soft resolves via
+ * the .section-scope--* wrapper (root fallback = home accent). */
+.page-head {
+  padding: var(--sp-4);
+  margin: 0 0 var(--sp-5);
+  border-radius: var(--r-xl);
+  background: linear-gradient(180deg, var(--section-soft), transparent 78%);
+}
+
+/* Collapsed rail: section heads vanish, so draw hairline group separators to
+ * keep the 5-section rhythm readable as icon clusters. */
+.sidebar--collapsed .nav-section__head {
+  display: none;
+}
+.sidebar--collapsed .nav-section + .nav-section {
+  border-top: 1px solid var(--color-border);
+  margin-top: var(--sp-2);
+  padding-top: var(--sp-2);
+}
+
+/* Topbar daemon-health pill — engine state at eye level (Docker Desktop
+ * habit), mirrors the status-footer dot without re-polling. */
+.topbar-health {
+  display: inline-flex;
+  align-items: center;
+  gap: var(--sp-2);
+  padding: var(--sp-1) var(--sp-3);
+  border: 1px solid var(--color-border);
+  border-radius: var(--r-full);
+  background: var(--color-surface);
+  font-size: var(--fs-xs);
+  color: var(--color-text-secondary);
+}
+.topbar-health__text {
+  font-variant-numeric: tabular-nums;
+}
+
+/* Cards and hero tiles lift subtly on hover — the whole UI answers the
+ * pointer instead of sitting flat. */
+.surface-card,
+.mgmt-card,
+.hero-counts__tile {
+  transition:
+    transform var(--motion-fast) var(--ease),
+    box-shadow var(--motion-fast) var(--ease);
+}
+.surface-card:hover,
+.mgmt-card:hover,
+.hero-counts__tile:hover {
+  transform: translateY(-1px);
+  box-shadow: var(--e-2);
+}
+@media (prefers-reduced-motion: reduce) {
+  .surface-card:hover,
+  .mgmt-card:hover,
+  .hero-counts__tile:hover {
+    transform: none;
+  }
+}

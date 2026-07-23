@@ -726,7 +726,9 @@ pub fn AppRoot() -> impl IntoView {
                                 <button
                                     type="button"
                                     class=cls
-                                    title=t.label()
+                                    // Section-qualified so the collapsed 60px rail
+                                    // (labels hidden) still tells you where you are.
+                                    title=format!("{} · {}", sec.label(), t.label())
                                     on:click=move |_| active.set(t)
                                 >
                                     <span class="nav-item__icon"><Icon name=t.icon()/></span>
@@ -770,7 +772,12 @@ pub fn AppRoot() -> impl IntoView {
                     }).collect_view()}
                 </nav>
                 <div class="sidebar-foot">
-                    <span class="sidebar-foot__text">"read-only · use CLI to mutate"</span>
+                    <span class="sidebar-foot__text">
+                        {move || {
+                            let v = shared.version.get();
+                            if v.is_empty() { "linpodx".to_string() } else { format!("linpodx v{v}") }
+                        }}
+                    </span>
                 </div>
             </aside>
 
@@ -792,6 +799,23 @@ pub fn AppRoot() -> impl IntoView {
                         <span class="topbar-crumb__page">{move || active.get().label()}</span>
                     </div>
                     <div class="topbar-actions">
+                        <div
+                            class="topbar-health"
+                            title="Daemon connection · running/total containers"
+                        >
+                            <span class=move || {
+                                if token.get().is_none() {
+                                    "dot dot--warn"
+                                } else if shared.connected.get() {
+                                    "dot dot--success"
+                                } else {
+                                    "dot dot--danger"
+                                }
+                            }></span>
+                            <span class="topbar-health__text">
+                                {move || format!("{}/{}", shared.running.get(), shared.total.get())}
+                            </span>
+                        </div>
                         <div class="create-split">
                             <button
                                 type="button"
