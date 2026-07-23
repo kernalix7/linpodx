@@ -79,6 +79,7 @@ pub fn build_auto_encrypt_body(enabled: bool) -> Value {
 /// rename is caught by `paths_v5_are_stable`.
 pub mod paths_v5 {
     pub const CONTAINER_CREATE: &str = "/api/v1/containers/create";
+    pub const CONTAINER_UPDATE: &str = "/api/v1/containers/{id}/update";
     pub const SYSTEM_DF: &str = "/api/v1/system/df";
     pub const SYSTEM_INFO: &str = "/api/v1/system/info";
     pub const DOCTOR_RUN: &str = "/api/v1/doctor/run";
@@ -103,6 +104,44 @@ pub fn encode_query_component(raw: &str) -> String {
 /// `GET /api/v1/containers/:id/inspect` — full container inspect record.
 pub fn container_inspect_url(id: &str) -> String {
     format!("/api/v1/containers/{}/inspect", encode_query_component(id))
+}
+
+/// `POST /api/v1/containers/:id/update` — live resource limit editor.
+pub fn container_update_url(id: &str) -> String {
+    paths_v5::CONTAINER_UPDATE.replace("{id}", &encode_query_component(id))
+}
+
+/// `GET /api/v1/volumes/:name/inspect` — Phase 26 row-detail expansion
+/// (mountpoint / driver / created / size / in-use-by).
+pub fn volume_inspect_url(name: &str) -> String {
+    format!("/api/v1/volumes/{}/inspect", encode_query_component(name))
+}
+
+/// Build a `ContainerUpdateParams`-shaped body, omitting every unset field.
+pub fn build_container_update_body(
+    memory_bytes: Option<u64>,
+    memory_swap_bytes: Option<u64>,
+    cpus: Option<f64>,
+    pids_limit: Option<i64>,
+    restart_policy: Option<&str>,
+) -> Value {
+    let mut body = serde_json::Map::new();
+    if let Some(memory_bytes) = memory_bytes {
+        body.insert("memory_bytes".to_string(), json!(memory_bytes));
+    }
+    if let Some(memory_swap_bytes) = memory_swap_bytes {
+        body.insert("memory_swap_bytes".to_string(), json!(memory_swap_bytes));
+    }
+    if let Some(cpus) = cpus {
+        body.insert("cpus".to_string(), json!(cpus));
+    }
+    if let Some(pids_limit) = pids_limit {
+        body.insert("pids_limit".to_string(), json!(pids_limit));
+    }
+    if let Some(restart_policy) = restart_policy {
+        body.insert("restart_policy".to_string(), json!(restart_policy));
+    }
+    Value::Object(body)
 }
 
 /// `GET /api/v1/containers/:id/logs?tail=N&since=<rfc3339>`.
@@ -141,6 +180,11 @@ pub async fn fetch_container_inspect(id: &str, token: &str) -> Result<Value, Str
 }
 
 #[cfg(target_arch = "wasm32")]
+pub async fn update_container_limits(id: &str, body: Value, token: &str) -> Result<Value, String> {
+    send_post_json(&container_update_url(id), body, token).await
+}
+
+#[cfg(target_arch = "wasm32")]
 pub async fn fetch_container_logs(
     id: &str,
     tail: Option<u32>,
@@ -167,6 +211,12 @@ pub async fn fetch_metrics_history(
 #[cfg(target_arch = "wasm32")]
 pub async fn fetch_system_df(token: &str) -> Result<Value, String> {
     send_get(paths_v5::SYSTEM_DF, token).await
+}
+
+/// `GET /api/v1/volumes/:name/inspect` — Phase 26 row-detail expansion.
+#[cfg(target_arch = "wasm32")]
+pub async fn fetch_volume_inspect(name: &str, token: &str) -> Result<Value, String> {
+    send_get(&volume_inspect_url(name), token).await
 }
 
 #[cfg(target_arch = "wasm32")]
@@ -384,6 +434,7 @@ mod tests {
     #[test]
     fn paths_v5_are_stable() {
         assert_eq!(paths_v5::CONTAINER_CREATE, "/api/v1/containers/create");
+        assert_eq!(paths_v5::CONTAINER_UPDATE, "/api/v1/containers/{id}/update");
         assert_eq!(paths_v5::SYSTEM_DF, "/api/v1/system/df");
         assert_eq!(paths_v5::SYSTEM_INFO, "/api/v1/system/info");
         assert_eq!(paths_v5::DOCTOR_RUN, "/api/v1/doctor/run");
@@ -394,6 +445,39 @@ mod tests {
         assert_eq!(
             container_inspect_url("abc123"),
             "/api/v1/containers/abc123/inspect"
+        );
+    }
+
+    #[test]
+    fn container_update_url_is_nested_under_id() {
+        assert_eq!(
+            container_update_url("name with space"),
+            "/api/v1/containers/name%20with%20space/update"
+        );
+    }
+
+    #[test]
+    fn volume_inspect_url_is_nested_under_name() {
+        assert_eq!(
+            volume_inspect_url("data vol"),
+            "/api/v1/volumes/data%20vol/inspect"
+        );
+    }
+
+    #[test]
+    fn build_container_update_body_omits_unset_fields() {
+        let body =
+            build_container_update_body(Some(536_870_912), None, Some(1.5), None, Some("always"));
+        assert_eq!(
+            body.get("memory_bytes").and_then(Value::as_u64),
+            Some(536_870_912)
+        );
+        assert!(body.get("memory_swap_bytes").is_none());
+        assert_eq!(body.get("cpus").and_then(Value::as_f64), Some(1.5));
+        assert!(body.get("pids_limit").is_none());
+        assert_eq!(
+            body.get("restart_policy").and_then(Value::as_str),
+            Some("always")
         );
     }
 

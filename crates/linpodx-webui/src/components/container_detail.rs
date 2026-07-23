@@ -34,7 +34,8 @@ use web_sys::Element;
 use super::charts::{AreaChart, LineChart, TwoSeriesChart};
 use super::exec_pty_modal::PtyTerminal;
 use crate::api_client::{
-    fetch_container_inspect, fetch_container_logs, fetch_metrics_history, fetch_metrics_latest,
+    build_container_update_body, fetch_container_inspect, fetch_container_logs,
+    fetch_metrics_history, fetch_metrics_latest, update_container_limits,
 };
 use crate::app::{AuthToken, DrawerState};
 use crate::helpers::{
@@ -178,6 +179,81 @@ fn copy_to_clipboard(text: &str) {
     }
 }
 
+fn as_positive_u64(v: Option<&Value>) -> Option<u64> {
+    v.and_then(Value::as_u64).filter(|n| *n > 0).or_else(|| {
+        v.and_then(Value::as_i64)
+            .and_then(|n| u64::try_from(n).ok())
+            .filter(|n| *n > 0)
+    })
+}
+
+fn inspect_memory_limit(v: &Value) -> Option<u64> {
+    as_positive_u64(v.pointer("/raw/HostConfig/Memory"))
+        .or_else(|| as_positive_u64(v.pointer("/raw/HostConfig/MemoryLimit")))
+}
+
+fn inspect_cpu_limit(v: &Value) -> Option<f64> {
+    v.pointer("/raw/HostConfig/NanoCpus")
+        .and_then(Value::as_f64)
+        .filter(|n| *n > 0.0)
+        .map(|n| n / 1_000_000_000.0)
+}
+
+fn inspect_pids_limit(v: &Value) -> Option<i64> {
+    v.pointer("/raw/HostConfig/PidsLimit")
+        .and_then(Value::as_i64)
+        .filter(|n| *n >= 0)
+}
+
+fn inspect_restart_policy(v: &Value) -> Option<String> {
+    v.pointer("/raw/HostConfig/RestartPolicy/Name")
+        .and_then(Value::as_str)
+        .filter(|s| !s.is_empty())
+        .map(String::from)
+}
+
+fn optional_text<T: ToString>(value: Option<T>) -> String {
+    value
+        .map(|v| v.to_string())
+        .unwrap_or_else(|| "—".to_string())
+}
+
+fn parse_optional_u64(input: &str, label: &str) -> Result<Option<u64>, String> {
+    let trimmed = input.trim();
+    if trimmed.is_empty() {
+        return Ok(None);
+    }
+    trimmed
+        .parse::<u64>()
+        .map(Some)
+        .map_err(|_| format!("{label} must be a whole number"))
+}
+
+fn parse_optional_i64(input: &str, label: &str) -> Result<Option<i64>, String> {
+    let trimmed = input.trim();
+    if trimmed.is_empty() {
+        return Ok(None);
+    }
+    trimmed
+        .parse::<i64>()
+        .map(Some)
+        .map_err(|_| format!("{label} must be a whole number"))
+}
+
+fn parse_optional_cpus(input: &str) -> Result<Option<f64>, String> {
+    let trimmed = input.trim();
+    if trimmed.is_empty() {
+        return Ok(None);
+    }
+    let cpus = trimmed
+        .parse::<f64>()
+        .map_err(|_| "cpus must be a number".to_string())?;
+    if !cpus.is_finite() || cpus <= 0.0 {
+        return Err("cpus must be greater than 0".to_string());
+    }
+    Ok(Some(cpus))
+}
+
 #[component]
 pub fn ContainerDetail() -> impl IntoView {
     let auth = use_context::<AuthToken>().expect("AuthToken context provided by AppRoot");
@@ -189,12 +265,27 @@ pub fn ContainerDetail() -> impl IntoView {
     // Shared inspect record (Overview renders it; Stats/Terminal read run state).
     // `None` = loading/closed, `Some(Ok)` = record, `Some(Err)` = fetch error.
     let inspect: RwSignal<Option<Result<Value, String>>> = RwSignal::new(None);
+    let live_mem_limit: RwSignal<Option<u64>> = RwSignal::new(None);
+
+    let memory_mib = RwSignal::new(String::new());
+    let cpus_input = RwSignal::new(String::new());
+    let pids_input = RwSignal::new(String::new());
+    let restart_policy = RwSignal::new(String::new());
+    let update_status: RwSignal<Option<Result<String, String>>> = RwSignal::new(None);
+    let update_busy = RwSignal::new(false);
 
     // Reset the tab back to Overview whenever a different container is opened.
     Effect::new(move |prev: Option<Option<String>>| {
         let id = target.get();
         if prev.flatten() != id {
             tab.set(DetailTab::Overview);
+            live_mem_limit.set(None);
+            memory_mib.set(String::new());
+            cpus_input.set(String::new());
+            pids_input.set(String::new());
+            restart_policy.set(String::new());
+            update_status.set(None);
+            update_busy.set(false);
         }
         id
     });
@@ -214,6 +305,24 @@ pub fn ContainerDetail() -> impl IntoView {
         inspect.set(None);
         spawn_local(async move {
             inspect.set(Some(fetch_container_inspect(&id, &tok).await));
+        });
+    });
+
+    // Fetch one latest sample for `mem_limit`, which is sometimes fresher than
+    // the inspect record and is also shown in the resource-limit editor.
+    Effect::new(move |_| {
+        let Some(id) = target.get() else {
+            live_mem_limit.set(None);
+            return;
+        };
+        let Some(tok) = auth.0.get_untracked() else {
+            live_mem_limit.set(None);
+            return;
+        };
+        spawn_local(async move {
+            if let Ok(sample) = fetch_metrics_latest(&id, &tok).await {
+                live_mem_limit.set(sample.get("mem_limit").and_then(Value::as_u64));
+            }
         });
     });
 
@@ -366,6 +475,9 @@ pub fn ContainerDetail() -> impl IntoView {
             match fetch_metrics_history(&cid, None, &tok).await {
                 Ok(Value::Array(arr)) => {
                     for s in &arr {
+                        if let Some(limit) = s.get("mem_limit").and_then(Value::as_u64) {
+                            live_mem_limit.set(Some(limit));
+                        }
                         push_metric_sample(cpu, mem, net_rx, net_tx, sample_ts(s), s);
                     }
                 }
@@ -378,6 +490,9 @@ pub fn ContainerDetail() -> impl IntoView {
                 }
                 if let Ok(m) = fetch_metrics_latest(&cid, &tok).await {
                     if m.is_object() {
+                        if let Some(limit) = m.get("mem_limit").and_then(Value::as_u64) {
+                            live_mem_limit.set(Some(limit));
+                        }
                         push_metric_sample(
                             cpu,
                             mem,
@@ -402,6 +517,97 @@ pub fn ContainerDetail() -> impl IntoView {
     let sh_cmd = Signal::derive(|| String::from("/bin/sh"));
     let empty_sig = Signal::derive(String::new);
     let term_active = Signal::derive(move || running.get());
+
+    let submit_limits = Callback::new(move |ev: leptos::ev::SubmitEvent| {
+        ev.prevent_default();
+        if update_busy.get_untracked() {
+            return;
+        }
+        let Some(id) = target.get_untracked() else {
+            update_status.set(Some(Err("open a container first".to_string())));
+            return;
+        };
+        let Some(tok) = auth.0.get_untracked() else {
+            update_status.set(Some(Err(
+                "set a bearer token before updating limits".to_string()
+            )));
+            return;
+        };
+
+        let memory_mib_parsed = match parse_optional_u64(&memory_mib.get_untracked(), "memory MiB")
+        {
+            Ok(v) => v,
+            Err(e) => {
+                update_status.set(Some(Err(e)));
+                return;
+            }
+        };
+        let memory_bytes = match memory_mib_parsed {
+            Some(mib) => match mib.checked_mul(1024 * 1024) {
+                Some(bytes) => Some(bytes),
+                None => {
+                    update_status.set(Some(Err("memory MiB is too large".to_string())));
+                    return;
+                }
+            },
+            None => None,
+        };
+        let cpus = match parse_optional_cpus(&cpus_input.get_untracked()) {
+            Ok(v) => v,
+            Err(e) => {
+                update_status.set(Some(Err(e)));
+                return;
+            }
+        };
+        let pids_limit = match parse_optional_i64(&pids_input.get_untracked(), "pids limit") {
+            Ok(v) => v,
+            Err(e) => {
+                update_status.set(Some(Err(e)));
+                return;
+            }
+        };
+        if pids_limit.is_some_and(|n| n < -1) {
+            update_status.set(Some(Err("pids limit must be -1 or greater".to_string())));
+            return;
+        }
+        let restart = restart_policy.get_untracked();
+        let restart = restart.trim();
+        let restart = (!restart.is_empty()).then_some(restart);
+
+        if memory_bytes.is_none() && cpus.is_none() && pids_limit.is_none() && restart.is_none() {
+            update_status.set(Some(Err("enter at least one limit change".to_string())));
+            return;
+        }
+
+        let body = build_container_update_body(memory_bytes, None, cpus, pids_limit, restart);
+        update_busy.set(true);
+        update_status.set(None);
+        spawn_local(async move {
+            match update_container_limits(&id, body, &tok).await {
+                Ok(v) => {
+                    let applied = v
+                        .get("applied")
+                        .and_then(Value::as_array)
+                        .map(|a| {
+                            a.iter()
+                                .filter_map(Value::as_str)
+                                .collect::<Vec<_>>()
+                                .join(", ")
+                        })
+                        .filter(|s| !s.is_empty())
+                        .unwrap_or_else(|| "no fields".to_string());
+                    update_status.set(Some(Ok(format!("Applied: {applied}"))));
+                    memory_mib.set(String::new());
+                    cpus_input.set(String::new());
+                    pids_input.set(String::new());
+                    restart_policy.set(String::new());
+                    inspect.set(Some(fetch_container_inspect(&id, &tok).await));
+                }
+                Err(e) => update_status.set(Some(Err(e))),
+            }
+            update_busy.set(false);
+        });
+    });
 
     // Derived throughput (cumulative counters → per-interval deltas).
     let rx_series = Signal::derive(move || cumulative_to_delta(&net_rx.get()));
@@ -468,7 +674,19 @@ pub fn ContainerDetail() -> impl IntoView {
         DetailTab::Overview => match inspect.get() {
             None => view! { <div class="loading-inline">"Loading inspect…"</div> }.into_any(),
             Some(Err(e)) => view! { <div class="error-state"><span>{e}</span></div> }.into_any(),
-            Some(Ok(v)) => overview_pane(&v),
+            Some(Ok(v)) => overview_pane(
+                &v,
+                LimitsEditorState {
+                    live_mem_limit,
+                    memory_mib,
+                    cpus_input,
+                    pids_input,
+                    restart_policy,
+                    update_status,
+                    update_busy,
+                    submit_limits,
+                },
+            ),
         },
         DetailTab::Logs => view! {
             <div class="drawer-pane">
@@ -762,8 +980,34 @@ fn healthcheck_section(v: &Value) -> AnyView {
     .into_any()
 }
 
+/// Bundles the `Edit limits` form's signals + submit callback into one value
+/// so `overview_pane` takes two arguments instead of nine (clippy
+/// `too_many_arguments`). All fields are `Copy` (leptos signals / callbacks),
+/// so this struct is cheap to construct and pass by value.
+#[derive(Clone, Copy)]
+struct LimitsEditorState {
+    live_mem_limit: RwSignal<Option<u64>>,
+    memory_mib: RwSignal<String>,
+    cpus_input: RwSignal<String>,
+    pids_input: RwSignal<String>,
+    restart_policy: RwSignal<String>,
+    update_status: RwSignal<Option<Result<String, String>>>,
+    update_busy: RwSignal<bool>,
+    submit_limits: Callback<leptos::ev::SubmitEvent>,
+}
+
 /// Render the Overview detail-grid from an inspect record.
-fn overview_pane(v: &Value) -> AnyView {
+fn overview_pane(v: &Value, limits: LimitsEditorState) -> AnyView {
+    let LimitsEditorState {
+        live_mem_limit,
+        memory_mib,
+        cpus_input,
+        pids_input,
+        restart_policy,
+        update_status,
+        update_busy,
+        submit_limits,
+    } = limits;
     let image = v
         .get("image")
         .and_then(Value::as_str)
@@ -894,6 +1138,13 @@ fn overview_pane(v: &Value) -> AnyView {
     let image_id_view = (!image_id.is_empty())
         .then(|| view! { " "<span class="mono cell-muted">{image_id}</span> });
 
+    let inspect_mem_limit = inspect_memory_limit(v);
+    let current_memory =
+        move || optional_text(live_mem_limit.get().or(inspect_mem_limit).map(format_bytes));
+    let current_cpus = inspect_cpu_limit(v).map(|n| n.to_string());
+    let current_pids = inspect_pids_limit(v);
+    let current_restart = inspect_restart_policy(v);
+
     view! {
         <div class="drawer-pane">
             <div class="detail-grid">
@@ -932,6 +1183,86 @@ fn overview_pane(v: &Value) -> AnyView {
             </div>
             <div class="section-title">"Healthcheck"</div>
             {healthcheck_section(v)}
+            <div class="section-title">"Edit limits"</div>
+            <div class="detail-grid">
+                <div class="detail-grid__key">"Memory"</div>
+                <div class="detail-grid__val"><span class="mono">{current_memory}</span></div>
+
+                <div class="detail-grid__key">"CPUs"</div>
+                <div class="detail-grid__val"><span class="mono">{optional_text(current_cpus)}</span></div>
+
+                <div class="detail-grid__key">"PIDs"</div>
+                <div class="detail-grid__val"><span class="mono">{optional_text(current_pids)}</span></div>
+
+                <div class="detail-grid__key">"Restart"</div>
+                <div class="detail-grid__val"><span class="mono">{optional_text(current_restart)}</span></div>
+            </div>
+            <form on:submit=move |ev| submit_limits.run(ev)>
+                <div class="modal-form">
+                    <div class="field-group">
+                        <label for="limit-memory-mib">"Memory MiB"</label>
+                        <input
+                            id="limit-memory-mib"
+                            class="input"
+                            type="number"
+                            min="0"
+                            prop:value=move || memory_mib.get()
+                            on:input=move |ev| memory_mib.set(event_target_value(&ev))
+                        />
+                    </div>
+                    <div class="field-group">
+                        <label for="limit-cpus">"CPUs"</label>
+                        <input
+                            id="limit-cpus"
+                            class="input"
+                            type="number"
+                            min="0"
+                            step="0.1"
+                            prop:value=move || cpus_input.get()
+                            on:input=move |ev| cpus_input.set(event_target_value(&ev))
+                        />
+                    </div>
+                    <div class="field-group">
+                        <label for="limit-pids">"PIDs limit"</label>
+                        <input
+                            id="limit-pids"
+                            class="input"
+                            type="number"
+                            min="-1"
+                            prop:value=move || pids_input.get()
+                            on:input=move |ev| pids_input.set(event_target_value(&ev))
+                        />
+                    </div>
+                    <div class="field-group">
+                        <label for="limit-restart">"Restart policy"</label>
+                        <select
+                            id="limit-restart"
+                            class="select"
+                            prop:value=move || restart_policy.get()
+                            on:change=move |ev| restart_policy.set(event_target_value(&ev))
+                        >
+                            <option value="">"Leave unchanged"</option>
+                            <option value="no">"no"</option>
+                            <option value="on-failure">"on-failure"</option>
+                            <option value="always">"always"</option>
+                            <option value="unless-stopped">"unless-stopped"</option>
+                        </select>
+                    </div>
+                    <div class="page-actions">
+                        <button
+                            type="submit"
+                            class="btn btn--sm btn--primary"
+                            prop:disabled=move || update_busy.get()
+                        >
+                            {move || if update_busy.get() { "Applying…" } else { "Apply" }}
+                        </button>
+                        {move || update_status.get().map(|result| match result {
+                            Ok(message) => view! { <span class="status">{message}</span> }.into_any(),
+                            Err(message) => view! { <span class="error-state"><span>{message}</span></span> }.into_any(),
+                        })}
+                    </div>
+                </div>
+            </form>
         </div>
     }
     .into_any()

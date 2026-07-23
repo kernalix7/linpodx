@@ -23,8 +23,8 @@ use wasm_bindgen_futures::spawn_local;
 use crate::components::{
     AuditFeed, ClusterView, CommandPalette, ContainerDetail, ContainerList, ContainerLiveSample,
     Dashboard, DashboardShared, Icon, ImageList, NetworkList, PinnedClientsView, PluginsView,
-    PodsView, SandboxList, SessionTimeline, Settings, SnapshotTree, Sparkline, StacksView,
-    VolumeList,
+    PodsView, SandboxList, SecretsView, SessionTimeline, Settings, SnapshotTree, Sparkline,
+    StacksView, VolumeList,
 };
 
 const TOKEN_KEY: &str = "linpodx_token";
@@ -51,6 +51,8 @@ pub enum Tab {
     PinnedClients,
     /// Phase 17 — plugin key registry + cluster-wide revocation.
     Plugins,
+    /// Phase 26 — podman secret store (list / create / remove).
+    Secrets,
     /// App-shell v5 — daemon info + doctor diagnostics.
     Settings,
 }
@@ -72,6 +74,7 @@ impl Tab {
             Tab::Cluster => "Cluster",
             Tab::PinnedClients => "Pinned Clients",
             Tab::Plugins => "Plugins",
+            Tab::Secrets => "Secrets",
             Tab::Settings => "Settings",
         }
     }
@@ -95,11 +98,12 @@ impl Tab {
             Tab::Cluster => "daemon",
             Tab::PinnedClients => "pin",
             Tab::Plugins => "plugin",
+            Tab::Secrets => "secret",
             Tab::Settings => "settings",
         }
     }
 
-    const ALL: [Tab; 15] = [
+    const ALL: [Tab; 16] = [
         Tab::Dashboard,
         Tab::Containers,
         Tab::Stacks,
@@ -114,6 +118,7 @@ impl Tab {
         Tab::Cluster,
         Tab::PinnedClients,
         Tab::Plugins,
+        Tab::Secrets,
         Tab::Settings,
     ];
 }
@@ -539,6 +544,7 @@ pub fn AppRoot() -> impl IntoView {
                         Tab::Cluster => view! { <ClusterView/> }.into_any(),
                         Tab::PinnedClients => view! { <PinnedClientsView/> }.into_any(),
                         Tab::Plugins => view! { <PluginsView/> }.into_any(),
+                        Tab::Secrets => view! { <SecretsView/> }.into_any(),
                         Tab::Settings => view! { <Settings/> }.into_any(),
                     }}
                 </main>

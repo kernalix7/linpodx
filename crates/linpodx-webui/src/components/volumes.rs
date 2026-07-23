@@ -18,17 +18,53 @@
 //! every container's full inspect, the sweep is opt-in via a toolbar button
 //! rather than running on every list refresh.
 
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
 
 use leptos::prelude::*;
 use serde_json::{json, Value};
+use wasm_bindgen::JsValue;
 use wasm_bindgen_futures::spawn_local;
 
 use super::icons::Icon;
-use crate::api_client::{fetch_container_inspect, fetch_system_df};
+use crate::api_client::{fetch_container_inspect, fetch_system_df, fetch_volume_inspect};
 use crate::app::AuthToken;
 use crate::helpers::format_bytes;
 use crate::ws::{fetch_list, send_rpc, subscribe};
+
+/// Best-effort `navigator.clipboard.writeText`. Reached via `js_sys::Reflect`
+/// so no extra `web-sys` feature (`Navigator`/`Clipboard`) is required. Mirrors
+/// the identical helper in `container_detail.rs` — kept local since that file
+/// is outside this panel's owned paths.
+fn copy_to_clipboard(text: &str) {
+    let Some(win) = web_sys::window() else {
+        return;
+    };
+    let win_val: JsValue = win.into();
+    let Ok(nav) = js_sys::Reflect::get(&win_val, &JsValue::from_str("navigator")) else {
+        return;
+    };
+    let Ok(clip) = js_sys::Reflect::get(&nav, &JsValue::from_str("clipboard")) else {
+        return;
+    };
+    if clip.is_undefined() || clip.is_null() {
+        return;
+    }
+    let Ok(write) = js_sys::Reflect::get(&clip, &JsValue::from_str("writeText")) else {
+        return;
+    };
+    if let Ok(func) = wasm_bindgen::JsCast::dyn_into::<js_sys::Function>(write) {
+        let _ = func.call1(&clip, &JsValue::from_str(text));
+    }
+}
+
+/// Row-detail state for the expand/collapse panel: `Loading`, a fetched
+/// [`Value`] (the `VolumeInspectDetailResponse` JSON), or an error string.
+#[derive(Clone)]
+enum RowDetail {
+    Loading,
+    Loaded(Value),
+    Error(String),
+}
 
 #[derive(Clone, Copy, PartialEq, Eq)]
 enum BulkKind {
@@ -111,6 +147,44 @@ pub fn VolumeList() -> impl IntoView {
     let pending_bulk: RwSignal<Option<BulkKind>> = RwSignal::new(None);
     let toasts: RwSignal<Vec<Toast>> = RwSignal::new(Vec::new());
     let toast_seq: RwSignal<u64> = RwSignal::new(0);
+    // Phase 26 — row expand/detail. `expanded` holds the currently-open
+    // volume name (single-open, accordion-style); `details` caches the last
+    // fetched/loading/error state per name so re-collapsing and re-expanding
+    // the same row doesn't always refire the request.
+    let expanded: RwSignal<Option<String>> = RwSignal::new(None);
+    let details: RwSignal<HashMap<String, RowDetail>> = RwSignal::new(HashMap::new());
+
+    let toggle_expand = move |name: String| {
+        let currently_open = expanded.get_untracked().as_deref() == Some(name.as_str());
+        if currently_open {
+            expanded.set(None);
+            return;
+        }
+        expanded.set(Some(name.clone()));
+        let already_have = details
+            .get_untracked()
+            .get(&name)
+            .is_some_and(|d| matches!(d, RowDetail::Loaded(_)));
+        if already_have {
+            return;
+        }
+        let token = match auth.0.get_untracked() {
+            Some(t) => t,
+            None => return,
+        };
+        details.update(|d| {
+            d.insert(name.clone(), RowDetail::Loading);
+        });
+        spawn_local(async move {
+            let result = match fetch_volume_inspect(&name, &token).await {
+                Ok(v) => RowDetail::Loaded(v),
+                Err(e) => RowDetail::Error(e),
+            };
+            details.update(|d| {
+                d.insert(name, result);
+            });
+        });
+    };
 
     let push_toast = move |text: String, kind: &'static str| {
         let id = toast_seq.get_untracked() + 1;
@@ -253,7 +327,7 @@ pub fn VolumeList() -> impl IntoView {
 
     let body_view = move || {
         if loading.get() {
-            return skeleton_rows(6);
+            return skeleton_rows(7);
         }
         match rows.get() {
             Err(msg) => view! {
@@ -329,8 +403,23 @@ pub fn VolumeList() -> impl IntoView {
                         } else {
                             view! { <span class="badge badge--neutral">"unused"</span> }.into_any()
                         };
+                        let name_toggle = name.clone();
+                        let name_is_open = name.clone();
+                        let name_detail = name.clone();
+                        let is_open = move || expanded.get().as_deref() == Some(name_is_open.as_str());
                         view! {
                             <tr>
+                                <td class="cell-actions">
+                                    <button
+                                        type="button"
+                                        class="row-action"
+                                        aria-label="toggle volume detail"
+                                        title="Show detail"
+                                        on:click=move |_| toggle_expand(name_toggle.clone())
+                                    >
+                                        <Icon name="chevron"/>
+                                    </button>
+                                </td>
                                 <td>
                                     <input
                                         type="checkbox"
@@ -354,6 +443,11 @@ pub fn VolumeList() -> impl IntoView {
                                 <td><span class="cell">{created}</span></td>
                                 <td>{badge}</td>
                             </tr>
+                            <Show when=is_open fallback=|| view! { <></> }>
+                                <tr>
+                                    <td colspan="7">{volume_detail_view(name_detail.clone(), details)}</td>
+                                </tr>
+                            </Show>
                         }
                     })
                     .collect_view();
@@ -363,6 +457,7 @@ pub fn VolumeList() -> impl IntoView {
                         <table class="data-table">
                             <thead>
                                 <tr>
+                                    <th class="cell-actions"></th>
                                     <th class="cell-actions">
                                         <input
                                             type="checkbox"
@@ -492,6 +587,106 @@ pub fn VolumeList() -> impl IntoView {
                 }).collect_view()}
             </div>
         </div>
+    }
+}
+
+/// Renders the row-expand detail panel for one volume: mountpoint (with a
+/// copy button), driver, created, human-readable size, and "in use by"
+/// chips. Reads reactively from the shared `details` map so it re-renders
+/// as the fetch resolves without each row owning its own signal.
+fn volume_detail_view(
+    name: String,
+    details: RwSignal<HashMap<String, RowDetail>>,
+) -> impl IntoView {
+    move || {
+        let detail = details.get().get(&name).cloned();
+        match detail {
+            None | Some(RowDetail::Loading) => view! {
+                <div class="loading-inline">
+                    <span class="skeleton-line"></span>
+                    <span>"loading detail…"</span>
+                </div>
+            }
+            .into_any(),
+            Some(RowDetail::Error(msg)) => view! {
+                <div class="error-state"><Icon name="approval"/><span>{msg}</span></div>
+            }
+            .into_any(),
+            Some(RowDetail::Loaded(v)) => {
+                let mountpoint = v
+                    .get("mountpoint")
+                    .and_then(|x| x.as_str())
+                    .unwrap_or("")
+                    .to_string();
+                let mountpoint_copy = mountpoint.clone();
+                let driver = v
+                    .get("driver")
+                    .and_then(|x| x.as_str())
+                    .unwrap_or("")
+                    .to_string();
+                let created = v
+                    .get("created")
+                    .and_then(|x| x.as_str())
+                    .unwrap_or("—")
+                    .to_string();
+                let size_text = v
+                    .get("size_bytes")
+                    .and_then(|x| x.as_u64())
+                    .map(format_bytes)
+                    .unwrap_or_else(|| "unknown".to_string());
+                let in_use_by: Vec<String> = v
+                    .get("in_use_by")
+                    .and_then(|x| x.as_array())
+                    .map(|a| {
+                        a.iter()
+                            .filter_map(|c| c.as_str())
+                            .map(str::to_string)
+                            .collect()
+                    })
+                    .unwrap_or_default();
+                view! {
+                    <div class="surface-card">
+                        <div class="detail-grid">
+                            <span class="detail-grid__key">"Mountpoint"</span>
+                            <span class="detail-grid__val">
+                                <span class="mono" title=mountpoint.clone()>{mountpoint.clone()}</span>
+                                <button
+                                    type="button"
+                                    class="btn btn--sm"
+                                    title="Copy mountpoint"
+                                    aria-label="copy mountpoint"
+                                    on:click=move |_| copy_to_clipboard(&mountpoint_copy)
+                                >
+                                    "Copy"
+                                </button>
+                            </span>
+                            <span class="detail-grid__key">"Driver"</span>
+                            <span class="detail-grid__val">{driver}</span>
+                            <span class="detail-grid__key">"Created"</span>
+                            <span class="detail-grid__val">{created}</span>
+                            <span class="detail-grid__key">"Size"</span>
+                            <span class="detail-grid__val">{size_text}</span>
+                            <span class="detail-grid__key">"In use by"</span>
+                            <span class="detail-grid__val">
+                                {if in_use_by.is_empty() {
+                                    view! {
+                                        <span class="empty-state__hint">"not mounted by any container"</span>
+                                    }
+                                    .into_any()
+                                } else {
+                                    in_use_by
+                                        .into_iter()
+                                        .map(|n| view! { <span class="chip chip--neutral">{n}</span> })
+                                        .collect_view()
+                                        .into_any()
+                                }}
+                            </span>
+                        </div>
+                    </div>
+                }
+                .into_any()
+            }
+        }
     }
 }
 

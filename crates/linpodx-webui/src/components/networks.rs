@@ -1,6 +1,8 @@
 //! Networks panel — Docker/Rancher-parity upgrade: an on-demand "in use"
-//! sweep, bulk row selection with a floating action bar, and a client-side
-//! "prune unused" sweep.
+//! sweep, bulk row selection with a floating action bar, a client-side
+//! "prune unused" sweep, and (Phase 27) a per-network IPAM inspector that
+//! expands inline to show subnets/gateways + the attached containers, with
+//! per-member detach and an "attach container" control.
 //!
 //! Renders its own `<table>` rather than delegating to the shared
 //! `ListTable` (`list_table.rs`, outside this panel's owned paths) so it can
@@ -18,6 +20,11 @@
 //! means walking every container's full inspect, it stays opt-in via a
 //! toolbar button rather than running on every list refresh (mirrors the
 //! same trade-off in `volumes.rs`).
+//!
+//! **Inspector.** The expand toggle calls `network_inspect_detail` (the
+//! Phase 27 richer inspect) over the IPC WebSocket, and pulls the running
+//! container list for the attach select. Attach/detach go through
+//! `network_connect` / `network_disconnect`; detach is confirmed first.
 
 use std::collections::HashSet;
 
@@ -61,6 +68,27 @@ fn extract_network_names(inspect: &Value) -> Vec<String> {
         .unwrap_or_default()
 }
 
+/// Display name for a running-container summary (`names[0]`, leading `/`
+/// stripped) falling back to the id. Used both as the select label and the
+/// value passed to `podman network connect` (podman resolves either).
+fn container_label(c: &Value) -> String {
+    let name = c
+        .get("names")
+        .and_then(|n| n.as_array())
+        .and_then(|a| a.first())
+        .and_then(|v| v.as_str())
+        .map(|s| s.trim_start_matches('/').to_string())
+        .filter(|s| !s.is_empty());
+    name.unwrap_or_else(|| {
+        c.get("id")
+            .and_then(|v| v.as_str())
+            .unwrap_or("")
+            .chars()
+            .take(12)
+            .collect()
+    })
+}
+
 #[component]
 pub fn NetworkList() -> impl IntoView {
     let auth = use_context::<AuthToken>().expect("AuthToken context provided by AppRoot");
@@ -76,6 +104,20 @@ pub fn NetworkList() -> impl IntoView {
     let pending_bulk: RwSignal<Option<BulkKind>> = RwSignal::new(None);
     let toasts: RwSignal<Vec<Toast>> = RwSignal::new(Vec::new());
     let toast_seq: RwSignal<u64> = RwSignal::new(0);
+
+    // ----- Phase 27 inspector state -----
+    // Currently-expanded network name (only one open at a time).
+    let expanded: RwSignal<Option<String>> = RwSignal::new(None);
+    // Inspect result for the expanded network. `None` == loading.
+    let detail: RwSignal<Option<Result<Value, String>>> = RwSignal::new(None);
+    // Running containers offered in the attach select.
+    let running: RwSignal<Vec<Value>> = RwSignal::new(Vec::new());
+    // Selected container in the attach dropdown.
+    let attach_sel = RwSignal::new(String::new());
+    // Attach/detach in flight.
+    let action_busy = RwSignal::new(false);
+    // (network, container) awaiting detach confirmation.
+    let pending_disconnect: RwSignal<Option<(String, String)>> = RwSignal::new(None);
 
     let push_toast = move |text: String, kind: &'static str| {
         let id = toast_seq.get_untracked() + 1;
@@ -107,6 +149,83 @@ pub fn NetworkList() -> impl IntoView {
                 Err(e) => rows.set(Err(e)),
             }
             loading.set(false);
+        });
+    };
+
+    // Fetch the richer inspect + the running-container list for the attach
+    // select. Called on expand and after every attach/detach so the member
+    // table stays fresh.
+    let load_detail = move |net: String| {
+        detail.set(None);
+        let net_for_rpc = net.clone();
+        spawn_local(async move {
+            match send_rpc("network_inspect_detail", json!({ "name": net_for_rpc })).await {
+                Ok(v) => detail.set(Some(Ok(v))),
+                Err(e) => detail.set(Some(Err(e))),
+            }
+        });
+        if let Some(token) = auth.0.get_untracked() {
+            spawn_local(async move {
+                let list = fetch_list("containers", &token)
+                    .await
+                    .map(|v| v.as_array().cloned().unwrap_or_default())
+                    .unwrap_or_default();
+                running.set(list);
+            });
+        }
+    };
+
+    let toggle_row = move |net: String| {
+        if expanded.get_untracked().as_deref() == Some(net.as_str()) {
+            expanded.set(None);
+        } else {
+            attach_sel.set(String::new());
+            expanded.set(Some(net.clone()));
+            load_detail(net);
+        }
+    };
+
+    let do_attach = move |net: String| {
+        let container = attach_sel.get_untracked();
+        if container.is_empty() {
+            return;
+        }
+        action_busy.set(true);
+        spawn_local(async move {
+            match send_rpc(
+                "network_connect",
+                json!({ "network": net.clone(), "container": container.clone() }),
+            )
+            .await
+            {
+                Ok(_) => push_toast(format!("attached {container} to {net}"), "success"),
+                Err(e) => push_toast(format!("attach failed: {e}"), "error"),
+            }
+            action_busy.set(false);
+            attach_sel.set(String::new());
+            load_detail(net);
+        });
+    };
+
+    let confirm_disconnect = move |_| {
+        let (net, container) = match pending_disconnect.get_untracked() {
+            Some(pair) => pair,
+            None => return,
+        };
+        pending_disconnect.set(None);
+        action_busy.set(true);
+        spawn_local(async move {
+            match send_rpc(
+                "network_disconnect",
+                json!({ "network": net.clone(), "container": container.clone(), "force": false }),
+            )
+            .await
+            {
+                Ok(_) => push_toast(format!("disconnected {container}"), "success"),
+                Err(e) => push_toast(format!("disconnect failed: {e}"), "error"),
+            }
+            action_busy.set(false);
+            load_detail(net);
         });
     };
 
@@ -201,6 +320,183 @@ pub fn NetworkList() -> impl IntoView {
             .unwrap_or_default()
     };
 
+    // Render the expanded IPAM detail for one network (subnets grid + member
+    // table + attach control).
+    let render_detail = move |net: String| -> AnyView {
+        match detail.get() {
+            None => view! {
+                <div class="loading-inline"><span class="spinner"></span><span>"Loading…"</span></div>
+            }
+            .into_any(),
+            Some(Err(e)) => view! {
+                <div class="error-state"><Icon name="approval"/><span>{e}</span></div>
+            }
+            .into_any(),
+            Some(Ok(v)) => {
+                let driver = v
+                    .get("driver")
+                    .and_then(|x| x.as_str())
+                    .unwrap_or("")
+                    .to_string();
+                let dns = v.get("dns_enabled").and_then(|x| x.as_bool()).unwrap_or(false);
+                let internal = v.get("internal").and_then(|x| x.as_bool()).unwrap_or(false);
+
+                let subnet_rows = v
+                    .get("subnets")
+                    .and_then(|x| x.as_array())
+                    .cloned()
+                    .unwrap_or_default()
+                    .into_iter()
+                    .map(|s| {
+                        let sn = s
+                            .get("subnet")
+                            .and_then(|x| x.as_str())
+                            .unwrap_or("")
+                            .to_string();
+                        let gw = s
+                            .get("gateway")
+                            .and_then(|x| x.as_str())
+                            .unwrap_or("")
+                            .to_string();
+                        view! {
+                            <>
+                                <div class="detail-grid__key">{sn}</div>
+                                <div class="detail-grid__val">{if gw.is_empty() { "—".to_string() } else { gw }}</div>
+                            </>
+                        }
+                    })
+                    .collect_view();
+
+                let members = v
+                    .get("containers")
+                    .and_then(|x| x.as_array())
+                    .cloned()
+                    .unwrap_or_default();
+                let member_count = members.len();
+                let net_for_rows = net.clone();
+                let member_rows = members
+                    .into_iter()
+                    .map(|m| {
+                        let cname = m
+                            .get("name")
+                            .and_then(|x| x.as_str())
+                            .unwrap_or("")
+                            .to_string();
+                        let cid = m
+                            .get("id")
+                            .and_then(|x| x.as_str())
+                            .unwrap_or("")
+                            .to_string();
+                        let ipv4 = m
+                            .get("ipv4")
+                            .and_then(|x| x.as_str())
+                            .unwrap_or("—")
+                            .to_string();
+                        let mac = m
+                            .get("mac")
+                            .and_then(|x| x.as_str())
+                            .unwrap_or("—")
+                            .to_string();
+                        let label = if cname.is_empty() {
+                            cid.chars().take(12).collect::<String>()
+                        } else {
+                            cname.clone()
+                        };
+                        let target = if cname.is_empty() { cid.clone() } else { cname };
+                        let net_click = net_for_rows.clone();
+                        view! {
+                            <tr>
+                                <td><span class="cell-id" title=label.clone()>{label.clone()}</span></td>
+                                <td><span class="cell mono">{ipv4}</span></td>
+                                <td><span class="cell mono">{mac}</span></td>
+                                <td class="cell-actions">
+                                    <button
+                                        type="button"
+                                        class="btn btn--ghost btn--sm"
+                                        prop:disabled=move || action_busy.get()
+                                        on:click=move |_| {
+                                            pending_disconnect.set(Some((net_click.clone(), target.clone())));
+                                        }
+                                    >
+                                        "Disconnect"
+                                    </button>
+                                </td>
+                            </tr>
+                        }
+                    })
+                    .collect_view();
+
+                let members_view = if member_count == 0 {
+                    view! { <p class="cell-muted">"No containers attached."</p> }.into_any()
+                } else {
+                    view! {
+                        <div class="data-table-wrap">
+                            <table class="data-table">
+                                <thead>
+                                    <tr>
+                                        <th>"Container"</th>
+                                        <th>"IPv4"</th>
+                                        <th>"MAC"</th>
+                                        <th class="cell-actions">"Actions"</th>
+                                    </tr>
+                                </thead>
+                                <tbody>{member_rows}</tbody>
+                            </table>
+                        </div>
+                    }
+                    .into_any()
+                };
+
+                let options = running
+                    .get()
+                    .into_iter()
+                    .map(|c| {
+                        let label = container_label(&c);
+                        let value = label.clone();
+                        view! { <option value=value>{label}</option> }
+                    })
+                    .collect_view();
+                let net_attach = net.clone();
+
+                view! {
+                    <div class="drawer-body">
+                        <div class="detail-grid">
+                            <div class="detail-grid__key">"Driver"</div>
+                            <div class="detail-grid__val">{driver}</div>
+                            <div class="detail-grid__key">"DNS enabled"</div>
+                            <div class="detail-grid__val">{dns.to_string()}</div>
+                            <div class="detail-grid__key">"Internal"</div>
+                            <div class="detail-grid__val">{internal.to_string()}</div>
+                            {subnet_rows}
+                        </div>
+                        <div class="section-title">"Connected containers"</div>
+                        {members_view}
+                        <div class="section-title">"Attach container"</div>
+                        <div class="set-expiry-row">
+                            <select
+                                class="select"
+                                prop:disabled=move || action_busy.get()
+                                on:change=move |ev| attach_sel.set(event_target_value(&ev))
+                            >
+                                <option value="">"Select a running container…"</option>
+                                {options}
+                            </select>
+                            <button
+                                type="button"
+                                class="btn btn--primary btn--sm"
+                                prop:disabled=move || action_busy.get() || attach_sel.get().is_empty()
+                                on:click=move |_| do_attach(net_attach.clone())
+                            >
+                                {move || if action_busy.get() { "Working…" } else { "Attach" }}
+                            </button>
+                        </div>
+                    </div>
+                }
+                .into_any()
+            }
+        }
+    };
+
     let body_view = move || {
         if loading.get() {
             return skeleton_rows(7);
@@ -251,6 +547,9 @@ pub fn NetworkList() -> impl IntoView {
                     .map(|row| {
                         let name = row_name(&row);
                         let name_check = name.clone();
+                        let name_toggle = name.clone();
+                        let name_show = name.clone();
+                        let name_detail = name.clone();
                         let driver = row
                             .get("driver")
                             .and_then(|v| v.as_str())
@@ -283,6 +582,17 @@ pub fn NetworkList() -> impl IntoView {
                         } else {
                             view! { <span class="badge badge--neutral">"unused"</span> }.into_any()
                         };
+                        let chevron = {
+                            let n = name_show.clone();
+                            move || {
+                                if expanded.get().as_deref() == Some(n.as_str()) {
+                                    "▾"
+                                } else {
+                                    "▸"
+                                }
+                            }
+                        };
+                        let show_name = name_show.clone();
                         view! {
                             <tr>
                                 <td>
@@ -302,13 +612,32 @@ pub fn NetworkList() -> impl IntoView {
                                         }
                                     />
                                 </td>
-                                <td><span class="cell-id" title=name.clone()>{name.clone()}</span></td>
+                                <td>
+                                    <button
+                                        type="button"
+                                        class="btn btn--ghost btn--sm"
+                                        title="Inspect IPAM + attached containers"
+                                        on:click=move |_| toggle_row(name_toggle.clone())
+                                    >
+                                        <span class="mono">{chevron}</span>
+                                        " "
+                                        <span class="cell-id" title=name.clone()>{name.clone()}</span>
+                                    </button>
+                                </td>
                                 <td><span class="cell">{driver}</span></td>
                                 <td><span class="cell">{subnet}</span></td>
                                 <td><span class="cell">{gateway}</span></td>
                                 <td><span class="cell">{internal.to_string()}</span></td>
                                 <td>{badge}</td>
                             </tr>
+                            <Show
+                                when=move || expanded.get().as_deref() == Some(show_name.as_str())
+                                fallback=|| view! { <></> }
+                            >
+                                <tr>
+                                    <td colspan="7">{render_detail(name_detail.clone())}</td>
+                                </tr>
+                            </Show>
                         }
                     })
                     .collect_view();
@@ -432,6 +761,25 @@ pub fn NetworkList() -> impl IntoView {
                         <div class="modal-actions">
                             <button type="button" class="btn btn--danger" on:click=confirm_bulk>"Remove"</button>
                             <button type="button" class="btn" on:click=move |_| pending_bulk.set(None)>"Cancel"</button>
+                        </div>
+                    </div>
+                </div>
+            </Show>
+            <Show when=move || pending_disconnect.get().is_some() fallback=|| view! { <></> }>
+                <div class="modal-backdrop">
+                    <div class="modal-card">
+                        <h3>"Confirm disconnect"</h3>
+                        <p class="modal-confirm">
+                            {move || match pending_disconnect.get() {
+                                Some((net, container)) => format!(
+                                    "Disconnect '{container}' from network '{net}'?"
+                                ),
+                                None => String::new(),
+                            }}
+                        </p>
+                        <div class="modal-actions">
+                            <button type="button" class="btn btn--danger" on:click=confirm_disconnect>"Disconnect"</button>
+                            <button type="button" class="btn" on:click=move |_| pending_disconnect.set(None)>"Cancel"</button>
                         </div>
                     </div>
                 </div>

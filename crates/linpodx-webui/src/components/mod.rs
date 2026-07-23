@@ -35,6 +35,7 @@ mod plugins;
 mod pods;
 mod push_modal;
 mod sandbox;
+mod secrets;
 mod sessions;
 mod settings;
 mod snapshots;
@@ -75,6 +76,7 @@ pub use pin_clients::PinnedClientsView;
 pub use plugins::PluginsView;
 pub use pods::PodsView;
 pub use sandbox::SandboxList;
+pub use secrets::SecretsView;
 pub use sessions::SessionTimeline;
 // `Settings` replaces app.rs's local `SettingsPlaceholder` for `Tab::Settings`
 // once the app-shell mount point is wired up (owned by another agent); allow
