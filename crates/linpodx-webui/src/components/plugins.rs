@@ -11,6 +11,7 @@ use serde_json::{json, Value};
 use wasm_bindgen_futures::spawn_local;
 
 use super::icons::Icon;
+use super::illustrations::EmptySpot;
 use crate::api_client::{build_revoke_cluster_body, paths};
 use crate::app::AuthToken;
 use crate::helpers::plugin_propagation_label;
@@ -230,8 +231,8 @@ pub fn PluginsView() -> impl IntoView {
         let items = rows.get();
         if items.is_empty() {
             return view! {
-                <div class="empty-state">
-                    <span class="empty-state__icon"><Icon name="plugin"/></span>
+                <div class="empty-state empty-state--spot">
+                    <span class="empty-state__spot"><EmptySpot motif="generic"/></span>
                     <span class="empty-state__title">"No plugin keys registered"</span>
                     <span class="empty-state__hint">"Install a signed plugin with the linpodx CLI to register a publisher key."</span>
                 </div>
@@ -280,13 +281,17 @@ pub fn PluginsView() -> impl IntoView {
     };
 
     view! {
-        <div class="plugins-panel">
-            <div class="page-header">
-                <div class="page-header__titles">
-                    <div class="page-title">"Plugin keys"</div>
-                    <div class="page-subtitle">"key registry + cluster-wide revocation"</div>
+        <div class="plugins-panel section-scope--system">
+            <header class="page-head">
+                <div class="page-head__lead">
+                    <div class="page-head__disc"><Icon name="plugin"/></div>
+                    <div class="page-head__titles">
+                        <div class="page-head__eyebrow">"System"</div>
+                        <div class="page-head__title">"Plugin keys"</div>
+                        <div class="page-head__sub">"Key registry + cluster-wide revocation."</div>
+                    </div>
                 </div>
-            </div>
+            </header>
             {move || error.get().map(|e| view! {
                 <div class="error-state"><Icon name="plugin"/><span>{e}</span></div>
             })}

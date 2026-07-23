@@ -26,6 +26,7 @@ use wasm_bindgen::JsValue;
 use wasm_bindgen_futures::spawn_local;
 
 use super::icons::Icon;
+use super::illustrations::EmptySpot;
 use crate::api_client::{fetch_container_inspect, fetch_system_df, fetch_volume_inspect};
 use crate::app::AuthToken;
 use crate::helpers::format_bytes;
@@ -335,8 +336,8 @@ pub fn VolumeList() -> impl IntoView {
             }
             .into_any(),
             Ok(items) if items.is_empty() => view! {
-                <div class="empty-state">
-                    <span class="empty-state__icon"><Icon name="volume"/></span>
+                <div class="empty-state empty-state--spot">
+                    <span class="empty-state__spot"><EmptySpot motif="volumes"/></span>
                     <span class="empty-state__title">"no volumes"</span>
                     <span class="empty-state__hint">
                         "Nothing here yet — create one with the linpodx CLI."
@@ -497,7 +498,17 @@ pub fn VolumeList() -> impl IntoView {
     };
 
     view! {
-        <div class="panel">
+        <div class="panel section-scope--resources">
+            <header class="page-head">
+                <div class="page-head__lead">
+                    <div class="page-head__disc"><Icon name="volume"/></div>
+                    <div class="page-head__titles">
+                        <div class="page-head__eyebrow">"Resources"</div>
+                        <div class="page-head__title">"Volumes"</div>
+                        <div class="page-head__sub">"Named data volumes."</div>
+                    </div>
+                </div>
+            </header>
             <div class="toolbar page-actions">
                 <span class="search-box">
                     <span class="search-box__icon"><Icon name="search"/></span>

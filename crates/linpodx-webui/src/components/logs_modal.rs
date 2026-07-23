@@ -26,7 +26,7 @@ use std::rc::Rc;
 use leptos::prelude::*;
 use leptos::reactive::owner::{LocalStorage, StoredValue};
 use serde_json::json;
-use wasm_bindgen::JsCast;
+use wasm_bindgen::{JsCast, JsValue};
 use wasm_bindgen_futures::spawn_local;
 use web_sys::Element;
 
@@ -36,10 +36,64 @@ use crate::helpers::{
 };
 use crate::ws::{send_rpc, subscribe};
 
+fn download_text_file(filename: &str, text: &str) {
+    let Some(win) = web_sys::window() else {
+        return;
+    };
+    let Some(doc) = win.document() else {
+        return;
+    };
+    let parts = js_sys::Array::new();
+    parts.push(&JsValue::from_str(text));
+    let Ok(blob) = web_sys::Blob::new_with_str_sequence(parts.as_ref()) else {
+        return;
+    };
+    let Ok(url_ctor) = js_sys::Reflect::get(&win, &JsValue::from_str("URL")) else {
+        return;
+    };
+    let Ok(create) = js_sys::Reflect::get(&url_ctor, &JsValue::from_str("createObjectURL")) else {
+        return;
+    };
+    let Ok(create) = create.dyn_into::<js_sys::Function>() else {
+        return;
+    };
+    let Ok(url) = create.call1(&url_ctor, &blob) else {
+        return;
+    };
+    let Some(url) = url.as_string() else {
+        return;
+    };
+    let Ok(anchor) = doc.create_element("a") else {
+        revoke_object_url(&url_ctor, &url);
+        return;
+    };
+    let _ = anchor.set_attribute("href", &url);
+    let _ = anchor.set_attribute("download", filename);
+    if let Some(body) = doc.body() {
+        if body.append_child(&anchor).is_ok() {
+            if let Ok(anchor) = anchor.dyn_into::<web_sys::HtmlElement>() {
+                anchor.click();
+                let _ = body.remove_child(&anchor);
+            }
+        }
+    }
+    revoke_object_url(&url_ctor, &url);
+}
+
+fn revoke_object_url(url_ctor: &JsValue, url: &str) {
+    let Ok(revoke) = js_sys::Reflect::get(url_ctor, &JsValue::from_str("revokeObjectURL")) else {
+        return;
+    };
+    if let Ok(revoke) = revoke.dyn_into::<js_sys::Function>() {
+        let _ = revoke.call1(url_ctor, &JsValue::from_str(url));
+    }
+}
+
 #[component]
 pub fn LogsModal(open: RwSignal<Option<String>>) -> impl IntoView {
     let follow = RwSignal::new(true);
     let status: RwSignal<Option<String>> = RwSignal::new(None);
+    let buffer = RwSignal::new(String::new());
 
     // Active container id — shared with the subscribe callback so switching
     // containers doesn't leak a second subscription. The `Rc<RefCell>` lives
@@ -76,6 +130,12 @@ pub fn LogsModal(open: RwSignal<Option<String>>) -> impl IntoView {
                 Some(line) => line,
                 None => return,
             };
+            buffer.update(|buf| {
+                if !buf.is_empty() {
+                    buf.push('\n');
+                }
+                buf.push_str(&line);
+            });
             // xterm.js handles its own scrollback; the wrapper drops late
             // writes after dispose, so missing-modal reads are safe.
             term.with_value(|t| {
@@ -93,6 +153,7 @@ pub fn LogsModal(open: RwSignal<Option<String>>) -> impl IntoView {
         match id {
             Some(id) => {
                 status.set(None);
+                buffer.set(String::new());
                 *active_for_open.borrow_mut() = Some(id.clone());
                 term.with_value(|t| {
                     if let Some(t) = t.as_ref() {
@@ -136,6 +197,7 @@ pub fn LogsModal(open: RwSignal<Option<String>>) -> impl IntoView {
         open.set(None);
     };
     let clear = move |_| {
+        buffer.set(String::new());
         term.with_value(|t| {
             if let Some(t) = t.as_ref() {
                 t.write_str("\x1b[2J\x1b[H");
@@ -147,6 +209,14 @@ pub fn LogsModal(open: RwSignal<Option<String>>) -> impl IntoView {
     let title = move || match open.get() {
         Some(id) => format!("Logs — {id}"),
         None => String::from("Logs"),
+    };
+
+    let download_logs = move |_| {
+        let id = open
+            .get_untracked()
+            .unwrap_or_else(|| "unknown".to_string());
+        let filename = format!("container-{}-logs.txt", crate::helpers::short_id(&id));
+        download_text_file(&filename, &buffer.get_untracked());
     };
 
     // Mount callback — leptos `node_ref` fires once when the <div> is attached.
@@ -179,6 +249,44 @@ pub fn LogsModal(open: RwSignal<Option<String>>) -> impl IntoView {
             <div class="modal-backdrop">
                 <div class="modal-card modal-card-wide">
                     <h3>{title}</h3>
+                    <div class="logs-toolbar">
+                        <span class="log-search">
+                            <input
+                                class="log-search__input"
+                                type="search"
+                                placeholder="Search logs"
+                                prop:disabled=true
+                                title="search available in drawer Logs"
+                            />
+                            <span class="log-search__count">"0/0"</span>
+                            <span class="log-search__nav">
+                                <button
+                                    type="button"
+                                    class="btn btn--sm"
+                                    prop:disabled=true
+                                    title="search available in drawer Logs"
+                                >
+                                    "Prev"
+                                </button>
+                                <button
+                                    type="button"
+                                    class="btn btn--sm"
+                                    prop:disabled=true
+                                    title="search available in drawer Logs"
+                                >
+                                    "Next"
+                                </button>
+                            </span>
+                        </span>
+                        <button
+                            type="button"
+                            class="btn btn--sm log-download"
+                            prop:disabled=move || buffer.get().is_empty()
+                            on:click=download_logs
+                        >
+                            "Download"
+                        </button>
+                    </div>
                     <div class="modal-form">
                         <label class="modal-inline">
                             <input

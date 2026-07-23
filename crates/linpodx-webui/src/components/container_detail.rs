@@ -179,6 +179,150 @@ fn copy_to_clipboard(text: &str) {
     }
 }
 
+fn download_text_file(filename: &str, text: &str) {
+    let Some(win) = web_sys::window() else {
+        return;
+    };
+    let Some(doc) = win.document() else {
+        return;
+    };
+    let parts = js_sys::Array::new();
+    parts.push(&JsValue::from_str(text));
+    let Ok(blob) = web_sys::Blob::new_with_str_sequence(parts.as_ref()) else {
+        return;
+    };
+    let Ok(url_ctor) = js_sys::Reflect::get(&win, &JsValue::from_str("URL")) else {
+        return;
+    };
+    let Ok(create) = js_sys::Reflect::get(&url_ctor, &JsValue::from_str("createObjectURL")) else {
+        return;
+    };
+    let Ok(create) = create.dyn_into::<js_sys::Function>() else {
+        return;
+    };
+    let Ok(url) = create.call1(&url_ctor, &blob) else {
+        return;
+    };
+    let Some(url) = url.as_string() else {
+        return;
+    };
+    let Ok(anchor) = doc.create_element("a") else {
+        revoke_object_url(&url_ctor, &url);
+        return;
+    };
+    let _ = anchor.set_attribute("href", &url);
+    let _ = anchor.set_attribute("download", filename);
+    if let Some(body) = doc.body() {
+        if body.append_child(&anchor).is_ok() {
+            if let Ok(anchor) = anchor.dyn_into::<web_sys::HtmlElement>() {
+                anchor.click();
+                let _ = body.remove_child(&anchor);
+            }
+        }
+    }
+    revoke_object_url(&url_ctor, &url);
+}
+
+fn revoke_object_url(url_ctor: &JsValue, url: &str) {
+    let Ok(revoke) = js_sys::Reflect::get(url_ctor, &JsValue::from_str("revokeObjectURL")) else {
+        return;
+    };
+    if let Ok(revoke) = revoke.dyn_into::<js_sys::Function>() {
+        let _ = revoke.call1(url_ctor, &JsValue::from_str(url));
+    }
+}
+
+fn case_insensitive_ranges(text: &str, query: &str) -> Vec<(usize, usize)> {
+    let needle = query.trim();
+    if needle.is_empty() {
+        return Vec::new();
+    }
+    let lower_text = text.to_lowercase();
+    let lower_needle = needle.to_lowercase();
+    if lower_needle.is_empty() {
+        return Vec::new();
+    }
+
+    let mut lower_to_original = Vec::with_capacity(lower_text.len());
+    for (original_idx, ch) in text.char_indices() {
+        let lowered = ch.to_lowercase().to_string();
+        lower_to_original.extend(std::iter::repeat_n(original_idx, lowered.len()));
+    }
+
+    let mut ranges = Vec::new();
+    let mut search_from = 0;
+    while let Some(relative) = lower_text[search_from..].find(&lower_needle) {
+        let start_lower = search_from + relative;
+        let end_lower = start_lower + lower_needle.len();
+        let Some(&start) = lower_to_original.get(start_lower) else {
+            break;
+        };
+        let end = lower_to_original
+            .get(end_lower)
+            .copied()
+            .unwrap_or(text.len());
+        if start < end && text.is_char_boundary(start) && text.is_char_boundary(end) {
+            ranges.push((start, end));
+        }
+        search_from = end_lower;
+        if search_from >= lower_text.len() {
+            break;
+        }
+    }
+    ranges
+}
+
+fn rendered_log_line(
+    line: String,
+    is_err: bool,
+    query: &str,
+    active_match: usize,
+    first_match: usize,
+) -> AnyView {
+    let cls = if is_err {
+        "log-line log-line--stderr"
+    } else {
+        "log-line"
+    };
+    let ranges = case_insensitive_ranges(&line, query);
+    if ranges.is_empty() {
+        return view! { <div class=cls>{line}</div> }.into_any();
+    }
+
+    let mut last = 0;
+    let mut parts: Vec<AnyView> = Vec::new();
+    for (idx, (start, end)) in ranges.into_iter().enumerate() {
+        if start > last {
+            parts.push(view! { <>{line[last..start].to_string()}</> }.into_any());
+        }
+        let mark_cls = if first_match + idx == active_match {
+            "log-hl log-hl--active"
+        } else {
+            "log-hl"
+        };
+        parts.push(view! { <mark class=mark_cls>{line[start..end].to_string()}</mark> }.into_any());
+        last = end;
+    }
+    if last < line.len() {
+        parts.push(view! { <>{line[last..].to_string()}</> }.into_any());
+    }
+    view! { <div class=cls>{parts}</div> }.into_any()
+}
+
+fn scroll_into_view_center(el: &Element) {
+    let opts = js_sys::Object::new();
+    let _ = js_sys::Reflect::set(
+        &opts,
+        &JsValue::from_str("block"),
+        &JsValue::from_str("center"),
+    );
+    if let Ok(method) = js_sys::Reflect::get(el, &JsValue::from_str("scrollIntoView")) {
+        if let Ok(method) = method.dyn_into::<js_sys::Function>() {
+            let _ = method.call1(el, &opts);
+        }
+    }
+}
+
 fn as_positive_u64(v: Option<&Value>) -> Option<u64> {
     v.and_then(Value::as_u64).filter(|n| *n > 0).or_else(|| {
         v.and_then(Value::as_i64)
@@ -337,6 +481,8 @@ pub fn ContainerDetail() -> impl IntoView {
     let follow = RwSignal::new(false);
     let stick_bottom = RwSignal::new(true);
     let logs_loaded_for: RwSignal<Option<String>> = RwSignal::new(None);
+    let log_query = RwSignal::new(String::new());
+    let active_log_match = RwSignal::new(0usize);
     let log_ref = NodeRef::<leptos::html::Div>::new();
 
     // Tail fetch — runs the first time the Logs tab is opened for a container.
@@ -438,6 +584,41 @@ pub fn ContainerDetail() -> impl IntoView {
         if let Some(node) = log_ref.get() {
             if let Some(el) = (*node).dyn_ref::<Element>() {
                 el.set_scroll_top(el.scroll_height());
+            }
+        }
+    });
+
+    let log_match_count = Signal::derive(move || {
+        let query = log_query.get();
+        if query.trim().is_empty() {
+            return 0;
+        }
+        log_lines
+            .get()
+            .iter()
+            .map(|(line, _)| case_insensitive_ranges(line, &query).len())
+            .sum::<usize>()
+    });
+
+    Effect::new(move |_| {
+        let total = log_match_count.get();
+        if total == 0 || active_log_match.get() >= total {
+            active_log_match.set(0);
+        }
+    });
+
+    Effect::new(move |_| {
+        let _ = active_log_match.get();
+        let _ = log_query.get();
+        let _ = log_lines.get();
+        if log_match_count.get_untracked() == 0 {
+            return;
+        }
+        if let Some(node) = log_ref.get() {
+            if let Some(el) = (*node).dyn_ref::<Element>() {
+                if let Ok(Some(active)) = el.query_selector(".log-hl--active") {
+                    scroll_into_view_center(&active);
+                }
             }
         }
     });
@@ -668,6 +849,43 @@ pub fn ContainerDetail() -> impl IntoView {
         }
     };
 
+    let current_log_text = move || {
+        log_lines
+            .get_untracked()
+            .into_iter()
+            .map(|(line, _)| line)
+            .collect::<Vec<_>>()
+            .join("\n")
+    };
+
+    let download_logs = move |_| {
+        let id = target
+            .get_untracked()
+            .unwrap_or_else(|| "unknown".to_string());
+        let filename = format!("container-{}-logs.txt", short_id(&id));
+        download_text_file(&filename, &current_log_text());
+    };
+
+    let previous_match = move |_| {
+        let total = log_match_count.get_untracked();
+        if total == 0 {
+            return;
+        }
+        active_log_match.update(|idx| {
+            *idx = if *idx == 0 { total - 1 } else { *idx - 1 };
+        });
+    };
+
+    let next_match = move |_| {
+        let total = log_match_count.get_untracked();
+        if total == 0 {
+            return;
+        }
+        active_log_match.update(|idx| {
+            *idx = (*idx + 1) % total;
+        });
+    };
+
     // ---- Tab body --------------------------------------------------------
     let body = move || {
         match tab.get() {
@@ -705,6 +923,56 @@ pub fn ContainerDetail() -> impl IntoView {
                     </button>
                     {move || logs_status.get().map(|m| view! { <span class="status">{m}</span> })}
                 </div>
+                <div class="logs-toolbar">
+                    <span class="log-search">
+                        <input
+                            class="log-search__input"
+                            type="search"
+                            placeholder="Search logs"
+                            prop:value=move || log_query.get()
+                            on:input=move |ev| {
+                                log_query.set(event_target_value(&ev));
+                                active_log_match.set(0);
+                            }
+                        />
+                        <span class="log-search__count">
+                            {move || {
+                                let total = log_match_count.get();
+                                if total == 0 {
+                                    "0/0".to_string()
+                                } else {
+                                    format!("{}/{}", active_log_match.get() + 1, total)
+                                }
+                            }}
+                        </span>
+                        <span class="log-search__nav">
+                            <button
+                                type="button"
+                                class="btn btn--sm"
+                                prop:disabled=move || log_match_count.get() == 0
+                                on:click=previous_match
+                            >
+                                "Prev"
+                            </button>
+                            <button
+                                type="button"
+                                class="btn btn--sm"
+                                prop:disabled=move || log_match_count.get() == 0
+                                on:click=next_match
+                            >
+                                "Next"
+                            </button>
+                        </span>
+                    </span>
+                    <button
+                        type="button"
+                        class="btn btn--sm log-download"
+                        prop:disabled=move || log_lines.get().is_empty()
+                        on:click=download_logs
+                    >
+                        "Download"
+                    </button>
+                </div>
                 {move || {
                     let lines = log_lines.get();
                     if lines.is_empty() && logs_status.get().is_none() {
@@ -717,17 +985,19 @@ pub fn ContainerDetail() -> impl IntoView {
                     } else {
                         view! {
                             <div class="log-block" node_ref=log_ref on:scroll=scroll_handler>
-                                {lines
-                                    .into_iter()
-                                    .map(|(line, is_err)| {
-                                        let cls = if is_err {
-                                            "log-line log-line--stderr"
-                                        } else {
-                                            "log-line"
-                                        };
-                                        view! { <div class=cls>{line}</div> }
-                                    })
-                                    .collect_view()}
+                                {{
+                                    let query = log_query.get();
+                                    let active = active_log_match.get();
+                                    let mut seen = 0usize;
+                                    lines
+                                        .into_iter()
+                                        .map(|(line, is_err)| {
+                                            let first = seen;
+                                            seen += case_insensitive_ranges(&line, &query).len();
+                                            rendered_log_line(line, is_err, &query, active, first)
+                                        })
+                                        .collect_view()
+                                }}
                             </div>
                         }
                         .into_any()

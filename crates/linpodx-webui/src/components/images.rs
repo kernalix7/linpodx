@@ -32,6 +32,7 @@ use serde_json::{json, Value};
 use wasm_bindgen_futures::spawn_local;
 
 use super::icons::Icon;
+use super::illustrations::EmptySpot;
 use super::push_modal::PushModal;
 use crate::api_client::fetch_system_df;
 use crate::app::AuthToken;
@@ -264,8 +265,8 @@ pub fn ImageList() -> impl IntoView {
             }
             .into_any(),
             Ok(items) if items.is_empty() => view! {
-                <div class="empty-state">
-                    <span class="empty-state__icon"><Icon name="image"/></span>
+                <div class="empty-state empty-state--spot">
+                    <span class="empty-state__spot"><EmptySpot motif="images"/></span>
                     <span class="empty-state__title">"no images"</span>
                     <span class="empty-state__hint">
                         "Nothing here yet — pull one with the linpodx CLI."
@@ -411,7 +412,17 @@ pub fn ImageList() -> impl IntoView {
     };
 
     view! {
-        <div class="images-panel">
+        <div class="images-panel section-scope--resources">
+            <header class="page-head">
+                <div class="page-head__lead">
+                    <div class="page-head__disc"><Icon name="image"/></div>
+                    <div class="page-head__titles">
+                        <div class="page-head__eyebrow">"Resources"</div>
+                        <div class="page-head__title">"Images"</div>
+                        <div class="page-head__sub">"Local OCI image store."</div>
+                    </div>
+                </div>
+            </header>
             <div class="toolbar page-actions">
                 <span class="search-box">
                     <span class="search-box__icon"><Icon name="search"/></span>

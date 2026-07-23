@@ -2,6 +2,7 @@ use leptos::prelude::*;
 use serde_json::{json, Value};
 use wasm_bindgen_futures::spawn_local;
 
+use super::icons::Icon;
 use super::list_table::{row_actions, ListTable, PanelSpec};
 use crate::ws::send_rpc;
 
@@ -97,13 +98,17 @@ pub fn SessionTimeline() -> impl IntoView {
     };
 
     view! {
-        <div class="sessions-panel">
-            <div class="page-header">
-                <div class="page-header__titles">
-                    <div class="page-title">"Sessions"</div>
-                    <div class="page-subtitle">"per-container sandbox session timeline"</div>
+        <div class="sessions-panel section-scope--sandbox">
+            <header class="page-head">
+                <div class="page-head__lead">
+                    <div class="page-head__disc"><Icon name="event"/></div>
+                    <div class="page-head__titles">
+                        <div class="page-head__eyebrow">"AI Sandbox"</div>
+                        <div class="page-head__title">"Sessions"</div>
+                        <div class="page-head__sub">"Per-container sandbox session timeline."</div>
+                    </div>
                 </div>
-            </div>
+            </header>
             <ListTable spec=spec actions_for_row=actions/>
             <Show when=move || timeline_open.get().is_some() fallback=|| view! { <></> }>
                 <div class="modal-backdrop">

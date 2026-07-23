@@ -24,6 +24,7 @@ use serde_json::{json, Value};
 use wasm_bindgen_futures::spawn_local;
 
 use super::icons::Icon;
+use super::illustrations::EmptySpot;
 use crate::app::AuthToken;
 use crate::helpers::{container_display_name, short_id, status_chip_modifier};
 use crate::ws::{fetch_list, send_rpc, subscribe};
@@ -314,15 +315,19 @@ pub fn StacksView() -> impl IntoView {
     };
 
     view! {
-        <div class="containers-panel">
-            <div class="page-header">
-                <div class="page-header__titles">
-                    <h2 class="page-title">"Stacks"</h2>
-                    <p class="page-subtitle">
-                        "Containers grouped by Compose project — operate a multi-container app as a unit."
-                    </p>
+        <div class="containers-panel section-scope--workloads">
+            <header class="page-head">
+                <div class="page-head__lead">
+                    <div class="page-head__disc"><Icon name="stack"/></div>
+                    <div class="page-head__titles">
+                        <div class="page-head__eyebrow">"Workloads"</div>
+                        <div class="page-head__title">"Stacks"</div>
+                        <div class="page-head__sub">
+                            "Containers grouped by Compose project — operate a multi-container app as a unit."
+                        </div>
+                    </div>
                 </div>
-            </div>
+            </header>
             <section class="panel">
                 <div class="panel-toolbar">
                     <span class="search-box">
@@ -470,8 +475,8 @@ fn render_member_row(row: &Value) -> AnyView {
 /// Empty-state shown when there are no containers (or none match the filter).
 fn empty_state() -> AnyView {
     view! {
-        <div class="empty-state">
-            <span class="empty-state__icon"><Icon name="container"/></span>
+        <div class="empty-state empty-state--spot">
+            <span class="empty-state__spot"><EmptySpot motif="containers"/></span>
             <span class="empty-state__title">"no stacks"</span>
             <span class="empty-state__hint">
                 "Compose projects appear here once you run containers labelled with a compose project."

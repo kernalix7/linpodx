@@ -22,6 +22,7 @@ use serde_json::Value;
 use wasm_bindgen_futures::spawn_local;
 
 use super::icons::Icon;
+use super::illustrations::EmptySpot;
 use crate::app::{AuthToken, Nav, Tab};
 
 /// Mirrors `app.rs::TOKEN_KEY`. Kept as a local literal rather than importing
@@ -311,8 +312,8 @@ pub fn Settings() -> impl IntoView {
         }
         .into_any(),
         Some(Ok(summary)) if summary.checks.is_empty() => view! {
-            <div class="empty-state">
-                <span class="empty-state__icon"><Icon name="settings"/></span>
+            <div class="empty-state empty-state--spot">
+                <span class="empty-state__spot"><EmptySpot motif="generic"/></span>
                 <span class="empty-state__title">"No checks reported"</span>
                 <span class="empty-state__hint">"Run "<span class="mono">"linpodx doctor"</span>" from the CLI for a full report."</span>
             </div>
@@ -381,13 +382,17 @@ pub fn Settings() -> impl IntoView {
     };
 
     view! {
-        <div class="dashboard-panel">
-            <div class="page-header">
-                <div class="page-header__titles">
-                    <div class="page-title">"Settings"</div>
-                    <div class="page-subtitle">"daemon info + diagnostics"</div>
+        <div class="dashboard-panel section-scope--system">
+            <header class="page-head">
+                <div class="page-head__lead">
+                    <div class="page-head__disc"><Icon name="settings"/></div>
+                    <div class="page-head__titles">
+                        <div class="page-head__eyebrow">"System"</div>
+                        <div class="page-head__title">"Settings"</div>
+                        <div class="page-head__sub">"Daemon info and doctor diagnostics."</div>
+                    </div>
                 </div>
-            </div>
+            </header>
 
             <div class="surface-card">
                 <div class="section-title">"Daemon"</div>

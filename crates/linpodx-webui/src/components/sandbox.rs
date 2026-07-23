@@ -17,13 +17,17 @@ pub fn SandboxList() -> impl IntoView {
         empty_msg: "no profiles loaded",
     };
     view! {
-        <div class="sandbox-panel">
-            <div class="page-header">
-                <div class="page-header__titles">
-                    <div class="page-title">"Sandbox profiles"</div>
-                    <div class="page-subtitle">"policy engine profiles + MCP allowlist"</div>
+        <div class="sandbox-panel section-scope--sandbox">
+            <header class="page-head">
+                <div class="page-head__lead">
+                    <div class="page-head__disc"><Icon name="sandbox"/></div>
+                    <div class="page-head__titles">
+                        <div class="page-head__eyebrow">"AI Sandbox"</div>
+                        <div class="page-head__title">"Sandbox profiles"</div>
+                        <div class="page-head__sub">"Policy engine profiles + MCP allowlist."</div>
+                    </div>
                 </div>
-            </div>
+            </header>
             <AutoEncryptCard/>
             <ListTable spec=spec/>
         </div>

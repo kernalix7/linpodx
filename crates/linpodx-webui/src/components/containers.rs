@@ -22,6 +22,7 @@ use super::create_modal::CreateContainerModal;
 use super::exec_modal::ExecModal;
 use super::exec_pty_modal::ExecPtyModal;
 use super::icons::Icon;
+use super::illustrations::EmptySpot;
 use super::logs_modal::LogsModal;
 use super::{ContainerLiveSample, DashboardShared};
 use crate::app::{AuthToken, DrawerState};
@@ -152,8 +153,8 @@ pub fn ContainerList() -> impl IntoView {
             }
             .into_any(),
             Ok(items) if items.is_empty() => view! {
-                <div class="empty-state">
-                    <span class="empty-state__icon"><Icon name="container"/></span>
+                <div class="empty-state empty-state--spot">
+                    <span class="empty-state__spot"><EmptySpot motif="containers"/></span>
                     <span class="empty-state__title">"no containers"</span>
                     <span class="empty-state__hint">
                         "Nothing here yet — create one with the linpodx CLI, or adjust your filter."
@@ -244,13 +245,17 @@ pub fn ContainerList() -> impl IntoView {
     };
 
     view! {
-        <div class="containers-panel">
-            <div class="page-header">
-                <div class="page-header__titles">
-                    <h2 class="page-title">"Containers"</h2>
-                    <p class="page-subtitle">"Create, inspect, and operate local containers."</p>
+        <div class="containers-panel section-scope--workloads">
+            <header class="page-head">
+                <div class="page-head__lead">
+                    <div class="page-head__disc"><Icon name="container"/></div>
+                    <div class="page-head__titles">
+                        <div class="page-head__eyebrow">"Workloads"</div>
+                        <div class="page-head__title">"Containers"</div>
+                        <div class="page-head__sub">"Create, inspect, and operate local containers."</div>
+                    </div>
                 </div>
-                <div class="page-actions">
+                <div class="page-head__actions">
                     <button
                         type="button"
                         class="btn btn--primary"
@@ -260,7 +265,7 @@ pub fn ContainerList() -> impl IntoView {
                         "New container"
                     </button>
                 </div>
-            </div>
+            </header>
             <section class="panel">
                 <div class="panel-toolbar">
                     <span class="search-box">

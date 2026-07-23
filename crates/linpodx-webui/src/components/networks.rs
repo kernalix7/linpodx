@@ -33,6 +33,7 @@ use serde_json::{json, Value};
 use wasm_bindgen_futures::spawn_local;
 
 use super::icons::Icon;
+use super::illustrations::EmptySpot;
 use crate::api_client::fetch_container_inspect;
 use crate::app::AuthToken;
 use crate::ws::{fetch_list, send_rpc, subscribe};
@@ -507,8 +508,8 @@ pub fn NetworkList() -> impl IntoView {
             }
             .into_any(),
             Ok(items) if items.is_empty() => view! {
-                <div class="empty-state">
-                    <span class="empty-state__icon"><Icon name="network"/></span>
+                <div class="empty-state empty-state--spot">
+                    <span class="empty-state__spot"><EmptySpot motif="networks"/></span>
                     <span class="empty-state__title">"no networks"</span>
                     <span class="empty-state__hint">
                         "Nothing here yet — create one with the linpodx CLI."
@@ -687,7 +688,17 @@ pub fn NetworkList() -> impl IntoView {
     };
 
     view! {
-        <div class="panel">
+        <div class="panel section-scope--resources">
+            <header class="page-head">
+                <div class="page-head__lead">
+                    <div class="page-head__disc"><Icon name="network"/></div>
+                    <div class="page-head__titles">
+                        <div class="page-head__eyebrow">"Resources"</div>
+                        <div class="page-head__title">"Networks"</div>
+                        <div class="page-head__sub">"Container networks."</div>
+                    </div>
+                </div>
+            </header>
             <div class="toolbar page-actions">
                 <span class="search-box">
                     <span class="search-box__icon"><Icon name="search"/></span>

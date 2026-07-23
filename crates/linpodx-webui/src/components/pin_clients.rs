@@ -95,13 +95,17 @@ pub fn PinnedClientsView() -> impl IntoView {
     };
 
     view! {
-        <div class="pinned-clients-panel">
-            <div class="page-header">
-                <div class="page-header__titles">
-                    <div class="page-title">"TOFU pin-store"</div>
-                    <div class="page-subtitle">"trust-on-first-use client pin expiry"</div>
+        <div class="pinned-clients-panel section-scope--system">
+            <header class="page-head">
+                <div class="page-head__lead">
+                    <div class="page-head__disc"><Icon name="pin"/></div>
+                    <div class="page-head__titles">
+                        <div class="page-head__eyebrow">"System"</div>
+                        <div class="page-head__title">"TOFU pin-store"</div>
+                        <div class="page-head__sub">"Trust-on-first-use client pin expiry."</div>
+                    </div>
                 </div>
-            </div>
+            </header>
             <div class="surface-card">
                 <p class="rest-hint">{format!("REST: PUT {}", paths::TOFU_EXPIRY)}</p>
                 {move || match status.get() {

@@ -1,8 +1,15 @@
 //! Dashboard — the at-a-glance home the SPA opens to (Docker Desktop parity).
 //!
-//! Layout (top → bottom): a stat-tile row, two aggregate live charts (CPU% +
-//! Memory), a recent-events feed and a quick-actions row. Each fetch is
-//! independent so one failing endpoint never blanks the whole page.
+//! Spec v6 §4 "hero v2" layout, weighted top → bottom:
+//!   * `.hero-row` — the visual anchor. A widest-column capacity donut (disk
+//!     used/reclaimable/free from `system df`) at `--e-2` elevation, the two
+//!     aggregate live charts (CPU% + Memory) at flat `--e-1`, and a quiet,
+//!     borderless vertical count list — donut first, charts second, counts
+//!     third, in that order of visual weight.
+//!   * `.hero-secondary` — the recent-events feed beside a quick-actions card.
+//!
+//! Each fetch is independent so one failing endpoint never blanks the whole
+//! page (preserved from the flat v1 layout).
 //!
 //! The aggregate CPU / memory ring buffers + running/total counts live in a
 //! [`DashboardShared`] context that is *populated by the app-root poll loop*
@@ -15,9 +22,10 @@ use leptos::prelude::*;
 use serde_json::Value;
 use wasm_bindgen_futures::spawn_local;
 
-use super::charts::AreaChart;
+use super::charts::{AreaChart, CapacityDonut};
+use super::icons::Icon;
 use super::live_events::LiveEvents;
-use crate::app::{AuthToken, Nav, Tab};
+use crate::app::{AuthToken, CreateIntent, CreateKind, Nav, Tab};
 use crate::helpers::format_bytes;
 use crate::ws::fetch_list;
 
@@ -92,11 +100,56 @@ fn arr_len(res: &Option<Result<Value, String>>) -> Option<usize> {
     }
 }
 
+/// One `system df` category's `(size_bytes, reclaimable_bytes)`, defaulting
+/// to zero when the category is absent (e.g. `build_cache` on older
+/// daemons) — the donut degrades gracefully instead of erroring out.
+fn df_category_bytes(df: &Value, key: &str) -> (u64, u64) {
+    let cat = df.get(key);
+    let size = cat
+        .and_then(|c| c.get("size_bytes"))
+        .and_then(Value::as_u64)
+        .unwrap_or(0);
+    let reclaimable = cat
+        .and_then(|c| c.get("reclaimable_bytes"))
+        .and_then(Value::as_u64)
+        .unwrap_or(0);
+    (size, reclaimable)
+}
+
+/// Sum every `system df` category into `(used, reclaimable)` for the hero
+/// donut. `used` is the *non-reclaimable* remainder (`size - reclaimable`),
+/// so `used + reclaimable` always accounts for the whole tracked total —
+/// there is no host-capacity field in `system df` to derive a real "free"
+/// number from, so we never fabricate one (the donut's `free_bytes` stays 0
+/// until such a field exists; see `CapacityDonut`'s doc comment).
+fn df_used_reclaimable(res: &Option<Result<Value, String>>) -> (u64, u64) {
+    let df = match res {
+        Some(Ok(v)) => v,
+        _ => return (0, 0),
+    };
+    let mut size_total = 0u64;
+    let mut reclaim_total = 0u64;
+    for key in ["images", "containers", "volumes", "build_cache"] {
+        let (size, reclaim) = df_category_bytes(df, key);
+        size_total = size_total.saturating_add(size);
+        reclaim_total = reclaim_total.saturating_add(reclaim);
+    }
+    (size_total.saturating_sub(reclaim_total), reclaim_total)
+}
+
+/// `background:` inline style resolving a section's `--sec-<key>-fg` token —
+/// used to tint a `.dot` with its resource's section hue (Spec v6 §4
+/// hero-counts) without needing a new CSS class per section.
+fn section_dot_style(key: &str) -> String {
+    format!("background: var(--sec-{key}-fg)")
+}
+
 #[component]
 pub fn Dashboard() -> impl IntoView {
     let auth = use_context::<AuthToken>().expect("AuthToken context provided by AppRoot");
     let shared = use_context::<DashboardShared>().expect("DashboardShared provided by AppRoot");
     let nav = use_context::<Nav>().expect("Nav context provided by AppRoot");
+    let create_intent = use_context::<CreateIntent>();
 
     // Per-tile fetch state. `None` = loading; `Some(Ok)` / `Some(Err)`.
     let images = RwSignal::new(None::<Result<Value, String>>);
@@ -123,15 +176,27 @@ pub fn Dashboard() -> impl IntoView {
     };
     refresh();
 
-    // ---- stat tiles ----------------------------------------------------
+    // ---- capacity donut (hero-donut, widest column) ---------------------
+    let used_bytes = Signal::derive(move || df_used_reclaimable(&df.get()).0);
+    let reclaimable_bytes = Signal::derive(move || df_used_reclaimable(&df.get()).1);
+    // No host-capacity field exists in `system df` yet — see `df_used_reclaimable`.
+    let free_bytes = Signal::derive(|| 0u64);
+    let manage_disk = Callback::new(move |()| nav.0.set(Tab::Disk));
+
+    // ---- hero-counts tiles (quiet, third-priority column) ---------------
     let tile_containers = move || {
         let r = shared.running.get();
         let t = shared.total.get();
         view! {
-            <div class="stat-tile">
-                <span class="stat-tile__label">"Containers"</span>
-                <span class="stat-tile__value mono">{format!("{r}/{t}")}</span>
-                <span class="stat-tile__delta">"running / total"</span>
+            <div class="hero-counts__tile">
+                <span class="stat-tile__label">
+                    <span class="dot" style=section_dot_style("workloads")></span>
+                    "Containers"
+                </span>
+                <span style="margin-left: auto; display: flex; align-items: center; gap: var(--sp-2)">
+                    <span class="mono">{format!("{r}/{t}")}</span>
+                    <span class="stat-tile__delta">"running / total"</span>
+                </span>
             </div>
         }
     };
@@ -155,10 +220,15 @@ pub fn Dashboard() -> impl IntoView {
             _ => ("…".to_string(), "loading".to_string()),
         };
         view! {
-            <div class="stat-tile">
-                <span class="stat-tile__label">"Images"</span>
-                <span class="stat-tile__value mono">{val}</span>
-                <span class="stat-tile__delta">{delta}</span>
+            <div class="hero-counts__tile">
+                <span class="stat-tile__label">
+                    <span class="dot" style=section_dot_style("resources")></span>
+                    "Images"
+                </span>
+                <span style="margin-left: auto; display: flex; align-items: center; gap: var(--sp-2)">
+                    <span class="mono">{val}</span>
+                    <span class="stat-tile__delta">{delta}</span>
+                </span>
             </div>
         }
     };
@@ -171,10 +241,15 @@ pub fn Dashboard() -> impl IntoView {
             None => ("…".to_string(), "loading".to_string()),
         };
         view! {
-            <div class="stat-tile">
-                <span class="stat-tile__label">{label}</span>
-                <span class="stat-tile__value mono">{val}</span>
-                <span class="stat-tile__delta">{delta}</span>
+            <div class="hero-counts__tile">
+                <span class="stat-tile__label">
+                    <span class="dot" style=section_dot_style("resources")></span>
+                    {label}
+                </span>
+                <span style="margin-left: auto; display: flex; align-items: center; gap: var(--sp-2)">
+                    <span class="mono">{val}</span>
+                    <span class="stat-tile__delta">{delta}</span>
+                </span>
             </div>
         }
     };
@@ -197,73 +272,104 @@ pub fn Dashboard() -> impl IntoView {
             Some(Err(e)) => ("—".to_string(), e, false),
             None => ("…".to_string(), "loading".to_string(), false),
         };
+        // Daemon reachability is a *state*, not a resource section, so it
+        // keeps the existing status-dot modifier rather than a section hue.
         let dot_cls = if ok {
             "dot dot--success"
         } else {
             "dot dot--danger"
         };
         view! {
-            <div class="stat-tile">
+            <div class="hero-counts__tile">
                 <span class="stat-tile__label">
-                    <span class=dot_cls></span>" Daemon"
+                    <span class=dot_cls></span>
+                    "Daemon"
                 </span>
-                <span class="stat-tile__value mono">{val}</span>
-                <span class="stat-tile__delta">{delta}</span>
+                <span style="margin-left: auto; display: flex; align-items: center; gap: var(--sp-2)">
+                    <span class="mono">{val}</span>
+                    <span class="stat-tile__delta">{delta}</span>
+                </span>
             </div>
         }
     };
 
-    // ---- quick actions -------------------------------------------------
+    // ---- quick actions ----------------------------------------------------
+    let new_container = move |_| {
+        if let Some(intent) = create_intent {
+            nav.0.set(Tab::Containers);
+            intent.0.set(Some(CreateKind::Container));
+        }
+    };
     let run_doctor = move |_| nav.0.set(Tab::Settings);
     let open_terminal = move |_| nav.0.set(Tab::Containers);
     let on_refresh = move |_| refresh();
 
     view! {
-        <div class="dashboard-panel">
-            <div class="page-header">
-                <div class="page-header__titles">
-                    <div class="page-title">"Dashboard"</div>
-                    <div class="page-subtitle">"live overview of this linpodx daemon"</div>
+        <div class="dashboard-panel section-scope--home">
+            <header class="page-head">
+                <div class="page-head__lead">
+                    <div class="page-head__disc"><Icon name="dashboard"/></div>
+                    <div class="page-head__titles">
+                        <div class="page-head__title">"Dashboard"</div>
+                        <div class="page-head__sub">"live overview of this linpodx daemon"</div>
+                    </div>
                 </div>
-                <div class="page-actions">
-                    <button type="button" class="btn btn--sm btn--secondary" on:click=run_doctor>
-                        "Run doctor"
-                    </button>
-                    <button type="button" class="btn btn--sm btn--secondary" on:click=open_terminal>
-                        "Open terminal"
-                    </button>
-                    <button type="button" class="btn btn--sm btn--secondary" on:click=on_refresh>
-                        "Refresh"
-                    </button>
+            </header>
+
+            <div class="hero-row">
+                <div class="hero-donut">
+                    <CapacityDonut
+                        used_bytes=used_bytes
+                        reclaimable_bytes=reclaimable_bytes
+                        free_bytes=free_bytes
+                        on_manage=manage_disk
+                    />
+                </div>
+                <div class="hero-charts">
+                    <AreaChart
+                        data=Signal::derive(move || shared.agg_cpu.get())
+                        title="CPU %".to_string()
+                        height=96.0
+                        value_fmt=fmt_pct
+                        zero_floor=true
+                    />
+                    <AreaChart
+                        data=Signal::derive(move || shared.agg_mem.get())
+                        title="Memory".to_string()
+                        height=96.0
+                        value_fmt=fmt_mem
+                        zero_floor=true
+                    />
+                </div>
+                <div class="hero-counts">
+                    {tile_containers}
+                    {tile_images}
+                    {move || simple_tile("Volumes", volumes)}
+                    {move || simple_tile("Networks", networks)}
+                    {tile_daemon}
                 </div>
             </div>
 
-            <div class="stat-tile-grid">
-                {tile_containers}
-                {tile_images}
-                {move || simple_tile("Volumes", volumes)}
-                {move || simple_tile("Networks", networks)}
-                {tile_daemon}
+            <div class="hero-secondary">
+                <LiveEvents/>
+                <div class="quick-actions">
+                    <div class="chart-card__title">"Quick actions"</div>
+                    <div class="quick-actions__grid">
+                        <button type="button" class="btn btn--sm btn--secondary" on:click=new_container>
+                            "New container"
+                        </button>
+                        <button type="button" class="btn btn--sm btn--secondary" on:click=run_doctor>
+                            "Run doctor"
+                        </button>
+                        <button type="button" class="btn btn--sm btn--secondary" on:click=open_terminal>
+                            "Open terminal"
+                        </button>
+                        <button type="button" class="btn btn--sm btn--secondary" on:click=on_refresh>
+                            "Refresh"
+                        </button>
+                    </div>
+                </div>
             </div>
-
-            <div class="chart-row">
-                <AreaChart
-                    data=Signal::derive(move || shared.agg_cpu.get())
-                    title="CPU %".to_string()
-                    height=130.0
-                    value_fmt=fmt_pct
-                    zero_floor=true
-                />
-                <AreaChart
-                    data=Signal::derive(move || shared.agg_mem.get())
-                    title="Memory".to_string()
-                    height=130.0
-                    value_fmt=fmt_mem
-                    zero_floor=true
-                />
-            </div>
-
-            <LiveEvents/>
         </div>
     }
 }

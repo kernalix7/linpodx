@@ -14,6 +14,8 @@
 //!   │          │ statusbar                   │
 //!   └──────────┴─────────────────────────────┘
 
+use std::collections::HashSet;
+
 use gloo_storage::Storage;
 use leptos::prelude::*;
 use wasm_bindgen::closure::Closure;
@@ -22,13 +24,15 @@ use wasm_bindgen_futures::spawn_local;
 
 use crate::components::{
     AuditFeed, ClusterView, CommandPalette, ContainerDetail, ContainerList, ContainerLiveSample,
-    Dashboard, DashboardShared, Icon, ImageList, NetworkList, PinnedClientsView, PluginsView,
-    PodsView, SandboxList, SecretsView, SessionTimeline, Settings, SnapshotTree, Sparkline,
-    StacksView, VolumeList,
+    Dashboard, DashboardShared, DiskUsageView, Icon, ImageList, NetworkList, PinnedClientsView,
+    PluginsView, PodsView, SandboxList, SecretsView, SessionTimeline, Settings, SnapshotTree,
+    Sparkline, StacksView, VolumeList,
 };
 
 const TOKEN_KEY: &str = "linpodx_token";
 const THEME_KEY: &str = "linpodx_theme";
+/// Comma-joined [`Section::key`]s of the *collapsed* nav sections (Spec v6 §1.3).
+const NAV_SECTIONS_KEY: &str = "linpodx_nav_sections";
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Tab {
@@ -53,6 +57,11 @@ pub enum Tab {
     Plugins,
     /// Phase 26 — podman secret store (list / create / remove).
     Secrets,
+    /// Spec v6 §5 — disk management center (`system df` breakdown + per-category
+    /// prune behind a confirm gate). Body delivered by Lane C's `DiskCenter`.
+    Disk,
+    /// Spec v6 addendum — codex-lane disk-usage detail view (`DiskUsageView`).
+    DiskUsage,
     /// App-shell v5 — daemon info + doctor diagnostics.
     Settings,
 }
@@ -75,7 +84,34 @@ impl Tab {
             Tab::PinnedClients => "Pinned Clients",
             Tab::Plugins => "Plugins",
             Tab::Secrets => "Secrets",
+            Tab::Disk => "Disk",
+            Tab::DiskUsage => "Disk Usage",
             Tab::Settings => "Settings",
+        }
+    }
+
+    /// One-line subtitle for the §3 page-head. Kept here (not in each panel) so
+    /// the shell breadcrumb and the page identity stay in lockstep.
+    pub fn subtitle(self) -> &'static str {
+        match self {
+            Tab::Dashboard => "Live daemon health, capacity and activity",
+            Tab::Containers => "Running and stopped containers",
+            Tab::Stacks => "Containers grouped by compose project",
+            Tab::Pods => "Containers grouped by shared pod namespace",
+            Tab::Images => "Local OCI image store",
+            Tab::Volumes => "Named data volumes",
+            Tab::Networks => "Container networks",
+            Tab::Snapshots => "Commit snapshots and rollback tree",
+            Tab::Sessions => "Per-container session timeline",
+            Tab::Sandbox => "AI-agent sandbox profiles and policy",
+            Tab::Audit => "Tamper-evident audit event feed",
+            Tab::Cluster => "Raft / gossip cluster membership",
+            Tab::PinnedClients => "TOFU-pinned remote clients",
+            Tab::Plugins => "Plugin key registry and revocation",
+            Tab::Secrets => "Podman secret store",
+            Tab::Disk => "Reclaim space across images, containers and volumes",
+            Tab::DiskUsage => "Detailed on-disk usage breakdown",
+            Tab::Settings => "Daemon info and doctor diagnostics",
         }
     }
 
@@ -99,29 +135,184 @@ impl Tab {
             Tab::PinnedClients => "pin",
             Tab::Plugins => "plugin",
             Tab::Secrets => "secret",
+            Tab::Disk => "disk",
+            Tab::DiskUsage => "disk",
             Tab::Settings => "settings",
         }
     }
 
-    const ALL: [Tab; 16] = [
-        Tab::Dashboard,
-        Tab::Containers,
-        Tab::Stacks,
-        Tab::Pods,
-        Tab::Images,
-        Tab::Volumes,
-        Tab::Networks,
-        Tab::Snapshots,
-        Tab::Sessions,
-        Tab::Sandbox,
-        Tab::Audit,
-        Tab::Cluster,
-        Tab::PinnedClients,
-        Tab::Plugins,
-        Tab::Secrets,
-        Tab::Settings,
+    /// Reverse map: which sidebar [`Section`] this tab belongs to.
+    pub fn section(self) -> Section {
+        match self {
+            Tab::Dashboard => Section::Home,
+            Tab::Containers | Tab::Pods | Tab::Stacks => Section::Workloads,
+            Tab::Images | Tab::Volumes | Tab::Networks | Tab::Secrets => Section::Resources,
+            Tab::Sandbox | Tab::Sessions | Tab::Audit | Tab::Snapshots => Section::Sandbox,
+            Tab::Cluster
+            | Tab::Plugins
+            | Tab::PinnedClients
+            | Tab::Disk
+            | Tab::DiskUsage
+            | Tab::Settings => Section::System,
+        }
+    }
+}
+
+/// Sidebar information-architecture group (Spec v6 §1). Sections order the nav
+/// rail and, via the `--sec-*` token ramp, give each area its own accent so an
+/// active item's colour signals *where you are*, never a status.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+pub enum Section {
+    Home,
+    Workloads,
+    Resources,
+    Sandbox,
+    System,
+}
+
+impl Section {
+    /// Eyebrow label for the section header row. `Home` is unlabelled — its
+    /// single item renders bare at the top of the rail.
+    pub fn label(self) -> &'static str {
+        match self {
+            Section::Home => "",
+            Section::Workloads => "Workloads",
+            Section::Resources => "Resources",
+            Section::Sandbox => "AI Sandbox",
+            Section::System => "System",
+        }
+    }
+
+    /// CSS modifier that sets the section-accent trio (`--section-fg/soft/disc`).
+    pub fn class(self) -> &'static str {
+        match self {
+            Section::Home => "nav-section--home",
+            Section::Workloads => "nav-section--workloads",
+            Section::Resources => "nav-section--resources",
+            Section::Sandbox => "nav-section--sandbox",
+            Section::System => "nav-section--system",
+        }
+    }
+
+    /// Stable short id used for the section-token custom props (`--sec-<key>-*`)
+    /// and the `localStorage` collapse-state persistence.
+    pub fn key(self) -> &'static str {
+        match self {
+            Section::Home => "home",
+            Section::Workloads => "workloads",
+            Section::Resources => "resources",
+            Section::Sandbox => "sandbox",
+            Section::System => "system",
+        }
+    }
+
+    fn from_key(k: &str) -> Option<Section> {
+        match k {
+            "home" => Some(Section::Home),
+            "workloads" => Some(Section::Workloads),
+            "resources" => Some(Section::Resources),
+            "sandbox" => Some(Section::Sandbox),
+            "system" => Some(Section::System),
+            _ => None,
+        }
+    }
+
+    /// The section's tabs, in display order.
+    fn tabs(self) -> &'static [Tab] {
+        match self {
+            Section::Home => &[Tab::Dashboard],
+            Section::Workloads => &[Tab::Containers, Tab::Pods, Tab::Stacks],
+            Section::Resources => &[Tab::Images, Tab::Volumes, Tab::Networks, Tab::Secrets],
+            Section::Sandbox => &[Tab::Sandbox, Tab::Sessions, Tab::Audit, Tab::Snapshots],
+            Section::System => &[
+                Tab::Cluster,
+                Tab::Plugins,
+                Tab::PinnedClients,
+                Tab::Disk,
+                Tab::DiskUsage,
+                Tab::Settings,
+            ],
+        }
+    }
+
+    /// The context-appropriate default "+ Create" kind for this section.
+    fn default_create(self) -> CreateKind {
+        match self {
+            Section::Resources => CreateKind::Volume,
+            _ => CreateKind::Container,
+        }
+    }
+
+    const ORDER: [Section; 5] = [
+        Section::Home,
+        Section::Workloads,
+        Section::Resources,
+        Section::Sandbox,
+        Section::System,
     ];
 }
+
+/// The five resource kinds the topbar "+ Create" split-button can spawn.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum CreateKind {
+    Container,
+    Pod,
+    Volume,
+    Network,
+    Secret,
+}
+
+impl CreateKind {
+    fn label(self) -> &'static str {
+        match self {
+            CreateKind::Container => "Container",
+            CreateKind::Pod => "Pod",
+            CreateKind::Volume => "Volume",
+            CreateKind::Network => "Network",
+            CreateKind::Secret => "Secret",
+        }
+    }
+
+    fn icon(self) -> &'static str {
+        match self {
+            CreateKind::Container => "container",
+            CreateKind::Pod => "pod",
+            CreateKind::Volume => "volume",
+            CreateKind::Network => "network",
+            CreateKind::Secret => "secret",
+        }
+    }
+
+    /// The tab that owns this kind's create modal — selecting a kind first
+    /// navigates here, then raises the intent the page listens for.
+    fn owning_tab(self) -> Tab {
+        match self {
+            CreateKind::Container => Tab::Containers,
+            CreateKind::Pod => Tab::Pods,
+            CreateKind::Volume => Tab::Volumes,
+            CreateKind::Network => Tab::Networks,
+            CreateKind::Secret => Tab::Secrets,
+        }
+    }
+
+    const MENU: [CreateKind; 5] = [
+        CreateKind::Container,
+        CreateKind::Pod,
+        CreateKind::Volume,
+        CreateKind::Network,
+        CreateKind::Secret,
+    ];
+}
+
+/// Cross-cutting "create" intent bus (Spec v6 §2.3). The topbar sets
+/// `Some(kind)`; the owning page's Effect opens its local modal and clears it.
+/// Decoupled on purpose — the shell never touches page-local modal signals.
+///
+/// The inner field is read by the page-side listeners (Lanes B/C) via
+/// `use_context::<CreateIntent>()`; until those land in this crate it is
+/// write-only from the shell, so silence the interim dead-field lint.
+#[derive(Clone, Copy)]
+pub struct CreateIntent(#[allow(dead_code)] pub RwSignal<Option<CreateKind>>);
 
 /// Shared bearer token signal — `None` means "no token in localStorage; child
 /// fetches will surface an auth-needed message".
@@ -179,6 +370,27 @@ fn apply_theme(theme: &str) {
         let _ = el.set_attribute("data-theme", theme);
     }
     let _ = gloo_storage::LocalStorage::set(THEME_KEY, theme);
+}
+
+/// Load the persisted set of *collapsed* nav sections. Missing/blank key ⇒
+/// empty set (all sections open), matching §1.3's default.
+fn load_collapsed_sections() -> HashSet<Section> {
+    gloo_storage::LocalStorage::get::<String>(NAV_SECTIONS_KEY)
+        .unwrap_or_default()
+        .split(',')
+        .filter_map(Section::from_key)
+        .collect()
+}
+
+/// Persist the collapsed set as comma-joined keys (stable [`Section::ORDER`]).
+fn save_collapsed_sections(set: &HashSet<Section>) {
+    let joined = Section::ORDER
+        .iter()
+        .filter(|s| set.contains(s))
+        .map(|s| s.key())
+        .collect::<Vec<_>>()
+        .join(",");
+    let _ = gloo_storage::LocalStorage::set(NAV_SECTIONS_KEY, joined);
 }
 
 /// Resolve after `ms` milliseconds via `window.setTimeout` — a `gloo-timers`-free
@@ -361,6 +573,16 @@ pub fn AppRoot() -> impl IntoView {
     let shared = DashboardShared::new();
     provide_context(shared);
 
+    // "+ Create" intent bus (§2.3) — the topbar raises a kind, the owning page
+    // consumes it. Provided here so every panel can `use_context` it.
+    let create_intent = RwSignal::new(None::<CreateKind>);
+    provide_context(CreateIntent(create_intent));
+
+    // Grouped-sidebar per-section collapse state (§1.3): the set of *collapsed*
+    // sections, restored from localStorage and persisted on every change.
+    let collapsed_sections = RwSignal::new(load_collapsed_sections());
+    Effect::new(move |_| save_collapsed_sections(&collapsed_sections.get()));
+
     // Pre-open the drawer from a `#container/<id>` deep-link on first load.
     if let Some(id) = drawer_id_from_hash(&current_hash()) {
         drawer.set(Some(id));
@@ -388,7 +610,11 @@ pub fn AppRoot() -> impl IntoView {
     // The single app-wide metrics poll loop feeding dashboard + footer.
     start_metrics_loop(shared, token);
 
-    // Command palette open-state + global Cmd/Ctrl-K + Escape keydown.
+    // "+ Create" popover open-state (§2.3).
+    let create_menu_open = RwSignal::new(false);
+
+    // Command palette open-state + global Cmd/Ctrl-K + Escape keydown. Escape
+    // dismisses, in priority order: create menu → palette → drawer.
     let palette_open = RwSignal::new(false);
     {
         let cb =
@@ -398,7 +624,9 @@ pub fn AppRoot() -> impl IntoView {
                     ev.prevent_default();
                     palette_open.update(|o| *o = !*o);
                 } else if key == "Escape" {
-                    if palette_open.get_untracked() {
+                    if create_menu_open.get_untracked() {
+                        create_menu_open.set(false);
+                    } else if palette_open.get_untracked() {
                         palette_open.set(false);
                     } else if drawer.get_untracked().is_some() {
                         drawer.set(None);
@@ -410,6 +638,16 @@ pub fn AppRoot() -> impl IntoView {
         }
         cb.forget();
     }
+
+    // Raise a create intent: navigate to the owning tab, then set the intent so
+    // that page's Effect opens its local modal. Never touches page-local state.
+    let fire_create = move |kind: CreateKind| {
+        active.set(kind.owning_tab());
+        create_intent.set(Some(kind));
+        create_menu_open.set(false);
+    };
+    // Primary segment: the section-appropriate default kind for the active tab.
+    let create_default = move |_| fire_create(active.get_untracked().section().default_create());
 
     let prompt_token = move |_| {
         let window = match web_sys::window() {
@@ -445,6 +683,15 @@ pub fn AppRoot() -> impl IntoView {
 
     let toggle_collapse = move |_| collapsed.update(|c| *c = !*c);
 
+    // Toggle a single section's collapsed state (insert⇄remove).
+    let toggle_section = move |sec: Section| {
+        collapsed_sections.update(|set| {
+            if !set.insert(sec) {
+                set.remove(&sec);
+            }
+        });
+    };
+
     let shell_cls = move || {
         if collapsed.get() {
             "sidebar sidebar--collapsed"
@@ -472,19 +719,54 @@ pub fn AppRoot() -> impl IntoView {
                     </button>
                 </div>
                 <nav class="sidebar-nav">
-                    {Tab::ALL.iter().copied().map(|t| {
-                        let cls = move || if active.get() == t { "nav-item active" } else { "nav-item" };
-                        view! {
-                            <button
-                                type="button"
-                                class=cls
-                                title=t.label()
-                                on:click=move |_| active.set(t)
-                            >
-                                <span class="nav-item__icon"><Icon name=t.icon()/></span>
-                                <span class="nav-item__label">{t.label()}</span>
-                            </button>
+                    {Section::ORDER.iter().copied().map(|sec| {
+                        let items = sec.tabs().iter().copied().map(|t| {
+                            let cls = move || if active.get() == t { "nav-item active" } else { "nav-item" };
+                            view! {
+                                <button
+                                    type="button"
+                                    class=cls
+                                    title=t.label()
+                                    on:click=move |_| active.set(t)
+                                >
+                                    <span class="nav-item__icon"><Icon name=t.icon()/></span>
+                                    <span class="nav-item__label">{t.label()}</span>
+                                </button>
+                            }
+                        }).collect_view();
+                        // Home renders its single item bare (no header row).
+                        if sec == Section::Home {
+                            return view! {
+                                <div class=move || format!("nav-section {}", sec.class())>
+                                    <div class="nav-section__items">{items}</div>
+                                </div>
+                            }.into_any();
                         }
+                        let is_collapsed = move || collapsed_sections.get().contains(&sec);
+                        let head_chevron_cls = move || if is_collapsed() {
+                            "nav-section__chevron nav-section__chevron--collapsed"
+                        } else {
+                            "nav-section__chevron"
+                        };
+                        let items_cls = move || if is_collapsed() {
+                            "nav-section__items nav-section__items--collapsed"
+                        } else {
+                            "nav-section__items"
+                        };
+                        view! {
+                            <div class=move || format!("nav-section {}", sec.class())>
+                                <button
+                                    type="button"
+                                    class="nav-section__head"
+                                    aria-expanded=move || (!is_collapsed()).to_string()
+                                    on:click=move |_| toggle_section(sec)
+                                >
+                                    <span class="nav-section__eyebrow">{sec.label()}</span>
+                                    <span class=head_chevron_cls><Icon name="chevron-down"/></span>
+                                </button>
+                                <div class=items_cls>{items}</div>
+                            </div>
+                        }.into_any()
                     }).collect_view()}
                 </nav>
                 <div class="sidebar-foot">
@@ -494,8 +776,80 @@ pub fn AppRoot() -> impl IntoView {
 
             <div class="app-main">
                 <header class="topbar">
-                    <div class="topbar-title">{move || active.get().label()}</div>
+                    <div class="topbar-crumb">
+                        <Show when=move || active.get().section() != Section::Home fallback=|| ()>
+                            <span
+                                class="topbar-crumb__section"
+                                style=move || format!(
+                                    "color: var(--sec-{}-fg)",
+                                    active.get().section().key(),
+                                )
+                            >
+                                {move || active.get().section().label()}
+                            </span>
+                            <span class="topbar-crumb__sep">"›"</span>
+                        </Show>
+                        <span class="topbar-crumb__page">{move || active.get().label()}</span>
+                    </div>
                     <div class="topbar-actions">
+                        <div class="create-split">
+                            <button
+                                type="button"
+                                class="create-split__main"
+                                on:click=create_default
+                            >
+                                "+ Create"
+                            </button>
+                            <button
+                                type="button"
+                                class="create-split__caret"
+                                aria-label="Choose what to create"
+                                aria-haspopup="menu"
+                                aria-expanded=move || create_menu_open.get().to_string()
+                                on:click=move |_| create_menu_open.update(|o| *o = !*o)
+                            >
+                                <Icon name="chevron-down"/>
+                            </button>
+                            <Show when=move || create_menu_open.get() fallback=|| ()>
+                                <div
+                                    class="create-menu-scrim"
+                                    on:click=move |_| create_menu_open.set(false)
+                                ></div>
+                                <div class="create-menu" role="menu">
+                                    {CreateKind::MENU.iter().copied().map(|kind| {
+                                        let key = kind.owning_tab().section().key();
+                                        view! {
+                                            <button
+                                                type="button"
+                                                class="create-menu__item"
+                                                role="menuitem"
+                                                on:click=move |_| fire_create(kind)
+                                            >
+                                                <span
+                                                    class="create-menu__icon"
+                                                    style=format!(
+                                                        "background: var(--sec-{key}-disc); color: var(--sec-{key}-fg)",
+                                                    )
+                                                >
+                                                    <Icon name=kind.icon()/>
+                                                </span>
+                                                <span>{kind.label()}</span>
+                                            </button>
+                                        }
+                                    }).collect_view()}
+                                </div>
+                            </Show>
+                        </div>
+                        <button
+                            type="button"
+                            class="cmdk-chip"
+                            aria-label="Open command palette"
+                            on:click=move |_| palette_open.set(true)
+                        >
+                            <span class="cmdk-chip__icon"><Icon name="search"/></span>
+                            <span class="cmdk-chip__text">"Search"</span>
+                            <kbd class="cmdk-chip__key">"⌘K"</kbd>
+                        </button>
                         <span
                             class=move || if token.get().is_some() {
                                 "status-pill status-pill--ok"
@@ -529,23 +883,33 @@ pub fn AppRoot() -> impl IntoView {
                 </header>
 
                 <main class="content">
-                    {move || match active.get() {
-                        Tab::Dashboard => view! { <Dashboard/> }.into_any(),
-                        Tab::Containers => view! { <ContainerList/> }.into_any(),
-                        Tab::Stacks => view! { <StacksView/> }.into_any(),
-                        Tab::Pods => view! { <PodsView/> }.into_any(),
-                        Tab::Images => view! { <ImageList/> }.into_any(),
-                        Tab::Volumes => view! { <VolumeList/> }.into_any(),
-                        Tab::Networks => view! { <NetworkList/> }.into_any(),
-                        Tab::Snapshots => view! { <SnapshotTree/> }.into_any(),
-                        Tab::Sessions => view! { <SessionTimeline/> }.into_any(),
-                        Tab::Sandbox => view! { <SandboxList/> }.into_any(),
-                        Tab::Audit => view! { <AuditFeed/> }.into_any(),
-                        Tab::Cluster => view! { <ClusterView/> }.into_any(),
-                        Tab::PinnedClients => view! { <PinnedClientsView/> }.into_any(),
-                        Tab::Plugins => view! { <PluginsView/> }.into_any(),
-                        Tab::Secrets => view! { <SecretsView/> }.into_any(),
-                        Tab::Settings => view! { <Settings/> }.into_any(),
+                    // Keyed on the active tab so leptos remounts the wrapper on
+                    // every switch — that mount fires the `.content-fade` entry
+                    // animation (§7). Reduced-motion collapses it to a no-op.
+                    {move || {
+                        let body = match active.get() {
+                            Tab::Dashboard => view! { <Dashboard/> }.into_any(),
+                            Tab::Containers => view! { <ContainerList/> }.into_any(),
+                            Tab::Stacks => view! { <StacksView/> }.into_any(),
+                            Tab::Pods => view! { <PodsView/> }.into_any(),
+                            Tab::Images => view! { <ImageList/> }.into_any(),
+                            Tab::Volumes => view! { <VolumeList/> }.into_any(),
+                            Tab::Networks => view! { <NetworkList/> }.into_any(),
+                            Tab::Snapshots => view! { <SnapshotTree/> }.into_any(),
+                            Tab::Sessions => view! { <SessionTimeline/> }.into_any(),
+                            Tab::Sandbox => view! { <SandboxList/> }.into_any(),
+                            Tab::Audit => view! { <AuditFeed/> }.into_any(),
+                            Tab::Cluster => view! { <ClusterView/> }.into_any(),
+                            Tab::PinnedClients => view! { <PinnedClientsView/> }.into_any(),
+                            Tab::Plugins => view! { <PluginsView/> }.into_any(),
+                            Tab::Secrets => view! { <SecretsView/> }.into_any(),
+                            // Body delivered by Lane C (`DiskCenter`); placeholder
+                            // keeps the shell compiling until it lands.
+                            Tab::Disk => view! { <DiskCenterPlaceholder/> }.into_any(),
+                            Tab::DiskUsage => view! { <DiskUsageView/> }.into_any(),
+                            Tab::Settings => view! { <Settings/> }.into_any(),
+                        };
+                        view! { <div class="content-fade">{body}</div> }
                     }}
                 </main>
 
@@ -621,5 +985,44 @@ fn StatusFooter(shared: DashboardShared, token: RwSignal<Option<String>>) -> imp
                 <Sparkline data=Signal::derive(move || shared.agg_cpu.get())/>
             </span>
         </footer>
+    }
+}
+
+/// Shell-owned §3 page identity header — used by the two placeholder panels
+/// below and available for any panel that wants the shared composition. The
+/// section-accent trio resolves from the enclosing `.section-scope--*` wrapper.
+#[component]
+fn PageHead(tab: Tab) -> impl IntoView {
+    view! {
+        <header class="page-head">
+            <div class="page-head__lead">
+                <div class="page-head__disc"><Icon name=tab.icon()/></div>
+                <div class="page-head__titles">
+                    <div class="page-head__eyebrow">{tab.section().label()}</div>
+                    <div class="page-head__title">{tab.label()}</div>
+                    <div class="page-head__sub">{tab.subtitle()}</div>
+                </div>
+            </div>
+        </header>
+    }
+}
+
+/// Placeholder for `Tab::Disk` until Lane C's `DiskCenter` lands (§5). Renders
+/// the real §3 identity so the tab is never blank, then a quiet notice.
+#[component]
+fn DiskCenterPlaceholder() -> impl IntoView {
+    view! {
+        <div class="dashboard-panel section-scope--system">
+            <PageHead tab=Tab::Disk/>
+            <div class="surface-card">
+                <div class="empty-state empty-state--spot">
+                    <div class="empty-state__spot"><Icon name="disk"/></div>
+                    <div class="empty-state__title">"Disk center"</div>
+                    <div class="empty-state__hint">
+                        "Per-category usage and reclaim tools mount here once the disk module loads."
+                    </div>
+                </div>
+            </div>
+        </div>
     }
 }

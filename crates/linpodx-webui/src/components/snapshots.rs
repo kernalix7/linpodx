@@ -226,19 +226,23 @@ pub fn SnapshotTree() -> impl IntoView {
     };
 
     view! {
-        <div class="snapshots-panel">
-            <div class="page-header">
-                <div class="page-header__titles">
-                    <div class="page-title">"Snapshots"</div>
-                    <div class="page-subtitle">"branch, rollback, and manage encryption keys"</div>
+        <div class="snapshots-panel section-scope--sandbox">
+            <header class="page-head">
+                <div class="page-head__lead">
+                    <div class="page-head__disc"><Icon name="snapshot"/></div>
+                    <div class="page-head__titles">
+                        <div class="page-head__eyebrow">"AI Sandbox"</div>
+                        <div class="page-head__title">"Snapshots"</div>
+                        <div class="page-head__sub">"Branch, rollback, and manage encryption keys."</div>
+                    </div>
                 </div>
-                <div class="page-actions">
+                <div class="page-head__actions">
                     <button type="button" class="btn btn--primary" on:click=open_re_encrypt>
                         <Icon name="snapshot"/>
                         " Re-encrypt all"
                     </button>
                 </div>
-            </div>
+            </header>
             <ListTable spec=spec actions_for_row=actions/>
             {modal_view}
         </div>

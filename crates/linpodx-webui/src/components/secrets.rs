@@ -20,6 +20,7 @@ use serde_json::{json, Value};
 use wasm_bindgen_futures::spawn_local;
 
 use super::icons::Icon;
+use super::illustrations::EmptySpot;
 use crate::ws::send_rpc;
 
 #[derive(Clone, Debug)]
@@ -282,8 +283,8 @@ pub fn SecretsView() -> impl IntoView {
         let items = rows.get();
         if items.is_empty() {
             return view! {
-                <div class="empty-state">
-                    <span class="empty-state__icon"><Icon name="secret"/></span>
+                <div class="empty-state empty-state--spot">
+                    <span class="empty-state__spot"><EmptySpot motif="secrets"/></span>
                     <span class="empty-state__title">"No secrets"</span>
                     <span class="empty-state__hint">
                         "linpodx secrets are podman secrets — create one with the button above, or run "
@@ -338,18 +339,22 @@ pub fn SecretsView() -> impl IntoView {
     };
 
     view! {
-        <div class="secrets-panel">
-            <div class="page-header">
-                <div class="page-header__titles">
-                    <div class="page-title">"Secrets"</div>
-                    <div class="page-subtitle">"podman secret store — values are never displayed after creation"</div>
+        <div class="secrets-panel section-scope--resources">
+            <header class="page-head">
+                <div class="page-head__lead">
+                    <div class="page-head__disc"><Icon name="secret"/></div>
+                    <div class="page-head__titles">
+                        <div class="page-head__eyebrow">"Resources"</div>
+                        <div class="page-head__title">"Secrets"</div>
+                        <div class="page-head__sub">"podman secret store — values are never displayed after creation"</div>
+                    </div>
                 </div>
-                <div class="page-actions">
+                <div class="page-head__actions">
                     <button type="button" class="btn btn--primary btn--sm" on:click=open_create>
                         "Create secret"
                     </button>
                 </div>
-            </div>
+            </header>
             {move || error.get().map(|e| view! {
                 <div class="error-state"><Icon name="secret"/><span>{e}</span></div>
             })}

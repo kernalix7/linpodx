@@ -22,6 +22,7 @@ use serde_json::{json, Value};
 use wasm_bindgen_futures::spawn_local;
 
 use super::icons::Icon;
+use super::illustrations::EmptySpot;
 use crate::app::AuthToken;
 use crate::helpers::{humanize_timestamp, short_id, status_chip_modifier};
 use crate::ws::{fetch_list, subscribe};
@@ -216,8 +217,8 @@ pub fn PodsView() -> impl IntoView {
             }
             .into_any(),
             Ok(items) if items.is_empty() => view! {
-                <div class="empty-state">
-                    <span class="empty-state__icon"><Icon name="container"/></span>
+                <div class="empty-state empty-state--spot">
+                    <span class="empty-state__spot"><EmptySpot motif="containers"/></span>
                     <span class="empty-state__title">"no pods"</span>
                     <span class="empty-state__hint">
                         "Pods group related containers behind a shared network namespace — "
@@ -370,7 +371,17 @@ pub fn PodsView() -> impl IntoView {
     let refresh_cb: Callback<()> = Callback::new(move |_| reload());
 
     view! {
-        <div class="panel">
+        <div class="panel section-scope--workloads">
+            <header class="page-head">
+                <div class="page-head__lead">
+                    <div class="page-head__disc"><Icon name="pod"/></div>
+                    <div class="page-head__titles">
+                        <div class="page-head__eyebrow">"Workloads"</div>
+                        <div class="page-head__title">"Pods"</div>
+                        <div class="page-head__sub">"Containers grouped by shared pod namespace."</div>
+                    </div>
+                </div>
+            </header>
             <div class="toolbar page-actions">
                 <span class="search-box">
                     <span class="search-box__icon"><Icon name="search"/></span>

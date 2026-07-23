@@ -21,7 +21,8 @@
 use leptos::prelude::*;
 
 use crate::helpers::{
-    area_path, clock_hms, line_path, project_point, project_series, ts_bounds, value_bounds,
+    area_path, clock_hms, format_bytes, line_path, project_point, project_series, ts_bounds,
+    value_bounds,
 };
 
 /// Fixed viewBox width; the SVG scales to its container via `width: 100%` +
@@ -347,5 +348,281 @@ pub fn Sparkline(
             <path class="spark-area__fill" d=area_d></path>
             <path class="spark-line" d=line_d></path>
         </svg>
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Capacity donut (Spec v6 §4 hero-donut) — pure ring geometry + a thin leptos
+// wrapper. Draws the ring as stacked `<circle>` elements offset via
+// `stroke-dasharray`/`stroke-dashoffset` (the standard SVG donut technique)
+// rather than hand-rolled arc paths — it sidesteps the large-arc-flag edge
+// cases of `A` path commands while staying just as "pure path math".
+//
+// Dataviz contract for this specific chart (per spec, an intentional, scoped
+// exception to the single-sequential-hue donut rule elsewhere in the house
+// style): Used = the System section hue (`--sec-system-fg`) since its CTA
+// routes to the System-section Disk tab; Reclaimable = the warn hue (an
+// explicit, spec-directed use of a status colour, not an accidental one);
+// Free = the neutral track colour, never its own drawn arc — it is simply
+// whatever length of the recessive track circle the two coloured arcs don't
+// cover, so a caller that always passes `free_bytes = 0` (no host-capacity
+// API exists yet) still renders a fully-honest ring instead of a fabricated
+// "free space" segment.
+
+/// One ring segment's precomputed stroke geometry. Pure function output — no
+/// leptos/DOM involved — so [`donut_segments`] is unit-testable on the host
+/// target.
+#[derive(Clone, Debug, PartialEq)]
+pub struct DonutSegment {
+    /// `"{dash} {gap}"`, ready for the `stroke-dasharray` attribute.
+    pub dasharray: String,
+    /// Negative offset (along the circumference) at which this segment's
+    /// dash begins, for the `stroke-dashoffset` attribute.
+    pub dashoffset: f64,
+    /// This segment's share of `total`, clamped to `[0, 1]`.
+    pub fraction: f64,
+}
+
+/// Circumference of a ring of the given radius — `2πr`.
+pub fn donut_circumference(radius: f64) -> f64 {
+    2.0 * std::f64::consts::PI * radius
+}
+
+/// Lay `values` end-to-end around a ring of `circumference`, starting at the
+/// 12-o'clock position (the caller applies a `rotate(-90 cx cy)` transform to
+/// the group). Negative inputs clamp to zero rather than reversing direction;
+/// a non-positive `total` or `circumference` yields empty (zero-length,
+/// zero-fraction) segments instead of `NaN`/`Inf` so a still-loading chart
+/// never emits an invalid SVG attribute.
+pub fn donut_segments(values: &[f64], total: f64, circumference: f64) -> Vec<DonutSegment> {
+    if total <= 0.0 || circumference <= 0.0 {
+        return values
+            .iter()
+            .map(|_| DonutSegment {
+                dasharray: format!("0 {circumference:.3}"),
+                dashoffset: 0.0,
+                fraction: 0.0,
+            })
+            .collect();
+    }
+    let mut cum = 0.0_f64;
+    values
+        .iter()
+        .map(|&raw| {
+            let v = raw.max(0.0);
+            let fraction = (v / total).clamp(0.0, 1.0);
+            let seg_len = fraction * circumference;
+            let gap_len = (circumference - seg_len).max(0.0);
+            let dashoffset = -(cum / total) * circumference;
+            cum += v;
+            DonutSegment {
+                dasharray: format!("{seg_len:.3} {gap_len:.3}"),
+                dashoffset,
+                fraction,
+            }
+        })
+        .collect()
+}
+
+/// Hero capacity ring: `Used` (system-section hue) + `Reclaimable` (warn hue)
+/// arcs over a neutral track, a center byte total, a 3-row legend, and an
+/// optional "Manage disk →" CTA. Self-contained (no outer card chrome) so it
+/// can be dropped straight into `.hero-donut` on the dashboard *or* re-sized
+/// into a smaller card elsewhere (e.g. the disk center's own summary card) —
+/// the caller supplies the outer wrapper element and its styling.
+#[component]
+pub fn CapacityDonut(
+    #[prop(into)] used_bytes: Signal<u64>,
+    #[prop(into)] reclaimable_bytes: Signal<u64>,
+    #[prop(into)] free_bytes: Signal<u64>,
+    #[prop(default = 64.0)] radius: f64,
+    #[prop(default = 16.0)] stroke_width: f64,
+    /// Fires when the CTA is clicked; omit to render without a CTA (e.g. when
+    /// already on the page the CTA would navigate to).
+    #[prop(optional)]
+    on_manage: Option<Callback<()>>,
+) -> impl IntoView {
+    let circumference = donut_circumference(radius);
+    let size = 2.0 * (radius + stroke_width);
+    let center = radius + stroke_width;
+    let vb = format!("0 0 {size} {size}");
+    let rotate = format!("rotate(-90 {center} {center})");
+
+    let segments = Memo::new(move |_| {
+        let used = used_bytes.get() as f64;
+        let reclaim = reclaimable_bytes.get() as f64;
+        let free = free_bytes.get() as f64;
+        donut_segments(&[used, reclaim, free], used + reclaim + free, circumference)
+    });
+    let seg_attr = move |i: usize| {
+        segments.get().get(i).cloned().unwrap_or(DonutSegment {
+            dasharray: format!("0 {circumference:.3}"),
+            dashoffset: 0.0,
+            fraction: 0.0,
+        })
+    };
+    let used_dasharray = move || seg_attr(0).dasharray;
+    let used_dashoffset = move || seg_attr(0).dashoffset;
+    let reclaim_dasharray = move || seg_attr(1).dasharray;
+    let reclaim_dashoffset = move || seg_attr(1).dashoffset;
+
+    let total_label = move || {
+        format_bytes(
+            used_bytes
+                .get()
+                .saturating_add(reclaimable_bytes.get())
+                .saturating_add(free_bytes.get()),
+        )
+    };
+
+    view! {
+        <>
+            <svg
+                class="hero-donut__ring"
+                viewBox=vb
+                role="img"
+                aria-label="Disk capacity: used, reclaimable and free space"
+            >
+                <circle
+                    cx=center
+                    cy=center
+                    r=radius
+                    fill="none"
+                    stroke="var(--color-border-strong)"
+                    stroke-width=stroke_width
+                ></circle>
+                <g transform=rotate>
+                    <circle
+                        cx=center
+                        cy=center
+                        r=radius
+                        fill="none"
+                        stroke="var(--sec-system-fg)"
+                        stroke-width=stroke_width
+                        stroke-dasharray=used_dasharray
+                        stroke-dashoffset=used_dashoffset
+                    ></circle>
+                    <circle
+                        cx=center
+                        cy=center
+                        r=radius
+                        fill="none"
+                        stroke="var(--color-warn)"
+                        stroke-width=stroke_width
+                        stroke-dasharray=reclaim_dasharray
+                        stroke-dashoffset=reclaim_dashoffset
+                    ></circle>
+                </g>
+                <text class="hero-donut__center" x=center y=center dy="0.35em">
+                    {total_label}
+                </text>
+            </svg>
+            <div class="hero-donut__legend">
+                <div class="hero-donut__legend-row">
+                    <span
+                        class="hero-donut__swatch"
+                        style="background: var(--sec-system-fg)"
+                    ></span>
+                    "Used "<span class="mono">{move || format_bytes(used_bytes.get())}</span>
+                </div>
+                <div class="hero-donut__legend-row">
+                    <span class="hero-donut__swatch" style="background: var(--color-warn)"></span>
+                    "Reclaimable "
+                    <span class="mono">{move || format_bytes(reclaimable_bytes.get())}</span>
+                </div>
+                <div class="hero-donut__legend-row">
+                    <span
+                        class="hero-donut__swatch"
+                        style="background: var(--color-border-strong)"
+                    ></span>
+                    "Free "<span class="mono">{move || format_bytes(free_bytes.get())}</span>
+                </div>
+            </div>
+            {move || {
+                on_manage.map(|cb| {
+                    view! {
+                        <button type="button" class="hero-donut__cta" on:click=move |_| cb.run(())>
+                            "Manage disk →"
+                        </button>
+                    }
+                })
+            }}
+        </>
+    }
+}
+
+// NB: this file's `#[cfg(test)]` module below only compiles for
+// `wasm32-unknown-unknown` (see `lib.rs`'s `#[cfg(target_arch = "wasm32")]
+// mod components;`), so host-target `cargo test -p linpodx-webui` never sees
+// it — same convention already used in `stacks.rs` / `secrets.rs`. It still
+// pulls its weight: `cargo clippy -p linpodx-webui --target
+// wasm32-unknown-unknown --all-targets -- -D warnings` compiles and lints it,
+// and it documents/exercises the pure ring math for anyone building against
+// this crate on that target.
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn circumference_matches_2_pi_r() {
+        let c = donut_circumference(10.0);
+        assert!((c - 62.831_853).abs() < 1e-3);
+    }
+
+    #[test]
+    fn zero_radius_yields_zero_circumference() {
+        assert_eq!(donut_circumference(0.0), 0.0);
+    }
+
+    #[test]
+    fn segments_split_proportionally_starting_at_zero_offset() {
+        let segs = donut_segments(&[50.0, 30.0, 20.0], 100.0, 100.0);
+        assert_eq!(segs.len(), 3);
+        assert!((segs[0].fraction - 0.5).abs() < 1e-9);
+        assert!((segs[1].fraction - 0.3).abs() < 1e-9);
+        assert!((segs[2].fraction - 0.2).abs() < 1e-9);
+        assert_eq!(segs[0].dashoffset, 0.0);
+        assert!((segs[1].dashoffset - (-50.0)).abs() < 1e-9);
+        assert!((segs[2].dashoffset - (-80.0)).abs() < 1e-9);
+        assert_eq!(segs[0].dasharray, "50.000 50.000");
+        assert_eq!(segs[1].dasharray, "30.000 70.000");
+        assert_eq!(segs[2].dasharray, "20.000 80.000");
+    }
+
+    #[test]
+    fn zero_total_yields_empty_ring_not_nan_or_inf() {
+        let segs = donut_segments(&[5.0, 5.0], 0.0, 100.0);
+        assert_eq!(segs.len(), 2);
+        for s in &segs {
+            assert_eq!(s.fraction, 0.0);
+            assert_eq!(s.dasharray, "0 100.000");
+            assert!(s.dashoffset.is_finite());
+        }
+    }
+
+    #[test]
+    fn non_positive_circumference_still_returns_finite_segments() {
+        let segs = donut_segments(&[5.0, 5.0], 10.0, 0.0);
+        assert_eq!(segs.len(), 2);
+        for s in &segs {
+            assert_eq!(s.dasharray, "0 0.000");
+        }
+    }
+
+    #[test]
+    fn negative_values_clamp_to_zero_rather_than_reversing() {
+        let segs = donut_segments(&[-10.0, 20.0], 20.0, 62.8);
+        assert_eq!(segs[0].fraction, 0.0);
+        assert!((segs[1].fraction - 1.0).abs() < 1e-9);
+        // A negative raw value must not shift the *next* segment's start —
+        // it contributes 0 to the running sum, same as if it were absent.
+        assert_eq!(segs[1].dashoffset, 0.0);
+    }
+
+    #[test]
+    fn fractions_sum_to_one_when_total_is_fully_accounted_for() {
+        let segs = donut_segments(&[33.0, 33.0, 34.0], 100.0, 200.0);
+        let sum: f64 = segs.iter().map(|s| s.fraction).sum();
+        assert!((sum - 1.0).abs() < 1e-9);
     }
 }
