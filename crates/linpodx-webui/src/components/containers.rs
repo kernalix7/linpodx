@@ -14,9 +14,12 @@
 //! and [`crate::helpers::humanize_timestamp`] centralize the correct field
 //! mapping (+ humanization) so this can't drift again.
 
+use leptos::ev;
 use leptos::prelude::*;
-use serde_json::Value;
+use serde_json::{json, Value};
 use wasm_bindgen_futures::spawn_local;
+
+use super::context_menu;
 
 use super::create_modal::CreateContainerModal;
 use super::exec_modal::ExecModal;
@@ -29,7 +32,7 @@ use crate::app::{AuthToken, DensityMode, DrawerState};
 use crate::helpers::{
     container_display_name, format_bytes, humanize_timestamp, short_id, status_chip_modifier,
 };
-use crate::ws::{fetch_list, subscribe};
+use crate::ws::{fetch_list, send_rpc, subscribe};
 
 fn row_id(row: &Value) -> String {
     row.get("id")
@@ -100,6 +103,8 @@ pub fn ContainerList() -> impl IntoView {
     let exec_pty_open: RwSignal<Option<String>> = RwSignal::new(None);
     let logs_open: RwSignal<Option<String>> = RwSignal::new(None);
     let create_open = RwSignal::new(false);
+    let focused_row: RwSignal<Option<String>> = RwSignal::new(None);
+    let context_menu = context_menu::ContextMenuState::new();
 
     let reload = move || {
         let token = match auth.0.get_untracked() {
@@ -143,6 +148,77 @@ pub fn ContainerList() -> impl IntoView {
             now_secs.set((js_sys::Date::now() / 1000.0) as i64);
         }
     });
+
+    let visible_ids = move || -> Vec<String> {
+        let needle = filter.get_untracked().trim().to_lowercase();
+        rows.get_untracked()
+            .unwrap_or_default()
+            .into_iter()
+            .filter(|row| {
+                if needle.is_empty() {
+                    return true;
+                }
+                let name = container_display_name(&row_names(row), &row_id(row)).to_lowercase();
+                let image = row
+                    .get("image")
+                    .and_then(Value::as_str)
+                    .unwrap_or("")
+                    .to_lowercase();
+                let status = row
+                    .get("status")
+                    .and_then(Value::as_str)
+                    .unwrap_or("")
+                    .to_lowercase();
+                let id = row_id(row).to_lowercase();
+                let stack = row_stack_project(row).unwrap_or_default().to_lowercase();
+                name.contains(&needle)
+                    || image.contains(&needle)
+                    || status.contains(&needle)
+                    || id.contains(&needle)
+                    || stack.contains(&needle)
+            })
+            .map(|row| row_id(&row))
+            .filter(|id| !id.is_empty())
+            .collect()
+    };
+
+    let run_container_rpc = move |id: String, method: &'static str| {
+        if id.is_empty() {
+            return;
+        }
+        spawn_local(async move {
+            let _ = send_rpc(method, json!({ "id": id })).await;
+            reload();
+        });
+    };
+
+    let restart_container = move |id: String| {
+        if id.is_empty() {
+            return;
+        }
+        spawn_local(async move {
+            if send_rpc("container_stop", json!({ "id": id.clone() }))
+                .await
+                .is_ok()
+            {
+                let _ = send_rpc("container_start", json!({ "id": id })).await;
+            }
+            reload();
+        });
+    };
+
+    let key_handle = window_event_listener(ev::keydown, move |kev: web_sys::KeyboardEvent| {
+        let blocked = drawer.0.get_untracked().is_some()
+            || exec_open.get_untracked().is_some()
+            || exec_pty_open.get_untracked().is_some()
+            || logs_open.get_untracked().is_some()
+            || create_open.get_untracked()
+            || context_menu.0.get_untracked().is_some();
+        context_menu::handle_table_key(&kev, visible_ids(), focused_row, blocked, move |id| {
+            drawer.0.set(Some(id));
+        });
+    });
+    on_cleanup(move || key_handle.remove());
 
     let body_view = move || {
         if loading.get() {
@@ -215,6 +291,10 @@ pub fn ContainerList() -> impl IntoView {
                             exec_open,
                             exec_pty_open,
                             logs_open,
+                            focused_row,
+                            context_menu,
+                            run_container_rpc,
+                            restart_container,
                         )
                     })
                     .collect_view();
@@ -285,6 +365,7 @@ pub fn ContainerList() -> impl IntoView {
             <ExecPtyModal open=exec_pty_open/>
             <LogsModal open=logs_open/>
             <CreateContainerModal open=create_open refresh_containers=refresh_containers/>
+            <context_menu::ContextMenu state=context_menu/>
         </div>
     }
 }
@@ -302,6 +383,15 @@ fn render_row(
     exec_open: RwSignal<Option<String>>,
     exec_pty_open: RwSignal<Option<String>>,
     logs_open: RwSignal<Option<String>>,
+    focused_row: RwSignal<Option<String>>,
+    context_menu: context_menu::ContextMenuState,
+    // `Send + Sync` (beyond `Fn(..) + Copy + 'static`) is required here
+    // because these get captured into the context-menu entries'
+    // `Callback::new(..)` below — `Callback` demands `Send + Sync` on its
+    // inner `Fn`, and an opaque `impl Fn` parameter doesn't get that
+    // inferred the way a concrete closure would, so it must be spelled out.
+    run_container_rpc: impl Fn(String, &'static str) + Copy + Send + Sync + 'static,
+    restart_container: impl Fn(String) + Copy + Send + Sync + 'static,
 ) -> AnyView {
     let id = row_id(row);
     let name = container_display_name(&row_names(row), &id);
@@ -330,7 +420,15 @@ fn render_row(
     let image_view = if image.is_empty() {
         view! { <span class="cell-muted">"—"</span> }.into_any()
     } else {
-        view! { <span class="cell mono">{image.to_string()}</span> }.into_any()
+        // Long refs (registry + sha256 digests) must truncate, not collide
+        // with the neighbouring status column — .cell-clip caps + ellipsizes,
+        // full value stays reachable via the title tooltip.
+        view! {
+            <span class="cell mono cell-clip" title=image.to_string()>
+                {image.to_string()}
+            </span>
+        }
+        .into_any()
     };
     let status = row.get("status").and_then(Value::as_str).unwrap_or("");
     let status_view = if status.is_empty() {
@@ -365,9 +463,93 @@ fn render_row(
     let id_for_pty = id.clone();
     let id_for_logs = id.clone();
     let row_disabled = id.is_empty();
+    let row_key = id.clone();
+    let id_for_context = id.clone();
+    let id_for_click = id.clone();
 
     view! {
-        <tr>
+        <tr
+            class=move || context_menu::focused_row_class(focused_row, &row_key)
+            on:click=move |_| {
+                if !id_for_click.is_empty() {
+                    focused_row.set(Some(id_for_click.clone()));
+                }
+            }
+            on:contextmenu=move |ev| {
+                focused_row.set(Some(id_for_context.clone()));
+                let mut entries = Vec::new();
+                if running {
+                    let id_stop = id_for_context.clone();
+                    entries.push(context_menu::ContextMenuEntry::item(
+                        "Stop",
+                        Some("■"),
+                        false,
+                        row_disabled,
+                        Callback::new(move |_| run_container_rpc(id_stop.clone(), "container_stop")),
+                    ));
+                    let id_restart = id_for_context.clone();
+                    entries.push(context_menu::ContextMenuEntry::item(
+                        "Restart",
+                        Some("↻"),
+                        false,
+                        row_disabled,
+                        Callback::new(move |_| restart_container(id_restart.clone())),
+                    ));
+                } else {
+                    let id_start = id_for_context.clone();
+                    entries.push(context_menu::ContextMenuEntry::item(
+                        "Start",
+                        Some("▶"),
+                        false,
+                        row_disabled,
+                        Callback::new(move |_| run_container_rpc(id_start.clone(), "container_start")),
+                    ));
+                }
+                entries.push(context_menu::ContextMenuEntry::separator());
+                let id_details = id_for_context.clone();
+                entries.push(context_menu::ContextMenuEntry::item(
+                    "Details",
+                    None,
+                    false,
+                    row_disabled,
+                    Callback::new(move |_| drawer.0.set(Some(id_details.clone()))),
+                ));
+                let id_logs = id_for_context.clone();
+                entries.push(context_menu::ContextMenuEntry::item(
+                    "Logs",
+                    None,
+                    false,
+                    row_disabled,
+                    Callback::new(move |_| logs_open.set(Some(id_logs.clone()))),
+                ));
+                let id_terminal = id_for_context.clone();
+                entries.push(context_menu::ContextMenuEntry::item(
+                    "Terminal",
+                    None,
+                    false,
+                    row_disabled,
+                    Callback::new(move |_| exec_pty_open.set(Some(id_terminal.clone()))),
+                ));
+                let copy_id = id_for_context.clone();
+                entries.push(context_menu::ContextMenuEntry::item(
+                    "Copy ID",
+                    None,
+                    false,
+                    row_disabled,
+                    Callback::new(move |_| context_menu::copy_to_clipboard(&copy_id)),
+                ));
+                entries.push(context_menu::ContextMenuEntry::separator());
+                let id_remove = id_for_context.clone();
+                entries.push(context_menu::ContextMenuEntry::item(
+                    "Remove",
+                    None,
+                    true,
+                    row_disabled,
+                    Callback::new(move |_| run_container_rpc(id_remove.clone(), "container_remove")),
+                ));
+                context_menu.open(&ev, entries);
+            }
+        >
             <td>
                 <span class="cell-primary" title=id.clone()>
                     <span class="cell-primary__main">{name}</span>

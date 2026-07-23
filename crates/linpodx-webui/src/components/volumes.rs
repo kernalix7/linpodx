@@ -20,10 +20,13 @@
 
 use std::collections::{HashMap, HashSet};
 
+use leptos::ev;
 use leptos::prelude::*;
 use serde_json::{json, Value};
 use wasm_bindgen::JsValue;
 use wasm_bindgen_futures::spawn_local;
+
+use super::context_menu;
 
 use super::icons::Icon;
 use super::illustrations::EmptySpot;
@@ -154,6 +157,8 @@ pub fn VolumeList() -> impl IntoView {
     // the same row doesn't always refire the request.
     let expanded: RwSignal<Option<String>> = RwSignal::new(None);
     let details: RwSignal<HashMap<String, RowDetail>> = RwSignal::new(HashMap::new());
+    let focused_row: RwSignal<Option<String>> = RwSignal::new(None);
+    let context_menu = context_menu::ContextMenuState::new();
 
     let toggle_expand = move |name: String| {
         let currently_open = expanded.get_untracked().as_deref() == Some(name.as_str());
@@ -301,6 +306,26 @@ pub fn VolumeList() -> impl IntoView {
             .collect()
     };
 
+    let visible_names = move || -> Vec<String> {
+        let needle = filter.get_untracked().trim().to_lowercase();
+        rows.get_untracked()
+            .unwrap_or_default()
+            .into_iter()
+            .filter(|row| needle.is_empty() || row_name(row).to_lowercase().contains(&needle))
+            .map(|row| row_name(&row))
+            .filter(|name| !name.is_empty())
+            .collect()
+    };
+
+    let key_handle = window_event_listener(ev::keydown, move |kev: web_sys::KeyboardEvent| {
+        let blocked =
+            pending_bulk.get_untracked().is_some() || context_menu.0.get_untracked().is_some();
+        context_menu::handle_table_key(&kev, visible_names(), focused_row, blocked, move |name| {
+            toggle_expand(name);
+        });
+    });
+    on_cleanup(move || key_handle.remove());
+
     let confirm_bulk = move |_| {
         let names = match pending_bulk.get_untracked() {
             Some(BulkKind::Selected) => selected.get_untracked().into_iter().collect::<Vec<_>>(),
@@ -407,9 +432,49 @@ pub fn VolumeList() -> impl IntoView {
                         let name_toggle = name.clone();
                         let name_is_open = name.clone();
                         let name_detail = name.clone();
+                        let name_for_context = name.clone();
+                        let name_for_click = name.clone();
+                        let row_key = name.clone();
+                        let mountpoint_for_context = mountpoint.clone();
                         let is_open = move || expanded.get().as_deref() == Some(name_is_open.as_str());
                         view! {
-                            <tr>
+                            <tr
+                                class=move || context_menu::focused_row_class(focused_row, &row_key)
+                                on:click=move |_| focused_row.set(Some(name_for_click.clone()))
+                                on:contextmenu=move |ev| {
+                                    focused_row.set(Some(name_for_context.clone()));
+                                    let name_inspect = name_for_context.clone();
+                                    let name_remove = name_for_context.clone();
+                                    let mountpoint_copy = mountpoint_for_context.clone();
+                                    context_menu.open(
+                                        &ev,
+                                        vec![
+                                            context_menu::ContextMenuEntry::item(
+                                                "Copy mountpoint",
+                                                None,
+                                                false,
+                                                mountpoint_copy.is_empty(),
+                                                Callback::new(move |_| copy_to_clipboard(&mountpoint_copy)),
+                                            ),
+                                            context_menu::ContextMenuEntry::item(
+                                                "Inspect",
+                                                None,
+                                                false,
+                                                name_inspect.is_empty(),
+                                                Callback::new(move |_| toggle_expand(name_inspect.clone())),
+                                            ),
+                                            context_menu::ContextMenuEntry::separator(),
+                                            context_menu::ContextMenuEntry::item(
+                                                "Remove",
+                                                None,
+                                                true,
+                                                name_remove.is_empty(),
+                                                Callback::new(move |_| remove_names(vec![name_remove.clone()])),
+                                            ),
+                                        ],
+                                    );
+                                }
+                            >
                                 <td class="cell-actions">
                                     <button
                                         type="button"
@@ -597,6 +662,7 @@ pub fn VolumeList() -> impl IntoView {
                     }
                 }).collect_view()}
             </div>
+            <context_menu::ContextMenu state=context_menu/>
         </div>
     }
 }

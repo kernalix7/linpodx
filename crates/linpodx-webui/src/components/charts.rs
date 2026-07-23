@@ -145,7 +145,24 @@ pub fn AreaChart(
                 preserveAspectRatio="none"
                 role="img"
             >
-                <path class="spark-area__fill" d=area_d></path>
+                // Vertical accent gradient (18% → 2% alpha) so the filled shape
+                // reads as a solid mass rather than a flat wash — the fill, not
+                // the 1px line, is what the eye lands on (defect: shapeless plot).
+                <defs>
+                    <linearGradient id="spark-area-grad" x1="0" y1="0" x2="0" y2="1">
+                        <stop
+                            offset="0%"
+                            stop-color="var(--color-accent)"
+                            stop-opacity="0.18"
+                        ></stop>
+                        <stop
+                            offset="100%"
+                            stop-color="var(--color-accent)"
+                            stop-opacity="0.02"
+                        ></stop>
+                    </linearGradient>
+                </defs>
+                <path class="spark-area__fill spark-area__fill--grad" d=area_d></path>
                 <path class="spark-line" d=line_d></path>
                 {move || hover_overlay(coords, data, hover, height, value_fmt)}
             </svg>
@@ -362,12 +379,10 @@ pub fn Sparkline(
 // exception to the single-sequential-hue donut rule elsewhere in the house
 // style): Used = the System section hue (`--sec-system-fg`) since its CTA
 // routes to the System-section Disk tab; Reclaimable = the warn hue (an
-// explicit, spec-directed use of a status colour, not an accidental one);
-// Free = the neutral track colour, never its own drawn arc — it is simply
-// whatever length of the recessive track circle the two coloured arcs don't
-// cover, so a caller that always passes `free_bytes = 0` (no host-capacity
-// API exists yet) still renders a fully-honest ring instead of a fabricated
-// "free space" segment.
+// explicit, spec-directed use of a status colour, not an accidental one). The
+// ring is two-segment only — `system df` has no host-capacity field to derive
+// a real "free" number from, so we never draw or legend a fabricated "free"
+// slice. The centre label is the tracked total (`used + reclaimable`).
 
 /// One ring segment's precomputed stroke geometry. Pure function output — no
 /// leptos/DOM involved — so [`donut_segments`] is unit-testable on the host
@@ -425,7 +440,7 @@ pub fn donut_segments(values: &[f64], total: f64, circumference: f64) -> Vec<Don
 }
 
 /// Hero capacity ring: `Used` (system-section hue) + `Reclaimable` (warn hue)
-/// arcs over a neutral track, a center byte total, a 3-row legend, and an
+/// arcs over a neutral track, a center byte total, a 2-row legend, and an
 /// optional "Manage disk →" CTA. Self-contained (no outer card chrome) so it
 /// can be dropped straight into `.hero-donut` on the dashboard *or* re-sized
 /// into a smaller card elsewhere (e.g. the disk center's own summary card) —
@@ -434,7 +449,6 @@ pub fn donut_segments(values: &[f64], total: f64, circumference: f64) -> Vec<Don
 pub fn CapacityDonut(
     #[prop(into)] used_bytes: Signal<u64>,
     #[prop(into)] reclaimable_bytes: Signal<u64>,
-    #[prop(into)] free_bytes: Signal<u64>,
     #[prop(default = 64.0)] radius: f64,
     #[prop(default = 16.0)] stroke_width: f64,
     /// Fires when the CTA is clicked; omit to render without a CTA (e.g. when
@@ -451,8 +465,7 @@ pub fn CapacityDonut(
     let segments = Memo::new(move |_| {
         let used = used_bytes.get() as f64;
         let reclaim = reclaimable_bytes.get() as f64;
-        let free = free_bytes.get() as f64;
-        donut_segments(&[used, reclaim, free], used + reclaim + free, circumference)
+        donut_segments(&[used, reclaim], used + reclaim, circumference)
     });
     let seg_attr = move |i: usize| {
         segments.get().get(i).cloned().unwrap_or(DonutSegment {
@@ -466,14 +479,8 @@ pub fn CapacityDonut(
     let reclaim_dasharray = move || seg_attr(1).dasharray;
     let reclaim_dashoffset = move || seg_attr(1).dashoffset;
 
-    let total_label = move || {
-        format_bytes(
-            used_bytes
-                .get()
-                .saturating_add(reclaimable_bytes.get())
-                .saturating_add(free_bytes.get()),
-        )
-    };
+    let total_label =
+        move || format_bytes(used_bytes.get().saturating_add(reclaimable_bytes.get()));
 
     view! {
         <>
@@ -481,7 +488,7 @@ pub fn CapacityDonut(
                 class="hero-donut__ring"
                 viewBox=vb
                 role="img"
-                aria-label="Disk capacity: used, reclaimable and free space"
+                aria-label="Disk capacity: used and reclaimable space"
             >
                 <circle
                     cx=center
@@ -529,13 +536,6 @@ pub fn CapacityDonut(
                     <span class="hero-donut__swatch" style="background: var(--color-warn)"></span>
                     "Reclaimable "
                     <span class="mono">{move || format_bytes(reclaimable_bytes.get())}</span>
-                </div>
-                <div class="hero-donut__legend-row">
-                    <span
-                        class="hero-donut__swatch"
-                        style="background: var(--color-border-strong)"
-                    ></span>
-                    "Free "<span class="mono">{move || format_bytes(free_bytes.get())}</span>
                 </div>
             </div>
             {move || {

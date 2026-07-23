@@ -33,10 +33,15 @@
 use leptos::prelude::*;
 use serde_json::Value;
 use wasm_bindgen::JsCast;
+use wasm_bindgen_futures::spawn_local;
 use web_sys::Element;
 
 use crate::app::{AuthToken, DrawerState};
 use crate::ws;
+
+/// How many recent audit rows to backfill the feed with on mount, so an idle
+/// daemon shows history instead of an empty "No events yet" box.
+const BACKFILL_LIMIT: usize = 10;
 
 /// Ring-buffer capacity — the feed keeps at most this many recent entries.
 const RING_CAP: usize = 200;
@@ -72,6 +77,9 @@ pub struct FeedEntry {
     pub resource_short: String,
     /// Best-effort human message pulled from `details` (may be empty).
     pub message: String,
+    /// True for rows seeded from the audit backfill (rendered muted); false for
+    /// live rows arriving over the socket (rendered at full contrast).
+    pub historical: bool,
 }
 
 /// Map an [`linpodx_common::ipc::EventKind`] string to a status badge class.
@@ -163,7 +171,49 @@ pub fn parse_event(note: &Value, seq: u64) -> Option<FeedEntry> {
         resource_short: short_resource(&resource_full),
         resource_full,
         message,
+        historical: false,
     })
+}
+
+/// Parse one audit-summary row (as returned by `GET /api/v1/audit?limit=N` —
+/// see `AuditEntrySummary`: `{seq, ts, kind, profile_name, container_id, …}`)
+/// into a *historical* [`FeedEntry`]. `seq` is the client render key (the
+/// audit row's own numeric seq is returned separately so the caller can sort
+/// newest-first regardless of endpoint ordering). Returns `None` when the row
+/// isn't an object.
+pub fn parse_audit_row(row: &Value, seq: u64) -> Option<(FeedEntry, i64)> {
+    let obj = row.as_object()?;
+    let audit_seq = obj.get("seq").and_then(Value::as_i64).unwrap_or(0);
+    let kind = obj
+        .get("kind")
+        .and_then(Value::as_str)
+        .unwrap_or("audit")
+        .to_string();
+    let resource_full = obj
+        .get("container_id")
+        .and_then(Value::as_str)
+        .unwrap_or("")
+        .to_string();
+    let ts_raw = obj.get("ts").and_then(Value::as_str).unwrap_or("");
+    // Prefer the profile name as the human message; audit rows have no `details`.
+    let message = obj
+        .get("profile_name")
+        .and_then(Value::as_str)
+        .unwrap_or("")
+        .to_string();
+    Some((
+        FeedEntry {
+            seq,
+            ts: short_time(ts_raw),
+            topic: "audit".to_string(),
+            kind,
+            resource_short: short_resource(&resource_full),
+            resource_full,
+            message,
+            historical: true,
+        },
+        audit_seq,
+    ))
 }
 
 /// Push `entry` to the front of a newest-first ring buffer, dropping the oldest
@@ -203,6 +253,46 @@ pub fn LiveEvents() -> impl IntoView {
             entries.update(|v| push_capped(v, entry, RING_CAP));
         }
     });
+
+    // One-shot backfill: seed the feed with the most recent audit rows so an
+    // idle daemon (no live traffic yet) shows history instead of an empty box.
+    // Seeded rows are `historical` (muted); live rows append bright above them.
+    // The live subscription above is untouched — this only fills the tail.
+    if let Some(tok) = auth.0.get_untracked() {
+        spawn_local(async move {
+            let path = format!("audit?limit={BACKFILL_LIMIT}");
+            let Ok(v) = ws::fetch_list(&path, &tok).await else {
+                return;
+            };
+            let Some(arr) = v.as_array() else {
+                return;
+            };
+            // Parse, then sort newest-first by the audit row's own seq so we
+            // don't depend on the endpoint's ordering.
+            let mut seeded: Vec<(FeedEntry, i64)> = arr
+                .iter()
+                .filter_map(|row| {
+                    let id = seq.get_untracked();
+                    seq.set(id.wrapping_add(1));
+                    parse_audit_row(row, id)
+                })
+                .collect();
+            seeded.sort_by_key(|b| std::cmp::Reverse(b.1));
+            if seeded.is_empty() {
+                return;
+            }
+            entries.update(|cur| {
+                // Append historical rows *below* any live rows that already
+                // arrived; keep the buffer newest-first and capped.
+                for (entry, _) in seeded {
+                    cur.push(entry);
+                }
+                if cur.len() > RING_CAP {
+                    cur.truncate(RING_CAP);
+                }
+            });
+        });
+    }
 
     // Pin the viewport to the newest entry (top) whenever the buffer changes,
     // unless the user has turned auto-scroll off (then we leave scroll alone).
@@ -276,9 +366,14 @@ pub fn LiveEvents() -> impl IntoView {
                     );
                 }
                 let has_msg = !e.message.is_empty();
+                let row_cls = if e.historical {
+                    "log-line log-line--historical"
+                } else {
+                    "log-line"
+                };
                 view! {
                     <div
-                        class="log-line"
+                        class=row_cls
                         style=style
                         on:click=move |_| {
                             if clickable {
@@ -454,5 +549,38 @@ mod tests {
         assert_eq!(detail_message(&json!({ "line": "hello" })), "hello");
         assert_eq!(detail_message(&json!({ "name": "web" })), "web");
         assert_eq!(detail_message(&json!({})), "");
+    }
+
+    #[test]
+    fn parse_audit_row_maps_summary_fields_as_historical() {
+        let row = json!({
+            "seq": 42,
+            "ts": "2026-07-22T12:34:56.789Z",
+            "kind": "container_updated",
+            "profile_name": "strict",
+            "container_id": "deadbeefcafe1234"
+        });
+        let (entry, audit_seq) = parse_audit_row(&row, 3).expect("row parses");
+        assert_eq!(entry.seq, 3);
+        assert_eq!(audit_seq, 42);
+        assert_eq!(entry.topic, "audit");
+        assert_eq!(entry.kind, "container_updated");
+        assert_eq!(entry.resource_full, "deadbeefcafe1234");
+        assert_eq!(entry.resource_short, "deadbeefcafe");
+        assert_eq!(entry.ts, "12:34:56");
+        assert_eq!(entry.message, "strict");
+        assert!(entry.historical);
+    }
+
+    #[test]
+    fn parse_audit_row_tolerates_missing_optionals() {
+        let row = json!({ "seq": 1, "ts": "2026-07-22T00:00:01Z", "kind": "approval" });
+        let (entry, audit_seq) = parse_audit_row(&row, 0).expect("row parses");
+        assert_eq!(audit_seq, 1);
+        assert_eq!(entry.resource_full, "");
+        assert_eq!(entry.message, "");
+        assert!(entry.historical);
+        // Non-object rows are rejected.
+        assert!(parse_audit_row(&json!("nope"), 0).is_none());
     }
 }

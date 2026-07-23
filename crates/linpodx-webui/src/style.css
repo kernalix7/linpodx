@@ -916,7 +916,8 @@ svg {
 .btn--icon,
 .icon-btn,
 .theme-toggle,
-.sidebar-collapse {
+.sidebar-collapse,
+.density-icon-toggle {
   display: inline-flex;
   align-items: center;
   justify-content: center;
@@ -934,14 +935,16 @@ svg {
 .btn--icon:hover,
 .icon-btn:hover,
 .theme-toggle:hover,
-.sidebar-collapse:hover {
+.sidebar-collapse:hover,
+.density-icon-toggle:hover {
   background: var(--color-surface-hover);
   color: var(--color-text-primary);
 }
 .btn--icon:focus-visible,
 .icon-btn:focus-visible,
 .theme-toggle:focus-visible,
-.sidebar-collapse:focus-visible {
+.sidebar-collapse:focus-visible,
+.density-icon-toggle:focus-visible {
   outline: none;
   box-shadow: var(--ring);
 }
@@ -951,6 +954,18 @@ svg {
 .btn--icon svg {
   width: 18px;
   height: 18px;
+}
+/* .density-icon-toggle's glyph is a deliberately smaller 14px rule-of-three
+ * icon (matches the inline width/height on the <svg> in app.rs) — it does
+ * NOT join the 18px .icon-btn svg group above. Hidden by default; the
+ * v7 topbar block below flips it on <=1100px alongside hiding
+ * .density-toggle--full. */
+.density-icon-toggle {
+  display: none;
+}
+.density-icon-toggle__glyph {
+  width: 14px;
+  height: 14px;
 }
 
 /* per-row action buttons ---------------------------------------------------- */
@@ -1996,6 +2011,14 @@ select:focus {
 /* Subtle accent fill for the history area. */
 .spark-area__fill {
   fill: var(--color-accent-soft);
+  stroke: none;
+}
+/* v7 — AreaChart fill uses a vertical accent gradient (18% → 2% alpha, defined
+ * inline in each chart's <defs> as #spark-area-grad) so the filled shape reads
+ * as a solid mass, not a flat wash. Placed after the base rule so it wins for
+ * the AreaChart path while the footer Sparkline keeps the flat .spark-area__fill. */
+.spark-area__fill--grad {
+  fill: url(#spark-area-grad);
   stroke: none;
 }
 /* 2px accent stroke for the leading line. */
@@ -3434,3 +3457,348 @@ mark.log-hl--active,
  * .surface-card/.mgmt-card/.hero-counts__tile hover-lift is perceptible in
  * both themes without reading as heavy.
  * ========================================================================== */
+
+/* ==========================================================================
+ * v7 — DASHBOARD REBALANCE (Style/Dashboard lane)
+ * --------------------------------------------------------------------------
+ * Visually-confirmed dashboard defects (real screenshots @ 1440x900):
+ *   - hero-counts: plain text rows → clickable, section-tinted mini-cards
+ *     (.hero-counts__card / __disc / __body / __label / __count / __sub);
+ *   - quick-actions: half-empty 2x2 grid → compact horizontal icon strip
+ *     (.quick-actions__strip / .quick-action*) + a "Top consumers" mini-table
+ *     (.top-consumers*) filling the freed height;
+ *   - live-events: audit-backfilled historical rows read muted
+ *     (.log-line--historical) so live rows still pop.
+ * The AreaChart gradient (.spark-area__fill--grad) and the two-segment donut
+ * live next to their siblings above; this block owns the hero-secondary +
+ * hero-counts surfaces only.
+ * ========================================================================== */
+
+/* --- hero-counts: clickable, section-tinted resource cards --------------- */
+.hero-counts {
+  gap: var(--sp-2);
+}
+.hero-counts__card {
+  display: flex;
+  align-items: center;
+  gap: var(--sp-3);
+  width: 100%;
+  padding: var(--sp-3);
+  text-align: left;
+  background: var(--color-surface);
+  border: 1px solid var(--color-border);
+  border-radius: var(--r-md);
+  cursor: pointer;
+  transition:
+    transform var(--motion-fast) var(--ease),
+    box-shadow var(--motion-fast) var(--ease),
+    border-color var(--motion-fast) var(--ease);
+}
+.hero-counts__card:hover {
+  transform: translateY(-1px);
+  box-shadow: var(--e-2);
+  border-color: var(--card-fg, var(--color-border-strong));
+}
+.hero-counts__card:focus-visible {
+  outline: 2px solid var(--card-fg, var(--color-accent));
+  outline-offset: 2px;
+}
+.hero-counts__disc {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  flex: none;
+  width: 34px;
+  height: 34px;
+  border-radius: var(--r-md);
+  background: var(--card-disc, var(--color-accent-soft));
+  color: var(--card-fg, var(--color-accent));
+}
+.hero-counts__disc svg {
+  width: 18px;
+  height: 18px;
+}
+.hero-counts__body {
+  display: grid;
+  grid-template-columns: 1fr auto;
+  align-items: baseline;
+  gap: 0 var(--sp-2);
+  flex: 1;
+  min-width: 0;
+}
+.hero-counts__label {
+  font-size: var(--fs-sm);
+  color: var(--color-text-secondary);
+}
+.hero-counts__count {
+  grid-row: 1 / span 2;
+  grid-column: 2;
+  align-self: center;
+  font-size: var(--fs-lg);
+  font-weight: 650;
+  color: var(--color-text-primary);
+  font-variant-numeric: tabular-nums;
+}
+.hero-counts__sub {
+  grid-column: 1;
+  font-size: var(--fs-xs);
+  color: var(--color-text-tertiary);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+@media (prefers-reduced-motion: reduce) {
+  .hero-counts__card:hover {
+    transform: none;
+  }
+}
+
+/* --- quick-actions: compact horizontal strip ---------------------------- */
+.quick-actions {
+  display: flex;
+  flex-direction: column;
+  gap: var(--sp-3);
+}
+.quick-actions__strip {
+  display: flex;
+  flex-wrap: wrap;
+  gap: var(--sp-2);
+}
+.quick-action {
+  display: inline-flex;
+  align-items: center;
+  gap: var(--sp-2);
+  padding: var(--sp-2) var(--sp-3);
+  background: var(--color-surface-raised, var(--color-bg));
+  border: 1px solid var(--color-border);
+  border-radius: var(--r-md);
+  color: var(--color-text-primary);
+  font-size: var(--fs-xs);
+  font-weight: var(--fw-medium);
+  cursor: pointer;
+  transition:
+    background var(--motion-fast) var(--ease),
+    border-color var(--motion-fast) var(--ease);
+}
+.quick-action:hover {
+  background: var(--color-accent-soft);
+  border-color: var(--color-accent);
+}
+.quick-action__icon {
+  display: inline-flex;
+  color: var(--color-text-secondary);
+}
+.quick-action__icon svg {
+  width: 15px;
+  height: 15px;
+}
+.quick-action:hover .quick-action__icon {
+  color: var(--color-accent);
+}
+
+/* --- top consumers mini-table ------------------------------------------- */
+.top-consumers {
+  display: flex;
+  flex-direction: column;
+  gap: var(--sp-1);
+  border-top: 1px solid var(--color-border);
+  padding-top: var(--sp-3);
+}
+.top-consumers__head {
+  font-size: var(--fs-xs);
+  color: var(--color-text-secondary);
+  text-transform: uppercase;
+  letter-spacing: 0.04em;
+  margin-bottom: var(--sp-1);
+}
+.top-consumers__list {
+  display: flex;
+  flex-direction: column;
+}
+.top-consumers__row {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) auto auto auto;
+  align-items: center;
+  gap: var(--sp-2);
+  width: 100%;
+  padding: var(--sp-1) var(--sp-1);
+  text-align: left;
+  background: transparent;
+  border: 0;
+  border-radius: var(--r-sm);
+  cursor: pointer;
+  transition: background var(--motion-fast) var(--ease);
+}
+.top-consumers__row:hover {
+  background: var(--color-accent-soft);
+}
+.top-consumers__name {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  font-size: var(--fs-sm);
+  color: var(--color-text-primary);
+}
+.top-consumers__spark {
+  display: inline-flex;
+  width: 72px;
+  color: var(--color-accent);
+}
+.top-consumers__cpu {
+  font-size: var(--fs-xs);
+  color: var(--color-text-primary);
+  font-variant-numeric: tabular-nums;
+  text-align: right;
+  min-width: 3.5em;
+}
+.top-consumers__mem {
+  font-size: var(--fs-xs);
+  font-variant-numeric: tabular-nums;
+  text-align: right;
+  min-width: 4.5em;
+}
+.top-consumers__empty {
+  padding: var(--sp-3) 0;
+  font-size: var(--fs-xs);
+  color: var(--color-text-tertiary);
+  text-align: center;
+}
+
+/* --- live-events: audit-backfilled historical rows read muted ----------- */
+.log-line--historical {
+  opacity: 0.62;
+}
+.log-line--historical:hover {
+  opacity: 1;
+}
+
+/* ==========================================================================
+ * v7 — TOPBAR OVERFLOW + CONTEXT MENU (Style/Dashboard lane, wiring fold)
+ * --------------------------------------------------------------------------
+ * Folds in the classes app.rs's topbar already reads but style.css never
+ * defined (visually confirmed: at narrow widths the actions block was
+ * winning the flex fight and the breadcrumb page title silently clipped
+ * out from under the layout instead of eliding):
+ *   - .topbar-crumb--truncate lets the crumb be the one flex child that
+ *     actually shrinks (min-width: 0 + overflow hidden); its own
+ *     .topbar-crumb__page already carries the ellipsis (see line ~2657).
+ *   - .topbar-actions__item pins every action pill/button to its content
+ *     size (flex: none) so the crumb — not the actions — absorbs the
+ *     squeeze; .topbar-actions__item--flex opts the cmdk search chip back
+ *     into shrinking since its own __text can also ellipsize.
+ *   - .density-toggle--full / .density-icon-toggle are the two-button vs.
+ *     one-icon density control swap below ~1100px (icon-button base rules
+ *     folded into the shared .icon-btn family above, line ~916).
+ * Also: .quick-action__label (dashboard quick-actions strip button text,
+ * same lane) and .context-menu* (new row right-click menu, `context_menu.rs`,
+ * now wired into `components/mod.rs`) — styled as a sibling of
+ * .create-menu*, reusing its `create-menu-in` entrance keyframe rather than
+ * redefining one.
+ * ========================================================================== */
+
+/* --- topbar: crumb shrinks, actions hold their size ---------------------- */
+.topbar-crumb--truncate {
+  flex: 1 1 auto;
+  min-width: 0;
+  overflow: hidden;
+}
+.topbar-actions__item {
+  flex: none;
+}
+.topbar-actions__item--flex {
+  flex: 0 1 auto;
+  min-width: 0;
+}
+
+/* --- topbar: density control, full pair <-> single icon-cycle ----------- */
+@media (max-width: 1100px) {
+  .density-toggle--full {
+    display: none;
+  }
+  .density-icon-toggle {
+    display: inline-flex;
+  }
+}
+
+/* --- dashboard quick-actions strip: button text -------------------------- */
+.quick-action__label {
+  white-space: nowrap;
+}
+
+/* --- row right-click menu (context_menu.rs) ------------------------------ */
+.context-menu {
+  position: fixed;
+  z-index: 150;
+  min-width: 190px;
+  padding: var(--sp-1);
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  background: var(--color-bg-elevated);
+  border: 1px solid var(--color-border);
+  border-radius: var(--r-lg);
+  box-shadow: var(--e-3);
+  animation: create-menu-in var(--motion-fast) var(--ease);
+}
+.context-menu__sep {
+  height: 1px;
+  margin: var(--sp-1) 2px;
+  background: var(--color-border);
+}
+.context-menu__item {
+  display: flex;
+  align-items: center;
+  gap: var(--sp-3);
+  width: 100%;
+  padding: var(--sp-2);
+  border: 0;
+  border-radius: var(--r-sm);
+  background: transparent;
+  color: var(--color-text-primary);
+  font-size: var(--fs-sm);
+  font-weight: var(--fw-medium);
+  text-align: left;
+  cursor: pointer;
+  transition: background var(--motion-fast) var(--ease);
+}
+.context-menu__item:hover:not(:disabled) {
+  background: var(--color-surface-hover);
+}
+.context-menu__item:focus-visible {
+  outline: none;
+  box-shadow: var(--ring);
+}
+.context-menu__item:disabled {
+  color: var(--color-text-tertiary);
+  cursor: not-allowed;
+}
+.context-menu__item--danger {
+  color: var(--color-danger);
+}
+.context-menu__item--danger:hover:not(:disabled) {
+  background: color-mix(in srgb, var(--color-danger) 12%, transparent);
+}
+
+/* v7.1 — fable screenshot-verified fixes */
+
+/* Buttons never let an inline icon render at intrinsic SVG size (the
+ * page-head "New container" icon was painting ~200px over the header). */
+.btn svg,
+.page-head__actions svg,
+.quick-action svg {
+  width: 16px;
+  height: 16px;
+  flex-shrink: 0;
+}
+
+/* Long unbroken cell values (image refs with sha256 digests) truncate with
+ * a tooltip instead of colliding into the next column. */
+.cell-clip {
+  display: inline-block;
+  max-width: 340px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  vertical-align: bottom;
+}

@@ -19,9 +19,12 @@
 
 use std::collections::HashMap;
 
+use leptos::ev;
 use leptos::prelude::*;
 use serde_json::{json, Value};
 use wasm_bindgen_futures::spawn_local;
+
+use super::context_menu;
 
 use super::icons::Icon;
 use super::illustrations::EmptySpot;
@@ -235,6 +238,8 @@ pub fn StacksView() -> impl IntoView {
     let busy = RwSignal::new(false);
     let toasts: RwSignal<Vec<(u64, String, &'static str)>> = RwSignal::new(Vec::new());
     let toast_seq: RwSignal<u64> = RwSignal::new(0);
+    let focused_row: RwSignal<Option<String>> = RwSignal::new(None);
+    let context_menu = context_menu::ContextMenuState::new();
 
     let push_toast = move |text: String, kind: &'static str| {
         let id = toast_seq.get_untracked() + 1;
@@ -280,6 +285,50 @@ pub fn StacksView() -> impl IntoView {
         subscribe("container", move |_event| reload());
     });
 
+    let visible_stack_names = move || -> Vec<String> {
+        let needle = filter.get_untracked().trim().to_lowercase();
+        let items = rows.get_untracked().unwrap_or_default();
+        group_stacks(&items)
+            .into_iter()
+            .filter(|g| group_matches(g, &needle))
+            .map(|g| g.name)
+            .collect()
+    };
+
+    let run_primary_stack = move |stack: String| {
+        let items = rows.get_untracked().unwrap_or_default();
+        let Some(group) = group_stacks(&items).into_iter().find(|g| g.name == stack) else {
+            return;
+        };
+        let total = group.members.len();
+        let running = member_running(&group.members);
+        let action = if total > 0 && running == total {
+            BulkAction::Stop
+        } else {
+            BulkAction::Start
+        };
+        run_bulk(
+            action,
+            group.name,
+            member_ids(&group.members),
+            busy,
+            push_toast,
+            reload,
+        );
+    };
+
+    let key_handle = window_event_listener(ev::keydown, move |kev: web_sys::KeyboardEvent| {
+        let blocked = context_menu.0.get_untracked().is_some();
+        context_menu::handle_table_key(
+            &kev,
+            visible_stack_names(),
+            focused_row,
+            blocked,
+            run_primary_stack,
+        );
+    });
+    on_cleanup(move || key_handle.remove());
+
     let body_view = move || {
         if loading.get() {
             return skeleton_cards();
@@ -302,7 +351,17 @@ pub fn StacksView() -> impl IntoView {
                 let count = groups.len();
                 let cards = groups
                     .into_iter()
-                    .map(|g| render_stack_card(g, density, busy, push_toast, reload))
+                    .map(|g| {
+                        render_stack_card(
+                            g,
+                            density,
+                            busy,
+                            push_toast,
+                            reload,
+                            focused_row,
+                            context_menu,
+                        )
+                    })
                     .collect_view();
                 view! {
                     <div class="card-stack">{cards}</div>
@@ -353,6 +412,7 @@ pub fn StacksView() -> impl IntoView {
                     }
                 }).collect_view()}
             </div>
+            <context_menu::ContextMenu state=context_menu/>
         </div>
     }
 }
@@ -363,8 +423,16 @@ fn render_stack_card(
     group: StackGroup,
     density: DensityMode,
     busy: RwSignal<bool>,
-    push_toast: impl Fn(String, &'static str) + Copy + 'static,
-    reload: impl Fn() + Copy + 'static,
+    // `Send + Sync` (beyond the `run_bulk`-level `Fn(..) + Copy + 'static`) is
+    // required here specifically because these two get captured into the
+    // context-menu entries' `Callback::new(..)` below — `Callback` demands
+    // `Send + Sync` on its inner `Fn`, and that bound does not get inferred
+    // through an opaque `impl Fn` parameter the way it would for a concrete
+    // closure, so it has to be spelled out on the signature.
+    push_toast: impl Fn(String, &'static str) + Copy + Send + Sync + 'static,
+    reload: impl Fn() + Copy + Send + Sync + 'static,
+    focused_row: RwSignal<Option<String>>,
+    context_menu: context_menu::ContextMenuState,
 ) -> AnyView {
     let total = group.members.len();
     let running = member_running(&group.members);
@@ -380,17 +448,76 @@ fn render_stack_card(
 
     // One handler factory per action, cloning the shared ids/name into the
     // spawned bulk loop.
-    let make_click = move |action: BulkAction| {
+    let make_click = {
         let ids = ids.clone();
         let name = name.clone();
-        move |_| run_bulk(action, name.clone(), ids.clone(), busy, push_toast, reload)
+        move |action: BulkAction| {
+            let ids = ids.clone();
+            let name = name.clone();
+            move |_| run_bulk(action, name.clone(), ids.clone(), busy, push_toast, reload)
+        }
     };
     let on_start = make_click(BulkAction::Start);
     let on_stop = make_click(BulkAction::Stop);
     let on_restart = make_click(BulkAction::Restart);
+    let row_key = group.name.clone();
+    let name_for_click = group.name.clone();
+    let name_for_context = group.name.clone();
+    let ids_for_context = ids.clone();
 
     view! {
-        <div class="card">
+        <div
+            class=move || {
+                if context_menu::focused_row_class(focused_row, &row_key).is_empty() {
+                    "card"
+                } else {
+                    "card row--focused"
+                }
+            }
+            on:click=move |_| focused_row.set(Some(name_for_click.clone()))
+            on:contextmenu=move |ev| {
+                focused_row.set(Some(name_for_context.clone()));
+                let disabled = no_members || busy.get_untracked();
+                let ids_start = ids_for_context.clone();
+                let ids_stop = ids_for_context.clone();
+                let ids_restart = ids_for_context.clone();
+                let name_start = name_for_context.clone();
+                let name_stop = name_for_context.clone();
+                let name_restart = name_for_context.clone();
+                context_menu.open(
+                    &ev,
+                    vec![
+                        context_menu::ContextMenuEntry::item(
+                            "Start",
+                            Some("▶"),
+                            false,
+                            disabled,
+                            Callback::new(move |_| {
+                                run_bulk(BulkAction::Start, name_start.clone(), ids_start.clone(), busy, push_toast, reload)
+                            }),
+                        ),
+                        context_menu::ContextMenuEntry::item(
+                            "Stop",
+                            Some("■"),
+                            false,
+                            disabled,
+                            Callback::new(move |_| {
+                                run_bulk(BulkAction::Stop, name_stop.clone(), ids_stop.clone(), busy, push_toast, reload)
+                            }),
+                        ),
+                        context_menu::ContextMenuEntry::item(
+                            "Restart",
+                            Some("↻"),
+                            false,
+                            disabled,
+                            Callback::new(move |_| {
+                                run_bulk(BulkAction::Restart, name_restart.clone(), ids_restart.clone(), busy, push_toast, reload)
+                            }),
+                        ),
+                    ],
+                );
+            }
+        >
             <div class="card-header">
                 <span class="cell-primary card-header__title">
                     <span class="cell-primary__main">{group.name.clone()}</span>

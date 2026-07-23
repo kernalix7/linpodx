@@ -11,13 +11,17 @@
 //! never logged, never sent anywhere but the `secret_create` RPC body, and is
 //! zeroed out of the signal on every close path (success, error, cancel).
 //!
-//! Registration gap (report to platform/webui-shell owners): this component
-//! is not yet wired into `components/mod.rs` or `app.rs` — both are outside
-//! this lane's owned paths.
+//! Row keyboard nav (j/k/arrows + Enter) and right-click context menu match
+//! the pattern the other resource panels use (`context_menu.rs`); Enter opens
+//! the same remove-confirm modal as the row button rather than deleting
+//! outright, since removal here has no undo.
 
+use leptos::ev;
 use leptos::prelude::*;
 use serde_json::{json, Value};
 use wasm_bindgen_futures::spawn_local;
+
+use super::context_menu;
 
 use super::icons::Icon;
 use super::illustrations::EmptySpot;
@@ -76,6 +80,8 @@ pub fn SecretsView() -> impl IntoView {
     let pending_remove: RwSignal<Option<String>> = RwSignal::new(None);
     let remove_busy = RwSignal::new(false);
     let remove_error: RwSignal<Option<String>> = RwSignal::new(None);
+    let focused_row: RwSignal<Option<String>> = RwSignal::new(None);
+    let context_menu = context_menu::ContextMenuState::new();
 
     let reload = move || {
         loading.set(true);
@@ -104,6 +110,13 @@ pub fn SecretsView() -> impl IntoView {
         }
         reload();
     });
+
+    let visible_names = move || {
+        rows.get()
+            .iter()
+            .map(|s| s.name.clone())
+            .collect::<Vec<_>>()
+    };
 
     // Clears the plaintext value from the signal on every exit path —
     // success, RPC error, and plain cancel all funnel through this.
@@ -156,6 +169,14 @@ pub fn SecretsView() -> impl IntoView {
         pending_remove.set(Some(name));
         remove_error.set(None);
     };
+
+    let key_handle = window_event_listener(ev::keydown, move |kev: web_sys::KeyboardEvent| {
+        let blocked = pending_remove.get_untracked().is_some()
+            || create_open.get_untracked()
+            || context_menu.0.get_untracked().is_some();
+        context_menu::handle_table_key(&kev, visible_names(), focused_row, blocked, open_remove);
+    });
+    on_cleanup(move || key_handle.remove());
 
     let cancel_remove = move |_| {
         pending_remove.set(None);
@@ -309,8 +330,28 @@ pub fn SecretsView() -> impl IntoView {
                 } else {
                     s.driver.clone()
                 };
+                let row_key = s.name.clone();
+                let name_for_click = s.name.clone();
+                let name_for_context = s.name.clone();
                 view! {
-                    <tr>
+                    <tr
+                        class=move || context_menu::focused_row_class(focused_row, &row_key)
+                        on:click=move |_| focused_row.set(Some(name_for_click.clone()))
+                        on:contextmenu=move |ev| {
+                            focused_row.set(Some(name_for_context.clone()));
+                            let name_remove = name_for_context.clone();
+                            context_menu.open(
+                                &ev,
+                                vec![context_menu::ContextMenuEntry::item(
+                                    "Remove",
+                                    None,
+                                    true,
+                                    false,
+                                    Callback::new(move |_| open_remove(name_remove.clone())),
+                                )],
+                            );
+                        }
+                    >
                         <td>
                             <span class="cell-primary" title=s.name.clone()>
                                 <span class="cell-primary__main">{s.name.clone()}</span>
@@ -375,6 +416,7 @@ pub fn SecretsView() -> impl IntoView {
             {body_view}
             {create_modal}
             {remove_modal}
+            <context_menu::ContextMenu state=context_menu/>
         </div>
     }
 }

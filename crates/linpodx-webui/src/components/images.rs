@@ -27,9 +27,12 @@
 
 use std::collections::HashSet;
 
+use leptos::ev;
 use leptos::prelude::*;
 use serde_json::{json, Value};
 use wasm_bindgen_futures::spawn_local;
+
+use super::context_menu;
 
 use super::icons::Icon;
 use super::illustrations::EmptySpot;
@@ -106,6 +109,8 @@ pub fn ImageList() -> impl IntoView {
     let toast_seq: RwSignal<u64> = RwSignal::new(0);
     let push_open: RwSignal<Option<String>> = RwSignal::new(None);
     let pull_open: RwSignal<bool> = RwSignal::new(false);
+    let focused_row: RwSignal<Option<String>> = RwSignal::new(None);
+    let context_menu = context_menu::ContextMenuState::new();
 
     let push_toast = move |text: String, kind: &'static str| {
         let id = toast_seq.get_untracked() + 1;
@@ -212,6 +217,49 @@ pub fn ImageList() -> impl IntoView {
             .filter(|id| !id.is_empty())
             .collect()
     };
+
+    let visible_ids = move || -> Vec<String> {
+        let needle = filter.get_untracked().trim().to_lowercase();
+        rows.get_untracked()
+            .unwrap_or_default()
+            .into_iter()
+            .filter(|row| {
+                needle.is_empty()
+                    || image_display_name(row).to_lowercase().contains(&needle)
+                    || row_id(row).to_lowercase().contains(&needle)
+            })
+            .map(|row| row_id(&row))
+            .filter(|id| !id.is_empty())
+            .collect()
+    };
+
+    let image_seed_for_id = move |id: &str| -> Option<String> {
+        rows.get_untracked()
+            .unwrap_or_default()
+            .into_iter()
+            .find(|row| row_id(row) == id)
+            .map(|row| {
+                row.get("repo_tags")
+                    .and_then(Value::as_array)
+                    .and_then(|a| a.first())
+                    .and_then(Value::as_str)
+                    .map(str::to_string)
+                    .unwrap_or_else(|| id.to_string())
+            })
+    };
+
+    let key_handle = window_event_listener(ev::keydown, move |kev: web_sys::KeyboardEvent| {
+        let blocked = pending_bulk.get_untracked().is_some()
+            || push_open.get_untracked().is_some()
+            || pull_open.get_untracked()
+            || context_menu.0.get_untracked().is_some();
+        context_menu::handle_table_key(&kev, visible_ids(), focused_row, blocked, move |id| {
+            if let Some(seed) = image_seed_for_id(&id) {
+                push_open.set(Some(seed));
+            }
+        });
+    });
+    on_cleanup(move || key_handle.remove());
 
     let confirm_bulk = move |_| {
         let ids = match pending_bulk.get_untracked() {
@@ -324,6 +372,10 @@ pub fn ImageList() -> impl IntoView {
                         let in_use = image_in_use(&row, &c);
                         let checked = sel.contains(&id);
                         let title_id = id.clone();
+                        let row_key = id.clone();
+                        let id_for_click = id.clone();
+                        let id_for_context = id.clone();
+                        let seed_for_context = seed.clone();
                         // Secondary (muted) line under the image name: short
                         // digest + created — hidden by CSS in compact mode.
                         let short = short_id(&id);
@@ -334,7 +386,55 @@ pub fn ImageList() -> impl IntoView {
                             (false, false) => format!("{short} · {created}"),
                         };
                         view! {
-                            <tr>
+                            <tr
+                                class=move || context_menu::focused_row_class(focused_row, &row_key)
+                                on:click=move |_| {
+                                    if !id_for_click.is_empty() {
+                                        focused_row.set(Some(id_for_click.clone()));
+                                    }
+                                }
+                                on:contextmenu=move |ev| {
+                                    focused_row.set(Some(id_for_context.clone()));
+                                    let disabled = id_for_context.is_empty();
+                                    let seed_push = seed_for_context.clone();
+                                    let copy_id = id_for_context.clone();
+                                    let remove_id = id_for_context.clone();
+                                    context_menu.open(
+                                        &ev,
+                                        vec![
+                                            context_menu::ContextMenuEntry::item(
+                                                "Pull latest",
+                                                Some("↓"),
+                                                false,
+                                                false,
+                                                Callback::new(move |_| pull_open.set(true)),
+                                            ),
+                                            context_menu::ContextMenuEntry::item(
+                                                "Push",
+                                                Some("↑"),
+                                                false,
+                                                disabled,
+                                                Callback::new(move |_| push_open.set(Some(seed_push.clone()))),
+                                            ),
+                                            context_menu::ContextMenuEntry::separator(),
+                                            context_menu::ContextMenuEntry::item(
+                                                "Copy ID",
+                                                None,
+                                                false,
+                                                disabled,
+                                                Callback::new(move |_| context_menu::copy_to_clipboard(&copy_id)),
+                                            ),
+                                            context_menu::ContextMenuEntry::item(
+                                                "Remove",
+                                                None,
+                                                true,
+                                                disabled,
+                                                Callback::new(move |_| remove_ids(vec![remove_id.clone()])),
+                                            ),
+                                        ],
+                                    );
+                                }
+                            >
                                 <td>
                                     <input
                                         type="checkbox"
@@ -546,6 +646,7 @@ pub fn ImageList() -> impl IntoView {
             </div>
             <PushModal open=push_open/>
             <PullModal open=pull_open/>
+            <context_menu::ContextMenu state=context_menu/>
         </div>
     }
 }

@@ -28,9 +28,12 @@
 
 use std::collections::HashSet;
 
+use leptos::ev;
 use leptos::prelude::*;
 use serde_json::{json, Value};
 use wasm_bindgen_futures::spawn_local;
+
+use super::context_menu;
 
 use super::icons::Icon;
 use super::illustrations::EmptySpot;
@@ -119,6 +122,8 @@ pub fn NetworkList() -> impl IntoView {
     let action_busy = RwSignal::new(false);
     // (network, container) awaiting detach confirmation.
     let pending_disconnect: RwSignal<Option<(String, String)>> = RwSignal::new(None);
+    let focused_row: RwSignal<Option<String>> = RwSignal::new(None);
+    let context_menu = context_menu::ContextMenuState::new();
 
     let push_toast = move |text: String, kind: &'static str| {
         let id = toast_seq.get_untracked() + 1;
@@ -304,6 +309,27 @@ pub fn NetworkList() -> impl IntoView {
             .filter(|n| !n.is_empty() && !used.contains(n))
             .collect()
     };
+
+    let visible_names = move || -> Vec<String> {
+        let needle = filter.get_untracked().trim().to_lowercase();
+        rows.get_untracked()
+            .unwrap_or_default()
+            .into_iter()
+            .filter(|row| needle.is_empty() || row_name(row).to_lowercase().contains(&needle))
+            .map(|row| row_name(&row))
+            .filter(|name| !name.is_empty())
+            .collect()
+    };
+
+    let key_handle = window_event_listener(ev::keydown, move |kev: web_sys::KeyboardEvent| {
+        let blocked = pending_bulk.get_untracked().is_some()
+            || pending_disconnect.get_untracked().is_some()
+            || context_menu.0.get_untracked().is_some();
+        context_menu::handle_table_key(&kev, visible_names(), focused_row, blocked, move |name| {
+            toggle_row(name);
+        });
+    });
+    on_cleanup(move || key_handle.remove());
 
     let confirm_bulk = move |_| {
         let names = match pending_bulk.get_untracked() {
@@ -551,6 +577,9 @@ pub fn NetworkList() -> impl IntoView {
                         let name_toggle = name.clone();
                         let name_show = name.clone();
                         let name_detail = name.clone();
+                        let name_for_context = name.clone();
+                        let name_for_click = name.clone();
+                        let row_key = name.clone();
                         let driver = row
                             .get("driver")
                             .and_then(|v| v.as_str())
@@ -595,7 +624,47 @@ pub fn NetworkList() -> impl IntoView {
                         };
                         let show_name = name_show.clone();
                         view! {
-                            <tr>
+                            <tr
+                                class=move || context_menu::focused_row_class(focused_row, &row_key)
+                                on:click=move |_| focused_row.set(Some(name_for_click.clone()))
+                                on:contextmenu=move |ev| {
+                                    focused_row.set(Some(name_for_context.clone()));
+                                    let name_inspect = name_for_context.clone();
+                                    let name_connect = name_for_context.clone();
+                                    let name_remove = name_for_context.clone();
+                                    context_menu.open(
+                                        &ev,
+                                        vec![
+                                            context_menu::ContextMenuEntry::item(
+                                                "Inspect",
+                                                None,
+                                                false,
+                                                name_inspect.is_empty(),
+                                                Callback::new(move |_| toggle_row(name_inspect.clone())),
+                                            ),
+                                            context_menu::ContextMenuEntry::item(
+                                                "Connect container..",
+                                                None,
+                                                false,
+                                                name_connect.is_empty(),
+                                                Callback::new(move |_| {
+                                                    if expanded.get_untracked().as_deref() != Some(name_connect.as_str()) {
+                                                        toggle_row(name_connect.clone());
+                                                    }
+                                                }),
+                                            ),
+                                            context_menu::ContextMenuEntry::separator(),
+                                            context_menu::ContextMenuEntry::item(
+                                                "Remove",
+                                                None,
+                                                true,
+                                                name_remove.is_empty(),
+                                                Callback::new(move |_| remove_names(vec![name_remove.clone()])),
+                                            ),
+                                        ],
+                                    );
+                                }
+                            >
                                 <td>
                                     <input
                                         type="checkbox"
@@ -806,6 +875,7 @@ pub fn NetworkList() -> impl IntoView {
                     }
                 }).collect_view()}
             </div>
+            <context_menu::ContextMenu state=context_menu/>
         </div>
     }
 }

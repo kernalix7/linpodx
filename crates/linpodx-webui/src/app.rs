@@ -600,9 +600,145 @@ fn set_drawer_hash(target: Option<&str>) {
     }
 }
 
+// ---------------------------------------------------------------------------
+// URL tab routing — `?tab=<slug>` query-string sync (topbar overflow-fix wave).
+//
+// Kept as pure string/enum functions (no `web_sys` calls) so they're testable
+// without a browser, plus two thin `web_sys`-touching wrappers that call them.
+// ---------------------------------------------------------------------------
+
+/// Kebab-case URL slug for a tab, e.g. `Tab::PinnedClients` → `"pinned-clients"`.
+/// Used both to write `?tab=` on navigation and to parse it back on load.
+fn tab_to_slug(tab: Tab) -> &'static str {
+    match tab {
+        Tab::Dashboard => "dashboard",
+        Tab::Containers => "containers",
+        Tab::Stacks => "stacks",
+        Tab::Pods => "pods",
+        Tab::Images => "images",
+        Tab::Volumes => "volumes",
+        Tab::Networks => "networks",
+        Tab::Snapshots => "snapshots",
+        Tab::Sessions => "sessions",
+        Tab::Sandbox => "sandbox",
+        Tab::Audit => "audit",
+        Tab::Cluster => "cluster",
+        Tab::PinnedClients => "pinned-clients",
+        Tab::Plugins => "plugins",
+        Tab::Secrets => "secrets",
+        Tab::Disk => "disk",
+        Tab::DiskUsage => "disk-usage",
+        Tab::Settings => "settings",
+    }
+}
+
+/// Parse a `?tab=` slug back into a [`Tab`]. Unknown/empty slugs return `None`
+/// so callers fall back to the `Dashboard` default rather than erroring.
+fn slug_to_tab(slug: &str) -> Option<Tab> {
+    match slug {
+        "dashboard" => Some(Tab::Dashboard),
+        "containers" => Some(Tab::Containers),
+        "stacks" => Some(Tab::Stacks),
+        "pods" => Some(Tab::Pods),
+        "images" => Some(Tab::Images),
+        "volumes" => Some(Tab::Volumes),
+        "networks" => Some(Tab::Networks),
+        "snapshots" => Some(Tab::Snapshots),
+        "sessions" => Some(Tab::Sessions),
+        "sandbox" => Some(Tab::Sandbox),
+        "audit" => Some(Tab::Audit),
+        "cluster" => Some(Tab::Cluster),
+        "pinned-clients" => Some(Tab::PinnedClients),
+        "plugins" => Some(Tab::Plugins),
+        "secrets" => Some(Tab::Secrets),
+        "disk" => Some(Tab::Disk),
+        "disk-usage" => Some(Tab::DiskUsage),
+        "settings" => Some(Tab::Settings),
+        _ => None,
+    }
+}
+
+/// Pull the `tab=` value out of a `location.search`-shaped string (leading
+/// `?` optional), independent of where it falls among other params. Mirrors
+/// [`token_from_query`]'s split-on-`&` approach but keeps its own function so
+/// each stays a single obvious pure transform to unit-test.
+fn tab_param_from_query(search: &str) -> Option<&str> {
+    search
+        .trim_start_matches('?')
+        .split('&')
+        .find_map(|kv| kv.strip_prefix("tab="))
+        .filter(|s| !s.is_empty())
+}
+
+/// Resolve the initial active tab from the current URL's `?tab=` param, if
+/// present and recognised. Called once during [`AppRoot`] setup *before* the
+/// `active` signal is constructed, so the right panel renders on the very
+/// first paint instead of flashing `Dashboard` and then swapping.
+fn tab_from_query() -> Option<Tab> {
+    let search = web_sys::window()?.location().search().ok()?;
+    tab_param_from_query(&search).and_then(slug_to_tab)
+}
+
+/// Build the `pathname?search#hash` string to hand to `history.replaceState`
+/// when the active tab changes: any existing `tab=` param is dropped, the
+/// new one appended, every other param and the hash left byte-for-byte alone
+/// (so the `#container/<id>` drawer deep-link keeps working untouched).
+fn url_with_tab(pathname: &str, search: &str, hash: &str, slug: &str) -> String {
+    let mut params: Vec<&str> = search
+        .trim_start_matches('?')
+        .split('&')
+        .filter(|kv| !kv.is_empty() && !kv.starts_with("tab="))
+        .collect();
+    let tab_param = format!("tab={slug}");
+    params.push(&tab_param);
+    format!("{pathname}?{}{hash}", params.join("&"))
+}
+
+/// Mirror the active tab into the URL via `history.replaceState` (no history
+/// entry per switch — back/forward stays about drawer/page navigation, not
+/// tab clicks). `web_sys::History` isn't in this crate's wasm feature list
+/// (`Cargo.toml` is a different lane's file this wave), so the call goes
+/// through untyped `js_sys::Reflect`, same narrow-JS-surface pattern already
+/// used elsewhere in this crate rather than growing that list.
+fn write_tab_to_url(slug: &str) {
+    let win = match web_sys::window() {
+        Some(w) => w,
+        None => return,
+    };
+    let loc = win.location();
+    let pathname = loc.pathname().unwrap_or_default();
+    let search = loc.search().unwrap_or_default();
+    let hash = loc.hash().unwrap_or_default();
+    let next = url_with_tab(&pathname, &search, &hash, slug);
+
+    let window_val: wasm_bindgen::JsValue = win.into();
+    let Ok(history) =
+        js_sys::Reflect::get(&window_val, &wasm_bindgen::JsValue::from_str("history"))
+    else {
+        return;
+    };
+    let Ok(replace_fn) =
+        js_sys::Reflect::get(&history, &wasm_bindgen::JsValue::from_str("replaceState"))
+    else {
+        return;
+    };
+    if let Ok(func) = replace_fn.dyn_into::<js_sys::Function>() {
+        let args = js_sys::Array::of3(
+            &wasm_bindgen::JsValue::NULL,
+            &wasm_bindgen::JsValue::from_str(""),
+            &wasm_bindgen::JsValue::from_str(&next),
+        );
+        let _ = js_sys::Reflect::apply(&func, &history, &args);
+    }
+}
+
 #[component]
 pub fn AppRoot() -> impl IntoView {
-    let active = RwSignal::new(Tab::Dashboard);
+    // `?tab=<slug>` wins over the `Dashboard` default so a reload or shared
+    // link restores the previously active panel. Resolved before the signal
+    // is created so the correct tab paints on the very first frame — no
+    // flash-then-swap.
+    let active = RwSignal::new(tab_from_query().unwrap_or(Tab::Dashboard));
     let collapsed = RwSignal::new(false);
     let theme = RwSignal::new(current_theme());
 
@@ -661,6 +797,13 @@ pub fn AppRoot() -> impl IntoView {
     // Keep the URL fragment in sync with the drawer state (deep-linking).
     Effect::new(move |_| {
         set_drawer_hash(drawer.get().as_deref());
+    });
+
+    // Keep `?tab=` in sync with the active tab (URL tab routing): fires once
+    // at mount (normalising the URL even when `?tab=` was absent) and again
+    // on every switch, via `replaceState` so it never spams browser history.
+    Effect::new(move |_| {
+        write_tab_to_url(tab_to_slug(active.get()));
     });
 
     // React to browser back/forward (hashchange) by re-syncing the drawer.
@@ -752,6 +895,19 @@ pub fn AppRoot() -> impl IntoView {
     };
 
     let toggle_collapse = move |_| collapsed.update(|c| *c = !*c);
+
+    // Cycles the two density modes — used by the narrow-viewport single-icon
+    // toggle (item 3 of the topbar-diet fix); the full two-button group below
+    // ~1100px hides in favour of this via CSS (`density-toggle--full` /
+    // `density-icon-toggle`).
+    let cycle_density = move |_| {
+        density.update(|d| {
+            *d = match *d {
+                Density::Comfortable => Density::Compact,
+                Density::Compact => Density::Comfortable,
+            }
+        });
+    };
 
     // Toggle a single section's collapsed state (insert⇄remove).
     let toggle_section = move |sec: Section| {
@@ -853,7 +1009,11 @@ pub fn AppRoot() -> impl IntoView {
 
             <div class="app-main">
                 <header class="topbar">
-                    <div class="topbar-crumb">
+                    // `topbar-crumb--truncate` + `min-width:0` (via `.topbar-crumb`
+                    // itself, dashboard lane) let this shrink and ellipsize instead of
+                    // silently disappearing when the actions block claims space — the
+                    // overflow bug reported from the 900x700 screenshot.
+                    <div class="topbar-crumb topbar-crumb--truncate">
                         <Show when=move || active.get().section() != Section::Home fallback=|| ()>
                             <span
                                 class="topbar-crumb__section"
@@ -869,8 +1029,13 @@ pub fn AppRoot() -> impl IntoView {
                         <span class="topbar-crumb__page">{move || active.get().label()}</span>
                     </div>
                     <div class="topbar-actions">
+                        // Merged health pill: dot (token/connection state) + running/total
+                        // count + "daemon" label in one element — this used to be two
+                        // separate pills ([4/6] and [daemon · token set]) competing for
+                        // space; the dot already encodes the token-missing state so the
+                        // second pill's text was pure redundancy.
                         <div
-                            class="topbar-health"
+                            class="topbar-health topbar-actions__item"
                             title="Daemon connection · running/total containers"
                         >
                             <span class=move || {
@@ -883,10 +1048,10 @@ pub fn AppRoot() -> impl IntoView {
                                 }
                             }></span>
                             <span class="topbar-health__text">
-                                {move || format!("{}/{}", shared.running.get(), shared.total.get())}
+                                {move || format!("{}/{} daemon", shared.running.get(), shared.total.get())}
                             </span>
                         </div>
-                        <div class="create-split">
+                        <div class="create-split topbar-actions__item">
                             <button
                                 type="button"
                                 class="create-split__main"
@@ -936,7 +1101,7 @@ pub fn AppRoot() -> impl IntoView {
                         </div>
                         <button
                             type="button"
-                            class="cmdk-chip"
+                            class="cmdk-chip topbar-actions__item topbar-actions__item--flex"
                             aria-label="Open command palette"
                             on:click=move |_| palette_open.set(true)
                         >
@@ -944,24 +1109,25 @@ pub fn AppRoot() -> impl IntoView {
                             <span class="cmdk-chip__text">"Search"</span>
                             <kbd class="cmdk-chip__key">"⌘K"</kbd>
                         </button>
-                        <span
-                            class=move || if token.get().is_some() {
-                                "status-pill status-pill--ok"
-                            } else {
-                                "status-pill status-pill--warn"
-                            }
-                        >
-                            {move || if token.get().is_some() { "daemon · token set" } else { "no token" }}
-                        </span>
-                        <button
-                            type="button"
-                            class="btn btn--sm btn--secondary"
-                            on:click=prompt_token
-                        >
-                            "Set token"
-                        </button>
+                        // "Set token" only renders when there's no token — previously it
+                        // sat permanently next to a pill that already said "token set",
+                        // which was both redundant and one more item competing for topbar
+                        // width. Re-entering a token to rotate it belongs on Settings, not
+                        // here.
+                        <Show when=move || token.get().is_none() fallback=|| ()>
+                            <button
+                                type="button"
+                                class="btn btn--sm btn--secondary topbar-actions__item"
+                                on:click=prompt_token
+                            >
+                                "Set token"
+                            </button>
+                        </Show>
+                        // Full two-button group — hidden below ~1100px in favour of the
+                        // single icon-button cycle toggle right after it (CSS-driven; see
+                        // `density-toggle--full` / `density-icon-toggle`).
                         <div
-                            class="density-toggle"
+                            class="density-toggle density-toggle--full topbar-actions__item"
                             role="group"
                             aria-label="Table density"
                         >
@@ -992,9 +1158,38 @@ pub fn AppRoot() -> impl IntoView {
                                 "Compact"
                             </button>
                         </div>
+                        // Narrow-viewport stand-in for the group above: one icon-button
+                        // that cycles Comfortable ⇄ Compact, its title always naming the
+                        // current mode. CSS shows exactly one of this pair at a time.
                         <button
                             type="button"
-                            class="theme-toggle"
+                            class="density-icon-toggle topbar-actions__item"
+                            title=move || format!(
+                                "Row density: {} (click to switch)",
+                                if density.get() == Density::Comfortable { "Comfortable" } else { "Compact" },
+                            )
+                            aria-label="Cycle table row density"
+                            on:click=cycle_density
+                        >
+                            <svg
+                                class="density-icon-toggle__glyph"
+                                viewBox="0 0 16 16"
+                                width="14"
+                                height="14"
+                                fill="none"
+                                stroke="currentColor"
+                                stroke-width="1.5"
+                                stroke-linecap="round"
+                                aria-hidden="true"
+                            >
+                                <line x1="2" y1="4" x2="14" y2="4"></line>
+                                <line x1="2" y1="8" x2="14" y2="8"></line>
+                                <line x1="2" y1="12" x2="14" y2="12"></line>
+                            </svg>
+                        </button>
+                        <button
+                            type="button"
+                            class="theme-toggle topbar-actions__item"
                             title="Toggle theme"
                             aria-label="Toggle colour theme"
                             on:click=toggle_theme
@@ -1150,5 +1345,115 @@ fn DiskCenterPlaceholder() -> impl IntoView {
                 </div>
             </div>
         </div>
+    }
+}
+
+// NB: this file (`app.rs`) is only compiled under `cfg(target_arch =
+// "wasm32")` (see `lib.rs`'s `#[cfg(target_arch = "wasm32")] mod app;`), so
+// host-target `cargo test -p linpodx-webui` never sees this module — same
+// convention already used in `components/charts.rs` / `stacks.rs` /
+// `secrets.rs`. `cargo test -p linpodx-webui --target wasm32-unknown-unknown`
+// and `cargo clippy -p linpodx-webui --target wasm32-unknown-unknown
+// --all-targets -- -D warnings` both compile and exercise it.
+#[cfg(test)]
+mod tab_url_tests {
+    use super::*;
+
+    const ALL_TABS: [Tab; 18] = [
+        Tab::Dashboard,
+        Tab::Containers,
+        Tab::Stacks,
+        Tab::Pods,
+        Tab::Images,
+        Tab::Volumes,
+        Tab::Networks,
+        Tab::Snapshots,
+        Tab::Sessions,
+        Tab::Sandbox,
+        Tab::Audit,
+        Tab::Cluster,
+        Tab::PinnedClients,
+        Tab::Plugins,
+        Tab::Secrets,
+        Tab::Disk,
+        Tab::DiskUsage,
+        Tab::Settings,
+    ];
+
+    #[test]
+    fn slug_roundtrip_covers_every_tab() {
+        for t in ALL_TABS {
+            let slug = tab_to_slug(t);
+            assert_eq!(
+                slug_to_tab(slug),
+                Some(t),
+                "slug {slug:?} did not round-trip"
+            );
+        }
+    }
+
+    #[test]
+    fn slugs_are_kebab_case_and_unique() {
+        let mut seen = HashSet::new();
+        for t in ALL_TABS {
+            let slug = tab_to_slug(t);
+            assert!(
+                slug.chars().all(|c| c.is_ascii_lowercase() || c == '-'),
+                "slug {slug:?} is not kebab-case",
+            );
+            assert!(seen.insert(slug), "duplicate slug {slug:?}");
+        }
+    }
+
+    #[test]
+    fn slug_to_tab_rejects_unknown_or_empty() {
+        assert_eq!(slug_to_tab("nope"), None);
+        assert_eq!(slug_to_tab(""), None);
+        assert_eq!(slug_to_tab("Dashboard"), None); // case-sensitive
+    }
+
+    #[test]
+    fn tab_param_from_query_finds_tab_regardless_of_position() {
+        assert_eq!(tab_param_from_query("?tab=images"), Some("images"));
+        assert_eq!(tab_param_from_query("tab=images"), Some("images"));
+        assert_eq!(
+            tab_param_from_query("?token=abc&tab=plugins"),
+            Some("plugins")
+        );
+        assert_eq!(
+            tab_param_from_query("?tab=cluster&token=abc"),
+            Some("cluster")
+        );
+    }
+
+    #[test]
+    fn tab_param_from_query_absent_or_blank() {
+        assert_eq!(tab_param_from_query(""), None);
+        assert_eq!(tab_param_from_query("?token=abc"), None);
+        assert_eq!(tab_param_from_query("?tab="), None);
+    }
+
+    #[test]
+    fn url_with_tab_upserts_and_preserves_other_params_and_hash() {
+        let out = url_with_tab("/ui/", "?token=abc", "#container/xyz", "images");
+        assert_eq!(out, "/ui/?token=abc&tab=images#container/xyz");
+    }
+
+    #[test]
+    fn url_with_tab_replaces_an_existing_tab_param_in_place() {
+        let out = url_with_tab("/ui/", "?tab=dashboard&token=abc", "", "plugins");
+        assert_eq!(out, "/ui/?token=abc&tab=plugins");
+    }
+
+    #[test]
+    fn url_with_tab_handles_empty_search_and_hash() {
+        let out = url_with_tab("/ui/", "", "", "dashboard");
+        assert_eq!(out, "/ui/?tab=dashboard");
+    }
+
+    #[test]
+    fn url_with_tab_handles_leading_question_mark_only() {
+        let out = url_with_tab("/ui/", "?", "", "cluster");
+        assert_eq!(out, "/ui/?tab=cluster");
     }
 }

@@ -17,9 +17,12 @@
 //! so a future stacks view has something to key off, but does not itself
 //! group rows by stack.
 
+use leptos::ev;
 use leptos::prelude::*;
 use serde_json::{json, Value};
 use wasm_bindgen_futures::spawn_local;
+
+use super::context_menu;
 
 use super::icons::Icon;
 use super::illustrations::EmptySpot;
@@ -46,6 +49,13 @@ fn row_name(row: &Value) -> String {
         .and_then(|v| v.as_str())
         .unwrap_or("")
         .to_string()
+}
+
+fn row_is_running(row: &Value) -> bool {
+    row.get("status")
+        .or_else(|| row.get("state"))
+        .and_then(Value::as_str)
+        .is_some_and(|s| s.eq_ignore_ascii_case("running") || s.to_lowercase().contains("running"))
 }
 
 /// Compose-style stack label — checks `com.docker.compose.project` first,
@@ -99,6 +109,8 @@ pub fn PodsView() -> impl IntoView {
     // (id, name) of the pod pending a remove confirmation, plus its force flag.
     let pending_remove: RwSignal<Option<(String, String)>> = RwSignal::new(None);
     let remove_force = RwSignal::new(false);
+    let focused_row: RwSignal<Option<String>> = RwSignal::new(None);
+    let context_menu = context_menu::ContextMenuState::new();
 
     let push_toast = move |text: String, kind: &'static str| {
         let id = toast_seq.get_untracked() + 1;
@@ -208,6 +220,43 @@ pub fn PodsView() -> impl IntoView {
         });
     };
 
+    let visible_ids = move || -> Vec<String> {
+        let needle = filter.get_untracked().trim().to_lowercase();
+        rows.get_untracked()
+            .unwrap_or_default()
+            .into_iter()
+            .filter(|row| {
+                needle.is_empty()
+                    || row_name(row).to_lowercase().contains(&needle)
+                    || row_id(row).to_lowercase().contains(&needle)
+            })
+            .map(|row| row_id(&row))
+            .filter(|id| !id.is_empty())
+            .collect()
+    };
+
+    let pod_is_running_by_id = move |id: &str| -> bool {
+        rows.get_untracked()
+            .unwrap_or_default()
+            .iter()
+            .find(|row| row_id(row) == id)
+            .is_some_and(row_is_running)
+    };
+
+    let key_handle = window_event_listener(ev::keydown, move |kev: web_sys::KeyboardEvent| {
+        let blocked = pending_remove.get_untracked().is_some()
+            || create_open.get_untracked()
+            || context_menu.0.get_untracked().is_some();
+        context_menu::handle_table_key(&kev, visible_ids(), focused_row, blocked, move |id| {
+            if pod_is_running_by_id(&id) {
+                run_action(id, "stop", "stop");
+            } else {
+                run_action(id, "start", "start");
+            }
+        });
+    });
+    on_cleanup(move || key_handle.remove());
+
     let body_view = move || {
         if loading.get() {
             return skeleton_rows(6);
@@ -275,11 +324,16 @@ pub fn PodsView() -> impl IntoView {
                         let stack = stack_label(&row);
                         let row_busy = busy.contains(&id);
                         let row_disabled = id.is_empty() || row_busy;
+                        let running = row_is_running(&row);
 
                         let id_for_start = id.clone();
                         let id_for_stop = id.clone();
                         let id_for_remove = id.clone();
                         let name_for_remove = name.clone();
+                        let row_key = id.clone();
+                        let id_for_click = id.clone();
+                        let id_for_context = id.clone();
+                        let name_for_context = name.clone();
 
                         let status_view = if status.is_empty() {
                             view! { <span class="cell-muted">"—"</span> }.into_any()
@@ -289,7 +343,55 @@ pub fn PodsView() -> impl IntoView {
                         };
 
                         view! {
-                            <tr>
+                            <tr
+                                class=move || context_menu::focused_row_class(focused_row, &row_key)
+                                on:click=move |_| {
+                                    if !id_for_click.is_empty() {
+                                        focused_row.set(Some(id_for_click.clone()));
+                                    }
+                                }
+                                on:contextmenu=move |ev| {
+                                    focused_row.set(Some(id_for_context.clone()));
+                                    let disabled = row_disabled;
+                                    let id_lifecycle = id_for_context.clone();
+                                    let id_remove = id_for_context.clone();
+                                    let name_remove = name_for_context.clone();
+                                    let lifecycle = if running {
+                                        context_menu::ContextMenuEntry::item(
+                                            "Stop",
+                                            Some("■"),
+                                            false,
+                                            disabled,
+                                            Callback::new(move |_| run_action(id_lifecycle.clone(), "stop", "stop")),
+                                        )
+                                    } else {
+                                        context_menu::ContextMenuEntry::item(
+                                            "Start",
+                                            Some("▶"),
+                                            false,
+                                            disabled,
+                                            Callback::new(move |_| run_action(id_lifecycle.clone(), "start", "start")),
+                                        )
+                                    };
+                                    context_menu.open(
+                                        &ev,
+                                        vec![
+                                            lifecycle,
+                                            context_menu::ContextMenuEntry::separator(),
+                                            context_menu::ContextMenuEntry::item(
+                                                "Remove",
+                                                None,
+                                                true,
+                                                disabled,
+                                                Callback::new(move |_| {
+                                                    remove_force.set(false);
+                                                    pending_remove.set(Some((id_remove.clone(), name_remove.clone())));
+                                                }),
+                                            ),
+                                        ],
+                                    );
+                                }
+                            >
                                 <td>
                                     <span class="cell-primary" title=id.clone()>
                                         <span class="cell-primary__main">{name.clone()}</span>
@@ -445,6 +547,7 @@ pub fn PodsView() -> impl IntoView {
                 }).collect_view()}
             </div>
             <NewPodModal open=create_open refresh=refresh_cb/>
+            <context_menu::ContextMenu state=context_menu/>
         </div>
     }
 }

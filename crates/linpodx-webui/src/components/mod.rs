@@ -20,6 +20,7 @@ mod cluster;
 mod command_palette;
 mod container_detail;
 mod containers;
+mod context_menu;
 mod create_modal;
 mod dashboard;
 mod disk_usage;
