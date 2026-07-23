@@ -147,6 +147,11 @@ pub enum AuditKind {
     SandboxSnapshotAutoTriggered,
     TofuExpired,
     PluginKeyRevokePropagated,
+    // ----- Phase 26: secrets management -----
+    SecretCreated,
+    SecretRemoved,
+    // ----- Phase 27: container live resource update -----
+    ContainerUpdated,
 }
 
 impl AuditKind {
@@ -250,6 +255,9 @@ impl AuditKind {
             Self::SandboxSnapshotAutoTriggered => "sandbox_snapshot_auto_triggered",
             Self::TofuExpired => "tofu_expired",
             Self::PluginKeyRevokePropagated => "plugin_key_revoke_propagated",
+            Self::SecretCreated => "secret_created",
+            Self::SecretRemoved => "secret_removed",
+            Self::ContainerUpdated => "container_updated",
         }
     }
 }

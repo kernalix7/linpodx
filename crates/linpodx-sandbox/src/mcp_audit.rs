@@ -249,6 +249,9 @@ fn map_kind(k: AuditSinkKind) -> AuditKind {
         AuditSinkKind::SandboxSnapshotAutoTriggered => AuditKind::SandboxSnapshotAutoTriggered,
         AuditSinkKind::TofuExpired => AuditKind::TofuExpired,
         AuditSinkKind::PluginKeyRevokePropagated => AuditKind::PluginKeyRevokePropagated,
+        AuditSinkKind::SecretCreated => AuditKind::SecretCreated,
+        AuditSinkKind::SecretRemoved => AuditKind::SecretRemoved,
+        AuditSinkKind::ContainerUpdated => AuditKind::ContainerUpdated,
     }
 }
 

@@ -290,6 +290,23 @@ pub enum Method {
     PodStart(PodActionParams),
     PodStop(PodActionParams),
     PodRemove(PodRemoveParams),
+    // Phase 27 — container live resource update, network attach/inspect,
+    // volume inspect, and podman secrets. Appended, never renumbered.
+    //
+    // NOTE: `NetworkInspectDetail` / `VolumeInspectDetail` are distinct richer
+    // variants — the leaner `NetworkInspect` / `VolumeInspect` above are frozen
+    // for wire compatibility. The Phase 27 REST routes
+    // `GET /api/v1/networks/:name/inspect` and `GET /api/v1/volumes/:name/inspect`
+    // map to these `*Detail` variants (they carry connected-member / usage data
+    // the older variants do not).
+    ContainerUpdate(ContainerUpdateParams),
+    NetworkInspectDetail(NetworkNameParams),
+    NetworkConnect(NetworkConnectParams),
+    NetworkDisconnect(NetworkDisconnectParams),
+    VolumeInspectDetail(VolumeNameParams),
+    SecretList,
+    SecretCreate(SecretCreateParams),
+    SecretRemove(SecretRemoveParams),
 }
 
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
@@ -1114,10 +1131,12 @@ pub enum EventTopic {
     Mcp,
     Distro,
     Metrics,
+    /// Phase 26 — podman secret create/remove notifications.
+    Secret,
 }
 
 impl EventTopic {
-    pub const ALL: [EventTopic; 11] = [
+    pub const ALL: [EventTopic; 12] = [
         EventTopic::Container,
         EventTopic::Image,
         EventTopic::Volume,
@@ -1129,6 +1148,7 @@ impl EventTopic {
         EventTopic::Mcp,
         EventTopic::Distro,
         EventTopic::Metrics,
+        EventTopic::Secret,
     ];
 
     pub fn parse(raw: &str) -> std::result::Result<Self, String> {
@@ -1144,8 +1164,9 @@ impl EventTopic {
             "mcp" => Ok(Self::Mcp),
             "distro" | "distros" | "distribution" => Ok(Self::Distro),
             "metrics" | "metric" => Ok(Self::Metrics),
+            "secret" | "secrets" => Ok(Self::Secret),
             other => Err(format!(
-                "unknown event topic '{other}' (expected: container, image, volume, network, sandbox, audit, snapshot, session, mcp, distro, metrics)"
+                "unknown event topic '{other}' (expected: container, image, volume, network, sandbox, audit, snapshot, session, mcp, distro, metrics, secret)"
             )),
         }
     }
@@ -1163,6 +1184,7 @@ impl EventTopic {
             Self::Mcp => "mcp",
             Self::Distro => "distro",
             Self::Metrics => "metrics",
+            Self::Secret => "secret",
         }
     }
 }
@@ -1343,6 +1365,75 @@ pub struct PodRemoveParams {
     pub id_or_name: String,
     #[serde(default)]
     pub force: bool,
+}
+
+// ----- Container live resource update / network attach / secrets (Phase 27) -----
+
+/// Params for [`Method::ContainerUpdate`]. Backed by `podman update`: every
+/// field is `Some` only for the knobs the caller wants changed; `None` leaves
+/// the current value untouched. The daemon translates set fields into
+/// `podman update --memory <N> --cpus <f> --pids-limit <N> ...` flags and
+/// reports which ones it actually applied in the response.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ContainerUpdateParams {
+    pub id: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub memory_bytes: Option<u64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub memory_swap_bytes: Option<u64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub cpus: Option<f64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub pids_limit: Option<i64>,
+    /// Restart policy string (e.g. `"no"`, `"on-failure"`, `"always"`,
+    /// `"unless-stopped"`). Maps to `podman update --restart <policy>`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub restart_policy: Option<String>,
+}
+
+/// Params for [`Method::NetworkConnect`] — attaches a running container to a
+/// network (`podman network connect <network> <container>`).
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct NetworkConnectParams {
+    pub network: String,
+    pub container: String,
+}
+
+/// Params for [`Method::NetworkDisconnect`] — detaches a container from a
+/// network (`podman network disconnect [--force] <network> <container>`).
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct NetworkDisconnectParams {
+    pub network: String,
+    pub container: String,
+    /// Force disconnect even if the container is running / holds the network.
+    #[serde(default)]
+    pub force: bool,
+}
+
+/// Params for [`Method::SecretCreate`] — creates a podman secret
+/// (`podman secret create <name> -`, value piped on stdin).
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct SecretCreateParams {
+    pub name: String,
+    /// The plaintext secret value.
+    ///
+    /// # Security — MUST NOT be logged or audited
+    ///
+    /// This field carries sensitive material. It MUST NEVER be written to the
+    /// audit log, event payloads, tracing spans/fields, or any error message.
+    /// The `SecretCreate` dispatch handler audits the secret **name only** and
+    /// pipes the value to podman over stdin so it never appears on a command
+    /// line. Do not add this field to any `Debug`-derived audit record — the
+    /// derived `Debug` here is for developer diagnostics on the request struct
+    /// only and must not reach persisted audit payloads.
+    pub value: String,
+}
+
+/// Params for [`Method::SecretRemove`] — deletes a podman secret by name
+/// (`podman secret rm <name>`).
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct SecretRemoveParams {
+    pub name: String,
 }
 
 /// Successful response payload helpers (typed views over the JSON `result`).
@@ -2276,6 +2367,116 @@ pub mod responses {
         pub id: String,
         pub status: String,
     }
+
+    // ----- Container live update / network attach / volume inspect / secrets (Phase 27) -----
+
+    /// Response for [`super::Method::ContainerUpdate`] /
+    /// `POST /api/v1/containers/:id/update`. `applied` lists the resource knobs
+    /// the daemon actually changed (e.g. `"memory"`, `"memory_swap"`, `"cpus"`,
+    /// `"pids_limit"`, `"restart_policy"`) — empty when the request set no
+    /// fields.
+    #[derive(Debug, Clone, Serialize, Deserialize)]
+    pub struct ContainerUpdateResponse {
+        pub id: String,
+        pub applied: Vec<String>,
+    }
+
+    /// One subnet entry within [`NetworkInspectDetailResponse`].
+    #[derive(Debug, Clone, Serialize, Deserialize)]
+    pub struct NetworkSubnet {
+        pub subnet: String,
+        pub gateway: String,
+    }
+
+    /// One connected container within [`NetworkInspectDetailResponse`].
+    /// `ipv4` / `mac` are `None` when podman does not report an address for the
+    /// member on this network.
+    #[derive(Debug, Clone, Serialize, Deserialize)]
+    pub struct NetworkMember {
+        pub id: String,
+        pub name: String,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        pub ipv4: Option<String>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        pub mac: Option<String>,
+    }
+
+    /// Response for [`super::Method::NetworkInspectDetail`] /
+    /// `GET /api/v1/networks/:name/inspect`. Richer than the frozen
+    /// `NetworkInspectResponse` — adds parsed subnets and the list of
+    /// currently-attached containers.
+    #[derive(Debug, Clone, Serialize, Deserialize)]
+    pub struct NetworkInspectDetailResponse {
+        pub name: String,
+        pub driver: String,
+        pub subnets: Vec<NetworkSubnet>,
+        pub dns_enabled: bool,
+        pub internal: bool,
+        pub containers: Vec<NetworkMember>,
+    }
+
+    /// Shared response for [`super::Method::NetworkConnect`] and
+    /// [`super::Method::NetworkDisconnect`] /
+    /// `POST /api/v1/networks/:name/{connect,disconnect}`. `status` is the
+    /// post-action state string, e.g. `"connected"` / `"disconnected"`.
+    #[derive(Debug, Clone, Serialize, Deserialize)]
+    pub struct NetworkAttachResponse {
+        pub network: String,
+        pub container: String,
+        pub status: String,
+    }
+
+    /// Response for [`super::Method::VolumeInspectDetail`] /
+    /// `GET /api/v1/volumes/:name/inspect`. `created` is RFC3339 when known.
+    /// `size_bytes` comes from `podman system df -v` per-volume rows and is
+    /// `None` when that data is unavailable. `in_use_by` lists the container
+    /// names currently mounting the volume.
+    #[derive(Debug, Clone, Serialize, Deserialize)]
+    pub struct VolumeInspectDetailResponse {
+        pub name: String,
+        pub mountpoint: String,
+        pub driver: String,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        pub created: Option<String>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        pub size_bytes: Option<u64>,
+        pub in_use_by: Vec<String>,
+    }
+
+    /// One row in [`SecretListResponse`]. Mirrors `podman secret ls` columns.
+    /// Carries only metadata — the secret **value is never** part of any IPC
+    /// response.
+    #[derive(Debug, Clone, Serialize, Deserialize)]
+    pub struct SecretSummary {
+        pub id: String,
+        pub name: String,
+        /// RFC3339 creation timestamp (as reported by podman).
+        pub created: String,
+        pub driver: String,
+    }
+
+    /// Response for [`super::Method::SecretList`] / `GET /api/v1/secrets`.
+    #[derive(Debug, Clone, Default, Serialize, Deserialize)]
+    pub struct SecretListResponse {
+        pub secrets: Vec<SecretSummary>,
+    }
+
+    /// Response for [`super::Method::SecretCreate`] /
+    /// `POST /api/v1/secrets/create`. Returns only the new secret's id + name —
+    /// never echoes the value back.
+    #[derive(Debug, Clone, Serialize, Deserialize)]
+    pub struct SecretCreateResponse {
+        pub id: String,
+        pub name: String,
+    }
+
+    /// Response for [`super::Method::SecretRemove`] /
+    /// `POST /api/v1/secrets/:name/remove`.
+    #[derive(Debug, Clone, Serialize, Deserialize)]
+    pub struct SecretRemoveResponse {
+        pub name: String,
+        pub removed: bool,
+    }
 }
 
 // =========================
@@ -2578,5 +2779,125 @@ mod tests {
             }
             _ => panic!("expected error payload"),
         }
+    }
+
+    // ----- Phase 27: container update / network attach / volume inspect / secrets -----
+
+    #[test]
+    fn container_update_serializes_and_skips_none() {
+        let req = RpcRequest::new(
+            1u32,
+            Method::ContainerUpdate(ContainerUpdateParams {
+                id: "abc123".to_string(),
+                memory_bytes: Some(512 * 1024 * 1024),
+                memory_swap_bytes: None,
+                cpus: Some(1.5),
+                pids_limit: None,
+                restart_policy: Some("unless-stopped".to_string()),
+            }),
+        );
+        let s = serde_json::to_string(&req).unwrap();
+        assert!(s.contains("\"method\":\"container_update\""));
+        assert!(s.contains("\"memory_bytes\":536870912"));
+        assert!(s.contains("\"cpus\":1.5"));
+        assert!(s.contains("\"restart_policy\":\"unless-stopped\""));
+        // None fields are omitted from the wire.
+        assert!(!s.contains("memory_swap_bytes"));
+        assert!(!s.contains("pids_limit"));
+    }
+
+    #[test]
+    fn network_attach_methods_serialize() {
+        let connect = RpcRequest::new(
+            2u32,
+            Method::NetworkConnect(NetworkConnectParams {
+                network: "bridge".to_string(),
+                container: "web".to_string(),
+            }),
+        );
+        let s = serde_json::to_string(&connect).unwrap();
+        assert!(s.contains("\"method\":\"network_connect\""));
+
+        let disconnect = RpcRequest::new(
+            3u32,
+            Method::NetworkDisconnect(NetworkDisconnectParams {
+                network: "bridge".to_string(),
+                container: "web".to_string(),
+                force: true,
+            }),
+        );
+        let s = serde_json::to_string(&disconnect).unwrap();
+        assert!(s.contains("\"method\":\"network_disconnect\""));
+        assert!(s.contains("\"force\":true"));
+    }
+
+    #[test]
+    fn network_inspect_detail_response_round_trips() {
+        let resp = responses::NetworkInspectDetailResponse {
+            name: "bridge".to_string(),
+            driver: "bridge".to_string(),
+            subnets: vec![responses::NetworkSubnet {
+                subnet: "10.88.0.0/16".to_string(),
+                gateway: "10.88.0.1".to_string(),
+            }],
+            dns_enabled: true,
+            internal: false,
+            containers: vec![responses::NetworkMember {
+                id: "abc".to_string(),
+                name: "web".to_string(),
+                ipv4: Some("10.88.0.2".to_string()),
+                mac: None,
+            }],
+        };
+        let s = serde_json::to_string(&resp).unwrap();
+        let back: responses::NetworkInspectDetailResponse = serde_json::from_str(&s).unwrap();
+        assert_eq!(back.subnets.len(), 1);
+        assert_eq!(back.containers[0].name, "web");
+        assert_eq!(back.containers[0].mac, None);
+    }
+
+    #[test]
+    fn volume_inspect_detail_response_round_trips() {
+        let resp = responses::VolumeInspectDetailResponse {
+            name: "data".to_string(),
+            mountpoint: "/var/lib/containers/storage/volumes/data/_data".to_string(),
+            driver: "local".to_string(),
+            created: Some("2026-07-21T00:00:00Z".to_string()),
+            size_bytes: Some(4096),
+            in_use_by: vec!["web".to_string(), "db".to_string()],
+        };
+        let s = serde_json::to_string(&resp).unwrap();
+        let back: responses::VolumeInspectDetailResponse = serde_json::from_str(&s).unwrap();
+        assert_eq!(back.in_use_by.len(), 2);
+        assert_eq!(back.size_bytes, Some(4096));
+    }
+
+    #[test]
+    fn secret_methods_serialize_and_response_round_trips() {
+        let list = RpcRequest::new(4u32, Method::SecretList);
+        let s = serde_json::to_string(&list).unwrap();
+        assert!(s.contains("\"method\":\"secret_list\""));
+
+        let create = RpcRequest::new(
+            5u32,
+            Method::SecretCreate(SecretCreateParams {
+                name: "api-token".to_string(),
+                value: "s3cr3t".to_string(),
+            }),
+        );
+        let s = serde_json::to_string(&create).unwrap();
+        assert!(s.contains("\"method\":\"secret_create\""));
+
+        let resp = responses::SecretListResponse {
+            secrets: vec![responses::SecretSummary {
+                id: "0abc".to_string(),
+                name: "api-token".to_string(),
+                created: "2026-07-21T00:00:00Z".to_string(),
+                driver: "file".to_string(),
+            }],
+        };
+        let s = serde_json::to_string(&resp).unwrap();
+        let back: responses::SecretListResponse = serde_json::from_str(&s).unwrap();
+        assert_eq!(back.secrets[0].name, "api-token");
     }
 }

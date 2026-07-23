@@ -142,6 +142,15 @@ pub enum AuditSinkKind {
     TofuExpired,
     /// Stream C — a plugin-key revocation was propagated through Raft.
     PluginKeyRevokePropagated,
+    // Phase 26 — secrets management (issue #9). Payload is name-only; the
+    // plaintext value must never reach this sink (see
+    // `linpodx-daemon/src/dispatch/secrets.rs::secret_audit_payload`).
+    SecretCreated,
+    SecretRemoved,
+    // Phase 27 — container live resource update (`podman update`). Distinct
+    // from `McpResourceUpdated`, which is an MCP resource-subscription
+    // notification and unrelated to container CPU/memory/pids limits.
+    ContainerUpdated,
 }
 
 impl AuditSinkKind {
@@ -235,6 +244,9 @@ impl AuditSinkKind {
             Self::SandboxSnapshotAutoTriggered => "sandbox_snapshot_auto_triggered",
             Self::TofuExpired => "tofu_expired",
             Self::PluginKeyRevokePropagated => "plugin_key_revoke_propagated",
+            Self::SecretCreated => "secret_created",
+            Self::SecretRemoved => "secret_removed",
+            Self::ContainerUpdated => "container_updated",
         }
     }
 }
