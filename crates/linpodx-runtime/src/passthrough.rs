@@ -16,6 +16,16 @@ use tracing::{debug, warn};
 pub trait HostEnv {
     fn var(&self, key: &str) -> Option<String>;
     fn uid(&self) -> u32;
+    /// Resolve a host group name (e.g. `"render"`) to its numeric GID by reading the
+    /// host's `/etc/group`. Returns `None` when the group does not exist on the host.
+    ///
+    /// GPU passthrough uses this instead of `--group-add <name>`: the *container's*
+    /// `/etc/group` is what podman consults for name lookups, and minimal base images
+    /// (Alpine, etc.) don't ship a `render` entry, so name-based `--group-add` fails
+    /// deterministically at `podman start` even though the numeric GID is perfectly
+    /// valid host-side. `--group-add <gid>` bypasses the container's group file
+    /// entirely, so it works regardless of what the base image ships.
+    fn group_gid(&self, name: &str) -> Option<u32>;
 }
 
 /// Real host-environment reader.
@@ -33,6 +43,46 @@ impl HostEnv for SystemHostEnv {
             .ok()
             .and_then(|s| s.parse().ok())
             .unwrap_or(1000)
+    }
+    fn group_gid(&self, name: &str) -> Option<u32> {
+        let contents = std::fs::read_to_string("/etc/group").ok()?;
+        parse_group_gid(&contents, name)
+    }
+}
+
+/// Parse a `/etc/group`-formatted string looking for `name`, returning its GID.
+///
+/// Format per line: `name:password:gid:members`. Malformed lines are skipped rather
+/// than treated as errors — `/etc/group` on real hosts occasionally has stray blank
+/// lines or comments injected by config-management tools.
+fn parse_group_gid(contents: &str, name: &str) -> Option<u32> {
+    contents.lines().find_map(|line| {
+        let mut fields = line.splitn(4, ':');
+        let entry_name = fields.next()?;
+        if entry_name != name {
+            return None;
+        }
+        let _password = fields.next()?;
+        let gid = fields.next()?;
+        gid.parse::<u32>().ok()
+    })
+}
+
+/// Resolve `name` to a numeric GID via `env`, falling back to appending `--group-add
+/// <gid>` on `cmd` when found. When the group doesn't exist on the host, emits a
+/// `tracing::warn` and skips the flag entirely — silently dropping the grant is safer
+/// than passing a name podman can't resolve inside a minimal container image.
+fn add_group_by_name(cmd: &mut Command, env: &dyn HostEnv, name: &str) {
+    match env.group_gid(name) {
+        Some(gid) => {
+            cmd.arg("--group-add").arg(gid.to_string());
+        }
+        None => {
+            warn!(
+                group = name,
+                "gpu passthrough: host group not found; skipping --group-add"
+            );
+        }
     }
 }
 
@@ -129,8 +179,8 @@ pub fn apply_passthrough_with_env(cmd: &mut Command, spec: &PassthroughSpec, env
 
     if spec.gpu {
         cmd.arg("--device").arg("/dev/dri");
-        cmd.arg("--group-add").arg("video");
-        cmd.arg("--group-add").arg("render");
+        add_group_by_name(cmd, env, "video");
+        add_group_by_name(cmd, env, "render");
     }
 
     if spec.dbus_session {
@@ -180,6 +230,7 @@ mod tests {
     struct MockHostEnv {
         vars: HashMap<String, String>,
         uid: u32,
+        groups: HashMap<String, u32>,
     }
 
     impl MockHostEnv {
@@ -187,10 +238,15 @@ mod tests {
             Self {
                 uid,
                 vars: HashMap::new(),
+                groups: HashMap::new(),
             }
         }
         fn set(mut self, k: &str, v: &str) -> Self {
             self.vars.insert(k.into(), v.into());
+            self
+        }
+        fn set_group(mut self, name: &str, gid: u32) -> Self {
+            self.groups.insert(name.into(), gid);
             self
         }
     }
@@ -201,6 +257,9 @@ mod tests {
         }
         fn uid(&self) -> u32 {
             self.uid
+        }
+        fn group_gid(&self, name: &str) -> Option<u32> {
+            self.groups.get(name).copied()
         }
     }
 
@@ -371,7 +430,31 @@ mod tests {
     }
 
     #[test]
-    fn gpu_passes_dri_and_video_group() {
+    fn gpu_passes_dri_and_resolves_groups_to_numeric_gid() {
+        let env = MockHostEnv::new(1000)
+            .set_group("video", 44)
+            .set_group("render", 993);
+        let spec = PassthroughSpec {
+            gpu: true,
+            ..Default::default()
+        };
+        let mut cmd = Command::new("podman");
+        apply_passthrough_with_env(&mut cmd, &spec, &env);
+        let args = args_of(&cmd);
+        assert!(contains_pair(&args, "--device", "/dev/dri"));
+        // Numeric GIDs only — never the bare name — so the flag works regardless of
+        // whether the *container's* /etc/group has a matching entry.
+        assert!(contains_pair(&args, "--group-add", "44"));
+        assert!(contains_pair(&args, "--group-add", "993"));
+        assert!(!args.iter().any(|a| a == "video"));
+        assert!(!args.iter().any(|a| a == "render"));
+    }
+
+    #[test]
+    fn gpu_skips_group_add_when_host_group_missing() {
+        // Neither "video" nor "render" resolves on this mock host (e.g. a headless CI
+        // runner with no GPU groups). The device is still passed through; the missing
+        // groups are dropped rather than causing a podman-start failure downstream.
         let env = MockHostEnv::new(1000);
         let spec = PassthroughSpec {
             gpu: true,
@@ -381,8 +464,54 @@ mod tests {
         apply_passthrough_with_env(&mut cmd, &spec, &env);
         let args = args_of(&cmd);
         assert!(contains_pair(&args, "--device", "/dev/dri"));
-        assert!(contains_pair(&args, "--group-add", "video"));
-        assert!(contains_pair(&args, "--group-add", "render"));
+        assert!(!args.iter().any(|a| a == "--group-add"));
+    }
+
+    #[test]
+    fn gpu_resolves_only_the_groups_present_on_host() {
+        // "video" exists, "render" doesn't (plausible on an older host kernel without
+        // a DRM render node) — video should still resolve numerically.
+        let env = MockHostEnv::new(1000).set_group("video", 44);
+        let spec = PassthroughSpec {
+            gpu: true,
+            ..Default::default()
+        };
+        let mut cmd = Command::new("podman");
+        apply_passthrough_with_env(&mut cmd, &spec, &env);
+        let args = args_of(&cmd);
+        assert!(contains_pair(&args, "--group-add", "44"));
+        let group_add_count = args.iter().filter(|a| a.as_str() == "--group-add").count();
+        assert_eq!(
+            group_add_count, 1,
+            "only the resolvable group should be added"
+        );
+    }
+
+    #[test]
+    fn parse_group_gid_finds_matching_entry() {
+        let etc_group = "root:x:0:\nvideo:x:44:user1,user2\nrender:x:993:user1\n";
+        assert_eq!(parse_group_gid(etc_group, "video"), Some(44));
+        assert_eq!(parse_group_gid(etc_group, "render"), Some(993));
+    }
+
+    #[test]
+    fn parse_group_gid_returns_none_for_missing_group() {
+        let etc_group = "root:x:0:\nvideo:x:44:user1\n";
+        assert_eq!(parse_group_gid(etc_group, "render"), None);
+    }
+
+    #[test]
+    fn parse_group_gid_skips_malformed_lines() {
+        // A blank line and a line missing the gid field should not panic and should
+        // not be mistaken for the target group.
+        let etc_group = "\nrender::\nrender:x:993:\n";
+        assert_eq!(parse_group_gid(etc_group, "render"), Some(993));
+    }
+
+    #[test]
+    fn parse_group_gid_handles_non_numeric_gid_gracefully() {
+        let etc_group = "render:x:notanumber:\n";
+        assert_eq!(parse_group_gid(etc_group, "render"), None);
     }
 
     #[test]
