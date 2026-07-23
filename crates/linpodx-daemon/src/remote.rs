@@ -570,6 +570,13 @@ async fn handle_socket(
         return;
     }
 
+    // When auth succeeded out-of-band (header/subprotocol/query), the first-frame
+    // handshake above was skipped — but older CLIs still send a legacy
+    // `{"auth":"<token>"}` envelope unconditionally. Drain that single stale frame
+    // (once) so it isn't misparsed as the first RpcRequest. We never change the
+    // CLI's sending behaviour, since older daemons rely on that frame.
+    let mut may_drain_legacy_auth = header_token_ok || query_token_ok;
+
     // Step 2 — JSON-RPC NDJSON loop. Each text frame is one RpcRequest; we dispatch
     // and respond with one RpcResponse text frame. Close on any transport error.
     loop {
@@ -593,6 +600,16 @@ async fn handle_socket(
                         break;
                     }
                 };
+
+                // Drain at most one legacy `{"auth":...}` handshake frame from a
+                // pre-authenticated client so it doesn't get parsed as an RpcRequest.
+                if may_drain_legacy_auth {
+                    may_drain_legacy_auth = false;
+                    if is_legacy_auth_frame(&raw) {
+                        debug!(peer = %peer, "draining legacy auth frame from pre-authenticated client");
+                        continue;
+                    }
+                }
 
                 let resp = match serde_json::from_str::<RpcRequest>(&raw) {
                     Ok(req) => state.dispatcher.dispatch(req).await,
@@ -690,6 +707,30 @@ pub fn constant_eq(a: &str, b: &str) -> bool {
         diff |= ab[i] ^ bb[i];
     }
     diff == 0
+}
+
+/// Classify whether a first WebSocket text frame is a legacy
+/// `{"auth":"<token>"}` handshake envelope.
+///
+/// When auth already succeeded out-of-band (header/subprotocol/query token) the
+/// daemon skips the first-frame handshake, but older CLIs still send this
+/// envelope unconditionally. Without draining it, the main RPC loop would parse
+/// it as an `RpcRequest`, fail (`missing field jsonrpc`), and emit a `-32700`
+/// response that lands where the client expects its first real reply. This is a
+/// pure decision function so the drain policy is unit-testable in isolation.
+///
+/// A frame qualifies only when it is a JSON object carrying a string `auth`
+/// field and no `jsonrpc`/`method` keys (so a real RPC that happens to include
+/// an `auth` argument is never swallowed).
+pub fn is_legacy_auth_frame(raw: &str) -> bool {
+    serde_json::from_str::<serde_json::Value>(raw)
+        .ok()
+        .and_then(|v| {
+            let obj = v.as_object()?;
+            let has_auth_str = obj.get("auth").map(|a| a.is_string()).unwrap_or(false);
+            Some(has_auth_str && !obj.contains_key("jsonrpc") && !obj.contains_key("method"))
+        })
+        .unwrap_or(false)
 }
 
 // ---------------------------------------------------------------------------
@@ -1162,6 +1203,27 @@ mod tests {
             .and_then(|v| v.as_str())
             .map(str::to_string);
         assert_eq!(token, Some("hunter2".into()));
+    }
+
+    #[test]
+    fn is_legacy_auth_frame_classifies_correctly() {
+        // Legacy handshake envelope — drain it.
+        assert!(is_legacy_auth_frame(r#"{"auth":"hunter2"}"#));
+        assert!(is_legacy_auth_frame(r#"{"auth":""}"#));
+
+        // A real JSON-RPC request must never be drained, even with an `auth` arg.
+        assert!(!is_legacy_auth_frame(
+            r#"{"jsonrpc":"2.0","id":1,"method":"version"}"#
+        ));
+        assert!(!is_legacy_auth_frame(
+            r#"{"method":"login","params":{"auth":"x"}}"#
+        ));
+
+        // Non-object / non-string-auth / malformed frames are not legacy auth.
+        assert!(!is_legacy_auth_frame(r#"{"auth":42}"#));
+        assert!(!is_legacy_auth_frame(r#"{"foo":"bar"}"#));
+        assert!(!is_legacy_auth_frame("not json"));
+        assert!(!is_legacy_auth_frame("[1,2,3]"));
     }
 
     #[test]
