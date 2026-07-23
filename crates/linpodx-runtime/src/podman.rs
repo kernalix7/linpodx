@@ -3,7 +3,7 @@ use crate::passthrough;
 use crate::version::{compare_versions, podman_version, MIN_PODMAN_VERSION};
 use futures::stream::Stream;
 use linpodx_common::error::{Error, Result};
-use linpodx_common::ipc::CreateOptions;
+use linpodx_common::ipc::{ContainerUpdateParams, CreateOptions};
 use linpodx_common::state::{ContainerInspect, ContainerSummary};
 use linpodx_common::types::ContainerId;
 use sha2::{Digest, Sha256};
@@ -72,6 +72,13 @@ pub struct ExecOutput {
     pub exit_code: i32,
     pub stdout: String,
     pub stderr: String,
+}
+
+/// Result of a live `podman update` operation.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct ContainerUpdateOutput {
+    pub id: String,
+    pub applied: Vec<String>,
 }
 
 /// Adapter over the `podman` CLI.
@@ -257,6 +264,78 @@ impl Podman {
             Ok(_) => Ok(()),
             Err(Error::Runtime { message }) if looks_like_not_found(&message) => {
                 Err(Error::NotFound(id.0.clone()))
+            }
+            Err(e) => Err(e),
+        }
+    }
+
+    /// Build the argv for `podman update`, applying only fields explicitly set
+    /// in the IPC params. Kept separate so unit tests can verify construction
+    /// without requiring Podman.
+    pub(crate) fn build_update_command(&self, params: &ContainerUpdateParams) -> Command {
+        let mut cmd = self.base_command();
+        cmd.arg("update");
+        if let Some(memory) = params.memory_bytes {
+            cmd.arg("--memory").arg(memory.to_string());
+        }
+        if let Some(memory_swap) = params.memory_swap_bytes {
+            cmd.arg("--memory-swap").arg(memory_swap.to_string());
+        }
+        if let Some(cpus) = params.cpus {
+            cmd.arg("--cpus").arg(cpus.to_string());
+        }
+        if let Some(pids_limit) = params.pids_limit {
+            cmd.arg("--pids-limit").arg(pids_limit.to_string());
+        }
+        if let Some(restart_policy) = &params.restart_policy {
+            cmd.arg("--restart").arg(restart_policy);
+        }
+        cmd.arg(&params.id);
+        cmd
+    }
+
+    pub(crate) fn update_applied_fields(params: &ContainerUpdateParams) -> Vec<String> {
+        let mut applied = Vec::new();
+        if params.memory_bytes.is_some() {
+            applied.push("memory".to_string());
+        }
+        if params.memory_swap_bytes.is_some() {
+            applied.push("memory_swap".to_string());
+        }
+        if params.cpus.is_some() {
+            applied.push("cpus".to_string());
+        }
+        if params.pids_limit.is_some() {
+            applied.push("pids_limit".to_string());
+        }
+        if params.restart_policy.is_some() {
+            applied.push("restart_policy".to_string());
+        }
+        applied
+    }
+
+    /// Apply live resource limits via `podman update`.
+    #[instrument(skip(self, params), fields(id = %params.id))]
+    pub async fn container_update(
+        &self,
+        params: &ContainerUpdateParams,
+    ) -> Result<ContainerUpdateOutput> {
+        let applied = Self::update_applied_fields(params);
+        if applied.is_empty() {
+            return Ok(ContainerUpdateOutput {
+                id: params.id.clone(),
+                applied,
+            });
+        }
+
+        let cmd = self.build_update_command(params);
+        match self.run_capture(cmd).await {
+            Ok(_) => Ok(ContainerUpdateOutput {
+                id: params.id.clone(),
+                applied,
+            }),
+            Err(Error::Runtime { message }) if looks_like_not_found(&message) => {
+                Err(Error::NotFound(params.id.clone()))
             }
             Err(e) => Err(e),
         }
@@ -718,6 +797,102 @@ mod tests {
             !argv.contains(&"alpine"),
             "image positional must be omitted: argv={argv:?}"
         );
+    }
+
+    #[test]
+    fn update_command_includes_only_some_fields() {
+        let p = Podman::new();
+        let params = ContainerUpdateParams {
+            id: "demo".to_string(),
+            memory_bytes: Some(536_870_912),
+            memory_swap_bytes: None,
+            cpus: Some(1.5),
+            pids_limit: None,
+            restart_policy: Some("unless-stopped".to_string()),
+        };
+        let cmd = p.build_update_command(&params);
+        let argv: Vec<&str> = cmd
+            .as_std()
+            .get_args()
+            .map(|a| a.to_str().unwrap_or(""))
+            .collect();
+
+        assert_eq!(argv[0], "update", "argv={argv:?}");
+        assert_eq!(
+            argv,
+            vec![
+                "update",
+                "--memory",
+                "536870912",
+                "--cpus",
+                "1.5",
+                "--restart",
+                "unless-stopped",
+                "demo",
+            ]
+        );
+        assert!(!argv.contains(&"--memory-swap"), "argv={argv:?}");
+        assert!(!argv.contains(&"--pids-limit"), "argv={argv:?}");
+    }
+
+    #[test]
+    fn update_command_includes_all_supported_fields_in_contract_order() {
+        let p = Podman::new();
+        let params = ContainerUpdateParams {
+            id: "abc123".to_string(),
+            memory_bytes: Some(268_435_456),
+            memory_swap_bytes: Some(536_870_912),
+            cpus: Some(2.0),
+            pids_limit: Some(256),
+            restart_policy: Some("always".to_string()),
+        };
+        let cmd = p.build_update_command(&params);
+        let argv: Vec<&str> = cmd
+            .as_std()
+            .get_args()
+            .map(|a| a.to_str().unwrap_or(""))
+            .collect();
+
+        assert_eq!(
+            argv,
+            vec![
+                "update",
+                "--memory",
+                "268435456",
+                "--memory-swap",
+                "536870912",
+                "--cpus",
+                "2",
+                "--pids-limit",
+                "256",
+                "--restart",
+                "always",
+                "abc123",
+            ]
+        );
+        assert_eq!(
+            Podman::update_applied_fields(&params),
+            vec![
+                "memory".to_string(),
+                "memory_swap".to_string(),
+                "cpus".to_string(),
+                "pids_limit".to_string(),
+                "restart_policy".to_string(),
+            ]
+        );
+    }
+
+    #[test]
+    fn update_applied_fields_empty_when_request_has_no_changes() {
+        let params = ContainerUpdateParams {
+            id: "no-op".to_string(),
+            memory_bytes: None,
+            memory_swap_bytes: None,
+            cpus: None,
+            pids_limit: None,
+            restart_policy: None,
+        };
+        assert!(Podman::update_applied_fields(&params).is_empty());
     }
 
     // ---- Phase 14: --security-opt label=type: dedup ----

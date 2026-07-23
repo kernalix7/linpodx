@@ -35,13 +35,15 @@ use axum::Router;
 use linpodx_common::audit_sink::{AuditSink, AuditSinkKind};
 use linpodx_common::ipc::{
     error_codes, responses, AuditQueryParams, ContainerIdParams, ContainerListParams,
-    ContainerLogsParams, CreateOptions, DaemonPinClientTofuExpirySetParams, DoctorRunParams,
-    ImageListParams, Method, MetricsHistoryParams, MetricsLatestParams,
+    ContainerLogsParams, ContainerUpdateParams, CreateOptions, DaemonPinClientTofuExpirySetParams,
+    DoctorRunParams, ImageListParams, Method, MetricsHistoryParams, MetricsLatestParams,
     PluginKeyRevokePropagateParams, PodActionParams, PodCreateParams, PodRemoveParams,
     ResponsePayload, RpcError, RpcRequest, SandboxSnapshotAutoTriggerEnableParams,
     SessionListParams, SnapshotKeyRotateParams, SnapshotKeySource, SnapshotListParams,
+    VolumeNameParams,
 };
-use linpodx_common::types::ContainerId;
+use linpodx_common::ipc::{NetworkConnectParams, NetworkDisconnectParams, NetworkNameParams};
+use linpodx_common::types::{ContainerId, NetworkId};
 use serde::Deserialize;
 use serde_json::json;
 use std::collections::HashSet;
@@ -82,7 +84,13 @@ pub fn router(
         .route("/containers/create", post(post_container_create))
         .route("/images", get(get_images))
         .route("/volumes", get(get_volumes))
+        // Phase 26 volume route
+        .route("/volumes/:name/inspect", get(get_volume_inspect))
         .route("/networks", get(get_networks))
+        // Phase 26 network routes
+        .route("/networks/:name/inspect", get(get_network_inspect))
+        .route("/networks/:name/connect", post(post_network_connect))
+        .route("/networks/:name/disconnect", post(post_network_disconnect))
         .route("/pods", get(get_pods))
         .route("/pods/create", post(post_pod_create))
         .route("/pods/:id/start", post(post_pod_start))
@@ -97,6 +105,7 @@ pub fn router(
         // reuse existing dispatch arms; system df/info + doctor add the last
         // pieces the SPA needs. All behind the same bearer middleware below.
         .route("/containers/:id/inspect", get(get_container_inspect))
+        .route("/containers/:id/update", post(post_container_update))
         .route("/containers/:id/logs", get(get_container_logs))
         .route("/metrics/:container_id/history", get(get_metrics_history))
         .route("/system/df", get(get_system_df))
@@ -118,6 +127,10 @@ pub fn router(
             "/sandbox/auto-encrypt",
             get(get_sandbox_auto_encrypt).put(put_sandbox_auto_encrypt),
         )
+        // Phase 26 secret routes
+        .route("/secrets", get(get_secrets))
+        .route("/secrets/create", post(post_secret_create))
+        .route("/secrets/:name/remove", post(post_secret_remove))
         .route_layer(middleware::from_fn_with_state(state.clone(), bearer_auth))
         .with_state(state)
 }
@@ -311,8 +324,114 @@ async fn get_volumes(State(state): State<WebUiState>) -> Response<Body> {
     dispatch(&state, Method::VolumeList).await
 }
 
+// Phase 26 volume route
+async fn get_volume_inspect(
+    State(state): State<WebUiState>,
+    Path(name): Path<String>,
+) -> Response<Body> {
+    dispatch(
+        &state,
+        Method::VolumeInspectDetail(VolumeNameParams {
+            name: linpodx_common::types::VolumeId::from(name),
+        }),
+    )
+    .await
+}
+
 async fn get_networks(State(state): State<WebUiState>) -> Response<Body> {
     dispatch(&state, Method::NetworkList).await
+}
+
+// Phase 26 network routes — IPAM inspector + attach/detach handlers.
+#[derive(Debug, Deserialize)]
+pub(crate) struct NetworkAttachBody {
+    pub container: String,
+    #[serde(default)]
+    pub force: bool,
+}
+
+async fn get_network_inspect(
+    State(state): State<WebUiState>,
+    Path(name): Path<String>,
+) -> Response<Body> {
+    dispatch(
+        &state,
+        Method::NetworkInspectDetail(NetworkNameParams {
+            name: NetworkId::from(name),
+        }),
+    )
+    .await
+}
+
+async fn post_network_connect(
+    State(state): State<WebUiState>,
+    Path(name): Path<String>,
+    Json(body): Json<NetworkAttachBody>,
+) -> Response<Body> {
+    dispatch(
+        &state,
+        Method::NetworkConnect(NetworkConnectParams {
+            network: name,
+            container: body.container,
+        }),
+    )
+    .await
+}
+
+async fn post_network_disconnect(
+    State(state): State<WebUiState>,
+    Path(name): Path<String>,
+    Json(body): Json<NetworkAttachBody>,
+) -> Response<Body> {
+    dispatch(
+        &state,
+        Method::NetworkDisconnect(NetworkDisconnectParams {
+            network: name,
+            container: body.container,
+            force: body.force,
+        }),
+    )
+    .await
+}
+
+// Phase 26 secret routes
+#[derive(Debug, Deserialize)]
+pub(crate) struct SecretCreateBody {
+    pub name: String,
+    /// Plaintext secret value. Never logged: this handler hands it straight
+    /// to `Method::SecretCreate`, which pipes it to `podman secret create`
+    /// over stdin (see `linpodx_runtime::secret::create`) — it never appears
+    /// in a request log line or the dispatcher's audit payload.
+    pub value: String,
+}
+
+async fn get_secrets(State(state): State<WebUiState>) -> Response<Body> {
+    dispatch(&state, Method::SecretList).await
+}
+
+async fn post_secret_create(
+    State(state): State<WebUiState>,
+    Json(body): Json<SecretCreateBody>,
+) -> Response<Body> {
+    dispatch(
+        &state,
+        Method::SecretCreate(linpodx_common::ipc::SecretCreateParams {
+            name: body.name,
+            value: body.value,
+        }),
+    )
+    .await
+}
+
+async fn post_secret_remove(
+    State(state): State<WebUiState>,
+    Path(name): Path<String>,
+) -> Response<Body> {
+    dispatch(
+        &state,
+        Method::SecretRemove(linpodx_common::ipc::SecretRemoveParams { name }),
+    )
+    .await
 }
 
 async fn get_pods(State(state): State<WebUiState>) -> Response<Body> {
@@ -407,6 +526,40 @@ async fn get_container_inspect(
         &state,
         Method::ContainerInspect(ContainerIdParams {
             id: ContainerId::new(id),
+        }),
+    )
+    .await
+}
+
+#[derive(Debug, Deserialize, Default)]
+pub(crate) struct ContainerUpdateBody {
+    #[serde(default)]
+    pub memory_bytes: Option<u64>,
+    #[serde(default)]
+    pub memory_swap_bytes: Option<u64>,
+    #[serde(default)]
+    pub cpus: Option<f64>,
+    #[serde(default)]
+    pub pids_limit: Option<i64>,
+    #[serde(default)]
+    pub restart_policy: Option<String>,
+}
+
+/// `POST /api/v1/containers/:id/update` — reuses `Method::ContainerUpdate`.
+async fn post_container_update(
+    State(state): State<WebUiState>,
+    Path(id): Path<String>,
+    Json(body): Json<ContainerUpdateBody>,
+) -> Response<Body> {
+    dispatch(
+        &state,
+        Method::ContainerUpdate(ContainerUpdateParams {
+            id,
+            memory_bytes: body.memory_bytes,
+            memory_swap_bytes: body.memory_swap_bytes,
+            cpus: body.cpus,
+            pids_limit: body.pids_limit,
+            restart_policy: body.restart_policy,
         }),
     )
     .await

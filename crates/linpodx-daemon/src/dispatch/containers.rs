@@ -196,6 +196,39 @@ impl Dispatcher {
         Ok(serde_json::to_value(inspect)?)
     }
 
+    pub(crate) async fn container_update(
+        &self,
+        p: linpodx_common::ipc::ContainerUpdateParams,
+    ) -> Result<serde_json::Value> {
+        let out = self.podman.container_update(&p).await?;
+        let applied = out.applied.clone();
+        let payload = serde_json::json!({
+            "container_id": p.id,
+            "applied": applied.clone(),
+        });
+        self.audit
+            .record(
+                AuditSinkKind::ContainerUpdated,
+                None,
+                Some(out.id.clone()),
+                payload.clone(),
+            )
+            .await;
+        self.publish_with_details(
+            EventTopic::Container,
+            EventKind::Succeeded,
+            out.id.clone(),
+            serde_json::json!({
+                "operation": "container_update",
+                "applied": applied.clone(),
+            }),
+        );
+        Ok(serde_json::to_value(responses::ContainerUpdateResponse {
+            id: out.id,
+            applied: out.applied,
+        })?)
+    }
+
     pub(crate) async fn container_logs(
         &self,
         p: linpodx_common::ipc::ContainerLogsParams,

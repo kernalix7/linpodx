@@ -305,7 +305,7 @@ async fn refresh_topic(
             let _ = output.send(Message::SessionsLoaded(v)).await;
         }
         // No GUI surface for these yet; the event was already pushed up via EventReceived.
-        EventTopic::Mcp | EventTopic::Distro => {}
+        EventTopic::Mcp | EventTopic::Distro | EventTopic::Secret => {}
         // Metrics events take a different code path (`refresh_metrics`) since the refresh
         // is per-container, not per-topic.
         EventTopic::Metrics => {}

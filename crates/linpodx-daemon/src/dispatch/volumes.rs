@@ -35,6 +35,14 @@ impl Dispatcher {
         Ok(serde_json::to_value(inspect)?)
     }
 
+    pub(crate) async fn volume_inspect_detail(
+        &self,
+        p: linpodx_common::ipc::VolumeNameParams,
+    ) -> Result<serde_json::Value> {
+        let detail = volume::inspect_detail(&self.podman, &p.name).await?;
+        Ok(serde_json::to_value(detail)?)
+    }
+
     pub(crate) async fn volume_prune(&self) -> Result<serde_json::Value> {
         let removed = volume::prune(&self.podman).await?;
         for v in &removed {

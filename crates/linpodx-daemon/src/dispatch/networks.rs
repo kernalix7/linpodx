@@ -35,6 +35,56 @@ impl Dispatcher {
         Ok(serde_json::to_value(inspect)?)
     }
 
+    /// Phase 27 — IPAM inspector: subnets/gateways + attached container members.
+    pub(crate) async fn network_inspect_detail(
+        &self,
+        p: linpodx_common::ipc::NetworkNameParams,
+    ) -> Result<serde_json::Value> {
+        let detail = network::inspect_detail(&self.podman, &p.name).await?;
+        Ok(serde_json::to_value(detail)?)
+    }
+
+    /// Phase 27 — attach a container to a network (`podman network connect`).
+    pub(crate) async fn network_connect(
+        &self,
+        p: linpodx_common::ipc::NetworkConnectParams,
+    ) -> Result<serde_json::Value> {
+        let resp = network::connect(&self.podman, &p.network, &p.container).await?;
+        self.publish_with_details(
+            EventTopic::Network,
+            EventKind::Started,
+            resp.network.clone(),
+            serde_json::json!({
+                "action": "connect",
+                "network": resp.network,
+                "container": resp.container,
+                "status": resp.status,
+            }),
+        );
+        Ok(serde_json::to_value(resp)?)
+    }
+
+    /// Phase 27 — detach a container from a network (`podman network disconnect`).
+    pub(crate) async fn network_disconnect(
+        &self,
+        p: linpodx_common::ipc::NetworkDisconnectParams,
+    ) -> Result<serde_json::Value> {
+        let resp = network::disconnect(&self.podman, &p.network, &p.container, p.force).await?;
+        self.publish_with_details(
+            EventTopic::Network,
+            EventKind::Stopped,
+            resp.network.clone(),
+            serde_json::json!({
+                "action": "disconnect",
+                "network": resp.network,
+                "container": resp.container,
+                "force": p.force,
+                "status": resp.status,
+            }),
+        );
+        Ok(serde_json::to_value(resp)?)
+    }
+
     pub(crate) async fn network_prune(&self) -> Result<serde_json::Value> {
         let removed = network::prune(&self.podman).await?;
         for n in &removed {

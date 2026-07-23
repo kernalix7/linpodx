@@ -43,6 +43,7 @@ mod plugins;
 mod pods;
 mod remote_listen;
 mod sandbox;
+mod secrets;
 mod snapshots;
 mod system;
 mod volumes;
@@ -328,6 +329,7 @@ impl Dispatcher {
             Method::ContainerStop(p) => self.container_stop(p).await,
             Method::ContainerRemove(p) => self.container_remove(p).await,
             Method::ContainerInspect(p) => self.container_inspect(p).await,
+            Method::ContainerUpdate(p) => self.container_update(p).await,
             Method::ContainerLogs(p) => self.container_logs(p).await,
             Method::ImageList(p) => self.image_list(p).await,
             Method::ImagePull(p) => self.image_pull(p).await,
@@ -338,6 +340,7 @@ impl Dispatcher {
             Method::VolumeCreate(p) => self.volume_create(p).await,
             Method::VolumeRemove(p) => self.volume_remove(p).await,
             Method::VolumeInspect(p) => self.volume_inspect(p).await,
+            Method::VolumeInspectDetail(p) => self.volume_inspect_detail(p).await,
             Method::VolumePrune => self.volume_prune().await,
             Method::NetworkList => self.network_list().await,
             Method::NetworkCreate(p) => self.network_create(p).await,
@@ -450,6 +453,13 @@ impl Dispatcher {
             Method::PodStart(p) => self.pod_start(p).await,
             Method::PodStop(p) => self.pod_stop(p).await,
             Method::PodRemove(p) => self.pod_remove(p).await,
+            // Phase 27 — network attach/detach + IPAM inspector (#5).
+            Method::NetworkInspectDetail(p) => self.network_inspect_detail(p).await,
+            Method::NetworkConnect(p) => self.network_connect(p).await,
+            Method::NetworkDisconnect(p) => self.network_disconnect(p).await,
+            Method::SecretList => self.secret_list().await,
+            Method::SecretCreate(p) => self.secret_create(p).await,
+            Method::SecretRemove(p) => self.secret_remove(p).await,
         }
     }
 

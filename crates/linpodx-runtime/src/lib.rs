@@ -11,6 +11,7 @@ pub mod parse;
 pub mod passthrough;
 pub mod pod;
 pub mod podman;
+pub mod secret;
 pub mod snapshot;
 pub mod snapshot_crypto;
 pub mod snapshot_key_rotation;
