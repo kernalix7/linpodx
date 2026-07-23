@@ -42,12 +42,17 @@
  *
  * DATA TABLE (owned by list_table.rs)
  *   .data-table-wrap           overflow-x scroller w/ border + radius
- *   .data-table                <table>; sticky <thead>, hover rows, no zebra
+ *   .data-table (+ .table--compact)   <table>; sticky <thead>, hover rows, no
+ *                               zebra; --compact collapses cell padding + hides
+ *                               .cell-primary__sub (density toggle, topbar)
  *   .th-sortable .sort-ind     sortable column header + arrow glyph
  *   .cell .cell-id (mono+ellipsis) .cell-num (tabular, right) .cell-muted
+ *   .cell-primary .cell-primary__main .cell-primary__sub
+ *                               stacked two-line cell (title + muted mono sub)
  *   .cell-actions              trailing per-row action cell
  *   .table-footer .row-count   count / pagination-ish footer
  *   .skeleton .skeleton-row .skeleton-line   loading placeholder
+ *   .density-toggle .density-toggle__opt(--active)   topbar row-density switch
  *
  * STATES
  *   .empty-state .empty-state__icon .empty-state__title .empty-state__hint
@@ -58,6 +63,7 @@
  *   .btn (+ --primary|--secondary|--ghost|--danger|--icon|--sm|--block)
  *   .primary / .primary.danger           legacy modal buttons
  *   .row-action / .row-action.danger / .row-action-empty   per-row buttons
+ *   .row-action--primary                 emphasized row-action (e.g. Details)
  *
  * FORM CONTROLS
  *   .input .textarea .select .checkbox .label .field-group
@@ -85,6 +91,9 @@
  *   .modal-actions .modal-form .modal-inline .modal-input .modal-result
  *   .modal-confirm .modal-hint .modal-empty .modal-error .rest-hint
  *   .toast-stack .toast (+ --success|--error|--warn|--info)
+ *   .checkbox-inline                     standalone inline checkbox+label row
+ *                                         (no .modal-form ancestor required,
+ *                                         unlike .modal-form label.modal-inline)
  *
  * MISC (legacy, kept for existing views)
  *   .panel .card-stack .card .field .field-label .field-value
@@ -93,8 +102,9 @@
  *   .status .status-list .status-empty .set-expiry-row .auto-encrypt-card
  *   .phase17-toolbar .push-toolbar
  *   .containers-panel .images-panel .plugins-panel .pinned-clients-panel
- *     .sandbox-panel .sessions-panel .snapshots-panel   tab wrappers — flex
- *     column, gap between page-header / surface-card / table sections
+ *     .sandbox-panel .sessions-panel .snapshots-panel .audit-panel
+ *     .cluster-panel .secrets-panel   tab wrappers — flex column, gap
+ *     between page-header / surface-card / table sections
  *   .xterm-container                     xterm.js host (do not restyle inner)
  *
  * ==========================================================================
@@ -116,11 +126,23 @@
  *       .chart-legend__swatch (+ --a|--b)   two-series legend chips
  *     .chart-crosshair .chart-dot .chart-tip .chart-tip__time .chart-tip__val
  *                                hover layer (crosshair + tooltip)
+ *     .chart-hit                 outer <g> wrapping the transparent hit-rects
+ *                                 (cursor:crosshair; owns :mouseleave)
+ *     .chart-hover                inner <g> wrapping crosshair+dot+tooltip;
+ *                                 pointer-events:none so it never steals
+ *                                 mouseleave from the sibling .chart-hit rects
  *     .statusbar-spark           64×16 footer micro-sparkline
  *
  *   DETAIL DRAWER (host in app.rs; body filled by container_drawer.rs)
  *     .drawer .drawer-backdrop .drawer-head .drawer-tabs
  *       .drawer-tab(.active) .drawer-body
+ *     .container-detail          root wrapper (container_detail.rs), flex
+ *       column stack of detail-head + drawer-tabs + drawer-tab-body
+ *     .detail-head .detail-head__name .detail-head__id   name/id/state row
+ *     .drawer-tab-body            wraps the active tab's content below the
+ *       sticky .drawer-tabs nav (padding-top + gap, mirrors .drawer-body)
+ *     .drawer-pane                generic vertical-stack wrapper used inside
+ *       every DetailTab pane (Overview/Logs/Terminal/Stats/Inspect)
  *
  *   COMMAND PALETTE (command_palette.rs)
  *     .cmdk-backdrop .cmdk-panel .cmdk-input .cmdk-list
@@ -339,8 +361,8 @@
     --color-info-fg: #22738f;
     --color-info-fg: oklch(0.55 0.1 228);
     --e-1: 0 1px 2px rgba(20, 22, 28, 0.08), 0 0 0 1px rgba(20, 22, 28, 0.04);
-    --e-2: 0 4px 14px rgba(20, 22, 28, 0.1);
-    --e-3: 0 14px 36px rgba(20, 22, 28, 0.16);
+    --e-2: 0 4px 14px rgba(20, 22, 28, 0.14);
+    --e-3: 0 14px 36px rgba(20, 22, 28, 0.22);
   }
 }
 
@@ -402,8 +424,8 @@
   --color-info-fg: #22738f;
   --color-info-fg: oklch(0.55 0.1 228);
   --e-1: 0 1px 2px rgba(20, 22, 28, 0.08), 0 0 0 1px rgba(20, 22, 28, 0.04);
-  --e-2: 0 4px 14px rgba(20, 22, 28, 0.1);
-  --e-3: 0 14px 36px rgba(20, 22, 28, 0.16);
+  --e-2: 0 4px 14px rgba(20, 22, 28, 0.14);
+  --e-3: 0 14px 36px rgba(20, 22, 28, 0.22);
 }
 
 /* dark explicitly forced — same as :root defaults, but wins over light media */
@@ -957,6 +979,12 @@ svg {
   font-size: var(--fs-xs);
   font-style: italic;
 }
+/* emphasized row-action variant (e.g. containers list "Details") — reads as
+ * the primary action in a row without the full weight of .btn--primary. */
+.row-action--primary {
+  --btn-fg: var(--color-accent-fg);
+  --btn-bd: var(--color-border-strong);
+}
 
 /* ==========================================================================
  * FORM CONTROLS
@@ -1134,6 +1162,43 @@ select:focus {
 .cell-num {
   font-variant-numeric: tabular-nums;
   text-align: right;
+}
+/* stacked two-line cell — primary entity name + muted mono sub-line (id /
+ * path / detail). Used inside a table cell or a card-header title slot. */
+.cell-primary {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  min-width: 0;
+  max-width: 100%;
+}
+.cell-primary__main {
+  font-weight: var(--fw-medium);
+  color: var(--color-text-primary);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.cell-primary__sub {
+  font-size: var(--fs-xs);
+  color: var(--color-text-tertiary);
+  font-variant-numeric: tabular-nums;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+/* compact density modifier (topbar .density-toggle) — collapse row padding
+ * and drop the secondary line so more rows fit above the fold. */
+.data-table.table--compact thead th,
+.data-table.table--compact tbody td {
+  padding-top: var(--sp-1);
+  padding-bottom: var(--sp-1);
+}
+.data-table.table--compact .cell-primary {
+  gap: 0;
+}
+.data-table.table--compact .cell-primary__sub {
+  display: none;
 }
 .cell-actions {
   white-space: nowrap;
@@ -1336,7 +1401,8 @@ select:focus {
 .dot--success {
   background: var(--color-success);
 }
-.dot--error {
+.dot--error,
+.dot--danger {
   background: var(--color-danger);
 }
 .dot--warn {
@@ -1496,6 +1562,17 @@ select:focus {
   flex-direction: row;
   align-items: center;
   gap: var(--sp-2);
+  font-size: var(--fs-sm);
+  color: var(--color-text-primary);
+}
+/* standalone inline checkbox+label row — no .modal-form ancestor required
+ * (unlike .modal-inline above). Used for a checkbox/toggle nested inside
+ * another row (volume-mount "ro" toggle) or outside any form context
+ * (container-detail Logs "follow" toggle). */
+.checkbox-inline {
+  display: inline-flex;
+  align-items: center;
+  gap: var(--sp-1);
   font-size: var(--fs-sm);
   color: var(--color-text-primary);
 }
@@ -1659,7 +1736,10 @@ select:focus {
 .pinned-clients-panel,
 .sandbox-panel,
 .sessions-panel,
-.snapshots-panel {
+.snapshots-panel,
+.audit-panel,
+.cluster-panel,
+.secrets-panel {
   display: flex;
   flex-direction: column;
   gap: var(--sp-4);
@@ -1773,6 +1853,49 @@ select:focus {
   }
   .content {
     padding: var(--sp-4);
+  }
+
+  /* The rail is forced to icon-rail width above regardless of whether the
+   * user has toggled .sidebar--collapsed, so the grouped-IA (v6) section
+   * heads need the same "vanish, keep items, draw a hairline separator"
+   * treatment the collapsed-rail rules already give — otherwise a section
+   * eyebrow like "WORKLOADS" tries to render inside a 60px column. */
+  .nav-section__head {
+    display: none;
+  }
+  .nav-section__items,
+  .nav-section__items--collapsed {
+    max-height: none;
+    opacity: 1;
+    pointer-events: auto;
+  }
+  .nav-section + .nav-section {
+    margin-top: var(--sp-2);
+    padding-top: var(--sp-2);
+    border-top: 1px solid var(--color-border);
+  }
+
+  /* Topbar: the cmd-k chip and the numeric health readout are the least
+   * essential glyphs at this width — drop them and keep the status dot
+   * (still visible via .topbar-health) plus the create action. */
+  .cmdk-chip {
+    display: none;
+  }
+  .topbar-health__text {
+    display: none;
+  }
+
+  /* Dashboard quick-actions collapse to one column so each tile keeps a
+   * comfortable tap target instead of squeezing to illegible width. */
+  .quick-actions__grid {
+    grid-template-columns: 1fr;
+  }
+
+  /* .data-table-wrap already scrolls horizontally (overflow:auto) — nothing
+   * to change here, this rule just keeps that contract explicit as the rest
+   * of the shell reflows around it at this width. */
+  .data-table-wrap {
+    overflow-x: auto;
   }
 }
 
@@ -1944,6 +2067,19 @@ select:focus {
   text-anchor: end;
   font-variant-numeric: tabular-nums;
 }
+/* Hover hit-area wrapper — purely structural (transparent hit-rects live
+ * inside), but a real rule keeps the class contract complete and signals
+ * intent to the pointer. */
+.chart-hit {
+  cursor: crosshair;
+}
+/* Hover overlay wrapper (crosshair + dot + tooltip). pointer-events:none is
+ * load-bearing: without it, the tooltip <rect>/<text> sit on top of the
+ * sibling .chart-hit hit-rects and steal `mouseleave` as the cursor crosses
+ * the tooltip box, causing the hover state to flicker on/off. */
+.chart-hover {
+  pointer-events: none;
+}
 
 /* ----- detail drawer (right slide-over) ----------------------------------- */
 .drawer-backdrop {
@@ -2006,6 +2142,46 @@ select:focus {
   overflow-y: auto;
   padding: var(--sp-4);
 }
+
+/* ----- container-detail (drawer body content, container_detail.rs) -------- */
+.container-detail {
+  display: flex;
+  flex-direction: column;
+  gap: var(--sp-3);
+}
+.detail-head {
+  display: flex;
+  align-items: center;
+  gap: var(--sp-2);
+  padding-bottom: var(--sp-2);
+}
+.detail-head__name {
+  font-size: var(--fs-lg);
+  font-weight: var(--fw-semibold);
+  color: var(--color-text-primary);
+}
+.detail-head__id {
+  color: var(--color-text-secondary);
+  font-size: var(--fs-sm);
+}
+/* wraps the active tab's .drawer-pane content below the sticky .drawer-tabs
+ * nav, one level inside .container-detail — mirrors .drawer-body's
+ * scroll/padding role but for the intra-drawer tab body. */
+.drawer-tab-body {
+  flex: 1;
+  display: flex;
+  flex-direction: column;
+  gap: var(--sp-3);
+  padding-top: var(--sp-2);
+}
+/* generic vertical-stack wrapper reused by every DetailTab pane
+ * (Overview/Logs/Terminal/Stats/Inspect). */
+.drawer-pane {
+  display: flex;
+  flex-direction: column;
+  gap: var(--sp-3);
+}
+
 @keyframes drawer-slide {
   from {
     transform: translateX(100%);
@@ -2512,6 +2688,9 @@ select:focus {
   width: 14px;
   height: 14px;
 }
+.cmdk-chip__text {
+  white-space: nowrap;
+}
 .cmdk-chip__key {
   font-family: var(--font-mono);
   font-size: var(--fs-micro);
@@ -2750,12 +2929,47 @@ select:focus {
   flex-direction: column;
   gap: var(--sp-3);
 }
-@media (max-width: 900px) {
+/* mgmt aside collapses well before the drawer/create-menu breakpoint — the
+ * two-column layout needs more room than a single detail card does. */
+@media (max-width: 1100px) {
   .mgmt-grid {
     grid-template-columns: 1fr;
   }
   .mgmt-aside {
     position: static;
+  }
+}
+
+/* Page chrome at "tablet" width — drawer goes edge-to-edge instead of a
+ * fixed 640px sliver, the create-menu is re-anchored so it can't clip past
+ * the viewport edge, the page-head disc shrinks so long titles still wrap
+ * onto a clean second line, and the expanded sidebar narrows a bit (still
+ * user-collapsible, this is just headroom for .content). */
+@media (max-width: 900px) {
+  .drawer {
+    width: 100%;
+  }
+  .create-menu {
+    right: var(--sp-2);
+    left: var(--sp-2);
+    min-width: 0;
+  }
+  .page-head {
+    gap: var(--sp-3);
+  }
+  .page-head__disc {
+    width: 32px;
+    height: 32px;
+  }
+  .page-head__disc svg {
+    width: 18px;
+    height: 18px;
+  }
+  /* CSS-only "auto-narrow" for the expanded rail — .app-shell reads this
+   * token, so this composes with (and is overridden by) the existing
+   * .app-shell:has(.sidebar--collapsed) rule for the user-collapsed state. */
+  :root {
+    --sidebar-w: 196px;
   }
 }
 
@@ -2876,10 +3090,15 @@ select:focus {
   gap: var(--sp-2);
   margin-top: var(--sp-3);
 }
-@media (max-width: 900px) {
+/* .hero-row (donut / charts / counts, 1.4fr 1fr 1fr) is the widest fixed
+ * grid on the dashboard — it needs to stack well before the two-column
+ * .hero-secondary does, or the donut and chart cards get crushed. */
+@media (max-width: 1100px) {
   .hero-row {
     grid-template-columns: 1fr;
   }
+}
+@media (max-width: 900px) {
   .hero-secondary {
     grid-template-columns: 1fr;
   }
@@ -3118,6 +3337,41 @@ mark.log-hl--active,
   font-variant-numeric: tabular-nums;
 }
 
+/* Table-density segmented control — topbar, next to the token status. Two
+ * segments (Comfortable / Compact); the active one gets an elevated fill so
+ * the current density reads at a glance without a label. */
+.density-toggle {
+  display: inline-flex;
+  align-items: center;
+  border: 1px solid var(--color-border);
+  border-radius: var(--r-sm);
+  overflow: hidden;
+}
+.density-toggle__opt {
+  padding: var(--sp-1) var(--sp-2);
+  font-size: var(--fs-xs);
+  font-weight: var(--fw-medium);
+  color: var(--color-text-tertiary);
+  background: transparent;
+  border: 0;
+  cursor: pointer;
+  transition: background var(--motion-fast) var(--ease),
+    color var(--motion-fast) var(--ease);
+}
+.density-toggle__opt:hover {
+  background: var(--color-surface-hover);
+}
+.density-toggle__opt:focus-visible {
+  outline: none;
+  box-shadow: var(--ring);
+  position: relative;
+  z-index: 1;
+}
+.density-toggle__opt--active {
+  background: var(--color-surface-hover);
+  color: var(--color-text-primary);
+}
+
 /* Cards and hero tiles lift subtly on hover — the whole UI answers the
  * pointer instead of sitting flat. */
 .surface-card,
@@ -3140,3 +3394,43 @@ mark.log-hl--active,
     transform: none;
   }
 }
+
+/* ==========================================================================
+ * V7 — contract-completion pass (Style lane)
+ * --------------------------------------------------------------------------
+ * Closes gaps the CLASS CONTRACT above already promised but the sheet never
+ * defined: audit/cluster/secrets tab wrappers, the chart hover-flicker fix
+ * (.chart-hit / .chart-hover), the container-detail drawer body family,
+ * .checkbox-inline, the two-line .cell-primary table cell + .table--compact
+ * density modifier + its .density-toggle control, and .row-action--primary.
+ * Each rule lives inline next to its sibling pattern (e.g. .row-action--
+ * primary sits right after .row-action-empty); this block is a pointer, not
+ * a second definition site — see the CLASS CONTRACT header for the full name
+ * list and grep the class name to find the actual rule.
+ *
+ * RESPONSIVE — three breakpoints, additive with the existing v4 sidebar
+ * collapse at 720px:
+ *   ~1100px  .hero-row and .mgmt-grid stack to a single column (both grids
+ *            are wide 3-up / 240px-aside layouts that crush before anything
+ *            else on the page does).
+ *   ~900px   .drawer goes edge-to-edge, .create-menu re-anchors within the
+ *            viewport instead of clipping, .page-head__disc shrinks so long
+ *            titles wrap cleanly, .hero-secondary stacks, --sidebar-w narrows
+ *            (CSS-only headroom — the user togglable .sidebar--collapsed
+ *            rail is untouched and still wins).
+ *   720px    (existing icon-rail collapse, extended) nav-section heads hide
+ *            with the same hairline-separator treatment .sidebar--collapsed
+ *            already uses, .cmdk-chip and .topbar-health__text drop (status
+ *            dot stays), .quick-actions__grid goes single-column,
+ *            .data-table-wrap's horizontal scroll is reconfirmed explicit.
+ *
+ * LIGHT THEME — reviewed the --section-soft/--section-disc washes (.page-
+ * head gradient, .hero-donut::before) and the v6.1 hover-lift shadow. The
+ * section washes were already calibrated lower-alpha for light (0.1–0.12 vs
+ * 0.15–0.2 dark) and read correctly as-is — no change. The hover-lift shadow
+ * (--e-2/--e-3, light only) was too faint against a white surface at its
+ * original 0.1/0.16 alpha (dark relies on --e-2 at 0.36 against a near-black
+ * surface, a ratio light can't reuse); raised to 0.14/0.22 so
+ * .surface-card/.mgmt-card/.hero-counts__tile hover-lift is perceptible in
+ * both themes without reading as heavy.
+ * ========================================================================== */

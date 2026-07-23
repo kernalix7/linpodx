@@ -342,7 +342,7 @@ pub fn CreateContainerModal(
                                 });
                             }
                         />
-                        <span class="modal-inline">
+                        <span class="checkbox-inline">
                             <input
                                 class="checkbox"
                                 type="checkbox"

@@ -25,7 +25,7 @@ use wasm_bindgen_futures::spawn_local;
 
 use super::icons::Icon;
 use super::illustrations::EmptySpot;
-use crate::app::AuthToken;
+use crate::app::{AuthToken, DensityMode};
 use crate::helpers::{container_display_name, short_id, status_chip_modifier};
 use crate::ws::{fetch_list, send_rpc, subscribe};
 
@@ -227,6 +227,7 @@ fn run_bulk(
 #[component]
 pub fn StacksView() -> impl IntoView {
     let auth = use_context::<AuthToken>().expect("AuthToken context provided by AppRoot");
+    let density = use_context::<DensityMode>().expect("DensityMode context provided by AppRoot");
 
     let rows: RwSignal<Result<Vec<Value>, String>> = RwSignal::new(Ok(Vec::new()));
     let loading = RwSignal::new(true);
@@ -301,7 +302,7 @@ pub fn StacksView() -> impl IntoView {
                 let count = groups.len();
                 let cards = groups
                     .into_iter()
-                    .map(|g| render_stack_card(g, busy, push_toast, reload))
+                    .map(|g| render_stack_card(g, density, busy, push_toast, reload))
                     .collect_view();
                 view! {
                     <div class="card-stack">{cards}</div>
@@ -360,6 +361,7 @@ pub fn StacksView() -> impl IntoView {
 /// and a member table (name / status / ports).
 fn render_stack_card(
     group: StackGroup,
+    density: DensityMode,
     busy: RwSignal<bool>,
     push_toast: impl Fn(String, &'static str) + Copy + 'static,
     reload: impl Fn() + Copy + 'static,
@@ -369,6 +371,9 @@ fn render_stack_card(
     let ids = member_ids(&group.members);
     let chip_cls = stack_chip_cls(running, total);
     let name = group.name.clone();
+    // Secondary (muted) line under the stack name: member-count summary —
+    // hidden by CSS in compact mode.
+    let member_summary = format!("{total} container(s)");
 
     let member_rows = group.members.iter().map(render_member_row).collect_view();
     let no_members = ids.is_empty();
@@ -387,7 +392,10 @@ fn render_stack_card(
     view! {
         <div class="card">
             <div class="card-header">
-                <span class="card-header__title">{group.name.clone()}</span>
+                <span class="cell-primary card-header__title">
+                    <span class="cell-primary__main">{group.name.clone()}</span>
+                    <span class="cell-primary__sub">{member_summary}</span>
+                </span>
                 <span class="card-header__status">
                     <span class=chip_cls>{format!("{running}/{total} running")}</span>
                 </span>
@@ -419,7 +427,7 @@ fn render_stack_card(
                 </button>
             </div>
             <div class="data-table-wrap">
-                <table class="data-table">
+                <table class=move || density.table_class()>
                     <thead>
                         <tr>
                             <th>"Name"</th>

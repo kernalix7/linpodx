@@ -33,6 +33,8 @@ const TOKEN_KEY: &str = "linpodx_token";
 const THEME_KEY: &str = "linpodx_theme";
 /// Comma-joined [`Section::key`]s of the *collapsed* nav sections (Spec v6 §1.3).
 const NAV_SECTIONS_KEY: &str = "linpodx_nav_sections";
+/// Persisted table-density preference (`"comfortable"` | `"compact"`).
+const DENSITY_KEY: &str = "linpodx_density";
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Tab {
@@ -332,6 +334,59 @@ pub struct Nav(pub RwSignal<Tab>);
 #[derive(Clone, Copy)]
 pub struct DrawerState(pub RwSignal<Option<String>>);
 
+/// Table row-density preference (Docker Desktop parity). `Comfortable` shows
+/// the two-line primary cells at full padding; `Compact` collapses row padding
+/// and hides the muted secondary line for a denser scan. Persisted to
+/// localStorage like the theme so it survives reloads.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub enum Density {
+    Comfortable,
+    Compact,
+}
+
+impl Density {
+    /// Stable localStorage token.
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Density::Comfortable => "comfortable",
+            Density::Compact => "compact",
+        }
+    }
+
+    /// Parse the persisted token; anything unrecognised falls back to the
+    /// `Comfortable` default.
+    pub fn from_str(s: &str) -> Density {
+        if s == "compact" {
+            Density::Compact
+        } else {
+            Density::Comfortable
+        }
+    }
+
+    /// `true` for the dense variant — tables append `table--compact` when so.
+    pub fn is_compact(self) -> bool {
+        matches!(self, Density::Compact)
+    }
+}
+
+/// Shared table-density signal. Provided by [`AppRoot`]; every data-table panel
+/// reads it to decide whether to append the `table--compact` modifier.
+#[derive(Clone, Copy)]
+pub struct DensityMode(pub RwSignal<Density>);
+
+impl DensityMode {
+    /// Reactive `<table>` class for the current density — `data-table` plus the
+    /// `table--compact` modifier when the dense variant is active. Call inside a
+    /// `class=move || ...` closure so the class tracks the signal.
+    pub fn table_class(self) -> &'static str {
+        if self.0.get().is_compact() {
+            "data-table table--compact"
+        } else {
+            "data-table"
+        }
+    }
+}
+
 /// Pull a `?token=<t>` bearer token out of the current URL, if present.
 ///
 /// The desktop shell (and `linpodx daemon` operators following the docs) hand
@@ -370,6 +425,13 @@ fn apply_theme(theme: &str) {
         let _ = el.set_attribute("data-theme", theme);
     }
     let _ = gloo_storage::LocalStorage::set(THEME_KEY, theme);
+}
+
+/// Load the persisted table-density preference (defaults to `Comfortable`).
+fn load_density() -> Density {
+    gloo_storage::LocalStorage::get::<String>(DENSITY_KEY)
+        .map(|s| Density::from_str(&s))
+        .unwrap_or(Density::Comfortable)
 }
 
 /// Load the persisted set of *collapsed* nav sections. Missing/blank key ⇒
@@ -577,6 +639,14 @@ pub fn AppRoot() -> impl IntoView {
     // consumes it. Provided here so every panel can `use_context` it.
     let create_intent = RwSignal::new(None::<CreateKind>);
     provide_context(CreateIntent(create_intent));
+
+    // Table-density preference — restored from localStorage, persisted on every
+    // change, and shared to every data-table panel via context.
+    let density = RwSignal::new(load_density());
+    provide_context(DensityMode(density));
+    Effect::new(move |_| {
+        let _ = gloo_storage::LocalStorage::set(DENSITY_KEY, density.get().as_str());
+    });
 
     // Grouped-sidebar per-section collapse state (§1.3): the set of *collapsed*
     // sections, restored from localStorage and persisted on every change.
@@ -890,6 +960,38 @@ pub fn AppRoot() -> impl IntoView {
                         >
                             "Set token"
                         </button>
+                        <div
+                            class="density-toggle"
+                            role="group"
+                            aria-label="Table density"
+                        >
+                            <button
+                                type="button"
+                                class=move || if density.get() == Density::Comfortable {
+                                    "density-toggle__opt density-toggle__opt--active"
+                                } else {
+                                    "density-toggle__opt"
+                                }
+                                title="Comfortable rows"
+                                aria-pressed=move || (density.get() == Density::Comfortable).to_string()
+                                on:click=move |_| density.set(Density::Comfortable)
+                            >
+                                "Comfortable"
+                            </button>
+                            <button
+                                type="button"
+                                class=move || if density.get() == Density::Compact {
+                                    "density-toggle__opt density-toggle__opt--active"
+                                } else {
+                                    "density-toggle__opt"
+                                }
+                                title="Compact rows"
+                                aria-pressed=move || (density.get() == Density::Compact).to_string()
+                                on:click=move |_| density.set(Density::Compact)
+                            >
+                                "Compact"
+                            </button>
+                        </div>
                         <button
                             type="button"
                             class="theme-toggle"

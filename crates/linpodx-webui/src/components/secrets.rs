@@ -21,6 +21,7 @@ use wasm_bindgen_futures::spawn_local;
 
 use super::icons::Icon;
 use super::illustrations::EmptySpot;
+use crate::app::DensityMode;
 use crate::ws::send_rpc;
 
 #[derive(Clone, Debug)]
@@ -59,6 +60,7 @@ impl SecretRow {
 
 #[component]
 pub fn SecretsView() -> impl IntoView {
+    let density = use_context::<DensityMode>().expect("DensityMode context provided by AppRoot");
     let rows: RwSignal<Vec<SecretRow>> = RwSignal::new(Vec::new());
     let error: RwSignal<Option<String>> = RwSignal::new(None);
     let loading = RwSignal::new(true);
@@ -300,9 +302,21 @@ pub fn SecretsView() -> impl IntoView {
             .map(|s| {
                 let name_for_remove = s.name.clone();
                 let id_short = s.id_short();
+                // Secondary (muted) line under the secret name: the storage
+                // driver — hidden by CSS in compact mode.
+                let primary_sub = if s.driver.is_empty() {
+                    "—".to_string()
+                } else {
+                    s.driver.clone()
+                };
                 view! {
                     <tr>
-                        <td><span class="cell-id" title=s.name.clone()>{s.name.clone()}</span></td>
+                        <td>
+                            <span class="cell-primary" title=s.name.clone()>
+                                <span class="cell-primary__main">{s.name.clone()}</span>
+                                <span class="cell-primary__sub">{primary_sub}</span>
+                            </span>
+                        </td>
                         <td><span class="cell mono" title=s.id.clone()>{id_short}</span></td>
                         <td><span class="cell">{s.created}</span></td>
                         <td><span class="cell">{s.driver}</span></td>
@@ -321,7 +335,7 @@ pub fn SecretsView() -> impl IntoView {
             .collect_view();
         view! {
             <div class="data-table-wrap">
-                <table class="data-table">
+                <table class=move || density.table_class()>
                     <thead>
                         <tr>
                             <th>"Name"</th>

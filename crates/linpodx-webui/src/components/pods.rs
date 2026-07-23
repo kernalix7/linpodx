@@ -23,7 +23,7 @@ use wasm_bindgen_futures::spawn_local;
 
 use super::icons::Icon;
 use super::illustrations::EmptySpot;
-use crate::app::AuthToken;
+use crate::app::{AuthToken, DensityMode};
 use crate::helpers::{humanize_timestamp, short_id, status_chip_modifier};
 use crate::ws::{fetch_list, subscribe};
 
@@ -85,6 +85,7 @@ async fn post_json(path: &str, body: Value, token: &str) -> Result<Value, String
 #[component]
 pub fn PodsView() -> impl IntoView {
     let auth = use_context::<AuthToken>().expect("AuthToken context provided by AppRoot");
+    let density = use_context::<DensityMode>().expect("DensityMode context provided by AppRoot");
 
     let rows: RwSignal<Result<Vec<Value>, String>> = RwSignal::new(Ok(Vec::new()));
     let loading = RwSignal::new(true);
@@ -268,6 +269,9 @@ pub fn PodsView() -> impl IntoView {
                             .and_then(Value::as_str)
                             .filter(|s| !s.is_empty())
                             .map(short_id);
+                        // Secondary (muted) line under the pod name: infra
+                        // container short id — hidden by CSS in compact mode.
+                        let primary_sub = infra.clone().unwrap_or_else(|| "—".to_string());
                         let stack = stack_label(&row);
                         let row_busy = busy.contains(&id);
                         let row_disabled = id.is_empty() || row_busy;
@@ -287,11 +291,10 @@ pub fn PodsView() -> impl IntoView {
                         view! {
                             <tr>
                                 <td>
-                                    <span class="cell">{name.clone()}</span>
-                                    {(!id.is_empty()).then({
-                                        let title_id = id.clone();
-                                        move || view! { " "<span class="mono cell-id" title=title_id.clone()>{short_id(&title_id)}</span> }
-                                    })}
+                                    <span class="cell-primary" title=id.clone()>
+                                        <span class="cell-primary__main">{name.clone()}</span>
+                                        <span class="cell-primary__sub">{primary_sub}</span>
+                                    </span>
                                 </td>
                                 <td>{status_view}</td>
                                 <td class="cell-num"><span class="mono">{num_containers.to_string()}</span></td>
@@ -344,7 +347,7 @@ pub fn PodsView() -> impl IntoView {
 
                 view! {
                     <div class="data-table-wrap">
-                        <table class="data-table">
+                        <table class=move || density.table_class()>
                             <thead>
                                 <tr>
                                     <th>"Name"</th>

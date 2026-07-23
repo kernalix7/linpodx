@@ -26,7 +26,7 @@ use serde_json::Value;
 use wasm_bindgen_futures::spawn_local;
 
 use super::icons::Icon;
-use crate::app::AuthToken;
+use crate::app::{AuthToken, DensityMode};
 use crate::helpers::status_chip_modifier;
 use crate::ws::{fetch_list, subscribe};
 
@@ -80,6 +80,7 @@ pub fn ListTable(
     #[prop(optional)] actions_for_row: Option<RowActions>,
 ) -> impl IntoView {
     let auth = use_context::<AuthToken>().expect("AuthToken context provided by AppRoot");
+    let density = use_context::<DensityMode>().expect("DensityMode context provided by AppRoot");
     let rows: RwSignal<Result<Vec<Value>, String>> = RwSignal::new(Ok(Vec::new()));
     let loading = RwSignal::new(true);
     let filter = RwSignal::new(String::new());
@@ -237,7 +238,7 @@ pub fn ListTable(
                     .collect_view();
                 view! {
                     <div class="data-table-wrap">
-                        <table class="data-table">
+                        <table class=move || density.table_class()>
                             <thead>{build_header()}</thead>
                             <tbody>{body_rows}</tbody>
                         </table>

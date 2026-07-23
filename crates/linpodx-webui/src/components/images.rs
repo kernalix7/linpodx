@@ -35,7 +35,7 @@ use super::icons::Icon;
 use super::illustrations::EmptySpot;
 use super::push_modal::PushModal;
 use crate::api_client::fetch_system_df;
-use crate::app::AuthToken;
+use crate::app::{AuthToken, DensityMode};
 use crate::helpers::{format_bytes, short_id};
 use crate::ws::{fetch_list, send_rpc, subscribe};
 use pull_modal::PullModal;
@@ -92,6 +92,7 @@ fn image_in_use(row: &Value, containers: &[Value]) -> bool {
 #[component]
 pub fn ImageList() -> impl IntoView {
     let auth = use_context::<AuthToken>().expect("AuthToken context provided by AppRoot");
+    let density = use_context::<DensityMode>().expect("DensityMode context provided by AppRoot");
 
     let rows: RwSignal<Result<Vec<Value>, String>> = RwSignal::new(Ok(Vec::new()));
     let loading = RwSignal::new(true);
@@ -323,6 +324,15 @@ pub fn ImageList() -> impl IntoView {
                         let in_use = image_in_use(&row, &c);
                         let checked = sel.contains(&id);
                         let title_id = id.clone();
+                        // Secondary (muted) line under the image name: short
+                        // digest + created — hidden by CSS in compact mode.
+                        let short = short_id(&id);
+                        let primary_sub = match (short.is_empty(), created.is_empty()) {
+                            (true, true) => "—".to_string(),
+                            (true, false) => created.clone(),
+                            (false, true) => short.clone(),
+                            (false, false) => format!("{short} · {created}"),
+                        };
                         view! {
                             <tr>
                                 <td>
@@ -342,7 +352,12 @@ pub fn ImageList() -> impl IntoView {
                                         }
                                     />
                                 </td>
-                                <td><span class="cell">{name}</span></td>
+                                <td>
+                                    <span class="cell-primary" title=title_id.clone()>
+                                        <span class="cell-primary__main">{name}</span>
+                                        <span class="cell-primary__sub">{primary_sub}</span>
+                                    </span>
+                                </td>
                                 <td><span class="cell-id" title=title_id>{short_id(&id)}</span></td>
                                 <td class="cell-num"><span class="mono">{format_bytes(size)}</span></td>
                                 <td><span class="cell">{created}</span></td>
@@ -369,7 +384,7 @@ pub fn ImageList() -> impl IntoView {
 
                 view! {
                     <div class="data-table-wrap">
-                        <table class="data-table">
+                        <table class=move || density.table_class()>
                             <thead>
                                 <tr>
                                     <th class="cell-actions">

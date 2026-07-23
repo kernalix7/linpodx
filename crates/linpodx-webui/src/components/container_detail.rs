@@ -909,7 +909,7 @@ pub fn ContainerDetail() -> impl IntoView {
         DetailTab::Logs => view! {
             <div class="drawer-pane">
                 <div class="page-actions">
-                    <label class="modal-inline">
+                    <label class="checkbox-inline">
                         <input
                             class="checkbox"
                             type="checkbox"

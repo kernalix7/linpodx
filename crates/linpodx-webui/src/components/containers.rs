@@ -25,9 +25,9 @@ use super::icons::Icon;
 use super::illustrations::EmptySpot;
 use super::logs_modal::LogsModal;
 use super::{ContainerLiveSample, DashboardShared};
-use crate::app::{AuthToken, DrawerState};
+use crate::app::{AuthToken, DensityMode, DrawerState};
 use crate::helpers::{
-    container_display_name, format_bytes, humanize_timestamp, status_chip_modifier,
+    container_display_name, format_bytes, humanize_timestamp, short_id, status_chip_modifier,
 };
 use crate::ws::{fetch_list, subscribe};
 
@@ -89,6 +89,7 @@ pub fn ContainerList() -> impl IntoView {
     // The detail slide-over is hosted by `AppRoot`; a row's "Details" action
     // sets this shared signal to the container id (deep-links `#container/<id>`).
     let drawer = use_context::<DrawerState>().expect("DrawerState context provided by AppRoot");
+    let density = use_context::<DensityMode>().expect("DensityMode context provided by AppRoot");
 
     let rows: RwSignal<Result<Vec<Value>, String>> = RwSignal::new(Ok(Vec::new()));
     let loading = RwSignal::new(true);
@@ -219,7 +220,7 @@ pub fn ContainerList() -> impl IntoView {
                     .collect_view();
                 view! {
                     <div class="data-table-wrap">
-                        <table class="data-table">
+                        <table class=move || density.table_class()>
                             <thead>
                                 <tr>
                                     <th>"Name"</th>
@@ -304,6 +305,20 @@ fn render_row(
 ) -> AnyView {
     let id = row_id(row);
     let name = container_display_name(&row_names(row), &id);
+    // Secondary (muted) line under the container name: image + short id — the
+    // Docker Desktop density pattern. Hidden by CSS in compact mode.
+    let image_field = row.get("image").and_then(Value::as_str).unwrap_or("");
+    let short = if id.is_empty() {
+        String::new()
+    } else {
+        short_id(&id)
+    };
+    let primary_sub = match (image_field.is_empty(), short.is_empty()) {
+        (true, true) => "—".to_string(),
+        (true, false) => short.clone(),
+        (false, true) => image_field.to_string(),
+        (false, false) => format!("{image_field} · {short}"),
+    };
     let stack_view = match row_stack_project(row) {
         Some(project) => {
             view! { <span class="badge badge--info" title="Compose project">{project}</span> }
@@ -354,11 +369,10 @@ fn render_row(
     view! {
         <tr>
             <td>
-                <span class="cell">{name}</span>
-                {(!id.is_empty()).then({
-                    let title_id = id.clone();
-                    move || view! { " "<span class="mono cell-id" title=title_id.clone()>{title_id.clone()}</span> }
-                })}
+                <span class="cell-primary" title=id.clone()>
+                    <span class="cell-primary__main">{name}</span>
+                    <span class="cell-primary__sub">{primary_sub}</span>
+                </span>
             </td>
             <td>{stack_view}</td>
             <td>{image_view}</td>
