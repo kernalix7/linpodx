@@ -86,7 +86,11 @@ pub fn SecretsView() -> impl IntoView {
     let reload = move || {
         loading.set(true);
         spawn_local(async move {
-            match send_rpc("secret_list", json!({})).await {
+            // `Value::Null` (not `json!({})`) — `secret_list` is a unit-variant
+            // RPC method on the daemon side; see `ws::send_rpc`'s doc comment
+            // for why an empty-object `params` fails to deserialize and hangs
+            // this call forever instead of erroring.
+            match send_rpc("secret_list", Value::Null).await {
                 Ok(v) => {
                     let arr = v
                         .get("secrets")

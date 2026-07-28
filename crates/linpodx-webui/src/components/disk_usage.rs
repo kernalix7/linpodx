@@ -9,8 +9,9 @@ use serde_json::{json, Value};
 use wasm_bindgen::{JsCast, JsValue};
 use wasm_bindgen_futures::spawn_local;
 
+use super::icons::Icon;
 use crate::api_client::{fetch_container_inspect, fetch_system_df};
-use crate::app::AuthToken;
+use crate::app::{AuthToken, Tab};
 use crate::helpers::{format_bytes, short_id};
 use crate::ws::{fetch_list, send_rpc, subscribe};
 
@@ -276,11 +277,25 @@ fn build_stats(
     ]
 }
 
+/// Mounted at both `Tab::Disk` and `Tab::DiskUsage` (`app.rs`) — the two nav
+/// entries share this one real implementation rather than one of them being a
+/// stub, so `tab` is threaded through purely to keep the in-panel header
+/// text/icon in sync with whichever sidebar entry the user is on.
 #[component]
-pub fn DiskUsageView() -> impl IntoView {
+pub fn DiskUsageView(#[prop(default = Tab::DiskUsage)] tab: Tab) -> impl IntoView {
     let Some(auth) = use_context::<AuthToken>() else {
         return view! {
             <div class="disk-center">
+                <header class="page-head">
+                    <div class="page-head__lead">
+                        <div class="page-head__disc"><Icon name=tab.icon()/></div>
+                        <div class="page-head__titles">
+                            <div class="page-head__eyebrow">{tab.section().label()}</div>
+                            <div class="page-head__title">{tab.label()}</div>
+                            <div class="page-head__sub">{tab.subtitle()}</div>
+                        </div>
+                    </div>
+                </header>
                 <div class="error-state"><span>"Auth context unavailable"</span></div>
             </div>
         }
@@ -694,6 +709,16 @@ pub fn DiskUsageView() -> impl IntoView {
 
     view! {
         <div class="disk-center">
+            <header class="page-head">
+                <div class="page-head__lead">
+                    <div class="page-head__disc"><Icon name=tab.icon()/></div>
+                    <div class="page-head__titles">
+                        <div class="page-head__eyebrow">{tab.section().label()}</div>
+                        <div class="page-head__title">{tab.label()}</div>
+                        <div class="page-head__sub">{tab.subtitle()}</div>
+                    </div>
+                </div>
+            </header>
             <div class="toolbar page-actions">
                 <span class="toolbar__spacer"></span>
                 <button
@@ -712,7 +737,7 @@ pub fn DiskUsageView() -> impl IntoView {
                 <div class="danger-zone__row">
                     <span>
                         <strong>"Prune everything (all unused)"</strong>
-                        <span class="modal-hint">" Copies a CLI fallback because no complete Web UI prune endpoint exists."</span>
+                        <span class="modal-hint">" Copies the equivalent CLI command to your clipboard — nothing is removed until you run it yourself."</span>
                     </span>
                     <button
                         type="button"

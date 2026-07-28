@@ -1,5 +1,5 @@
 use leptos::prelude::*;
-use serde_json::{json, Value};
+use serde_json::Value;
 use wasm_bindgen_futures::spawn_local;
 
 use super::icons::Icon;
@@ -52,7 +52,12 @@ fn AutoEncryptCard() -> impl IntoView {
 
     let reload = move || {
         spawn_local(async move {
-            match send_rpc("sandbox_snapshot_auto_trigger_status", json!({})).await {
+            // `Value::Null`, not `json!({})` — see `ws::send_rpc`'s doc comment:
+            // this is a unit-variant RPC method and an empty-object `params`
+            // fails to deserialize on the daemon side, hanging this call
+            // forever instead of erroring (previously manifested as "Loading
+            // status…" never resolving).
+            match send_rpc("sandbox_snapshot_auto_trigger_status", Value::Null).await {
                 Ok(v) => {
                     status.set(AutoEncryptStatus::from_value(&v));
                     error.set(None);
@@ -85,7 +90,7 @@ fn AutoEncryptCard() -> impl IntoView {
                 Ok(_) => {
                     error.set(None);
                     // Refresh the displayed status.
-                    match send_rpc("sandbox_snapshot_auto_trigger_status", json!({})).await {
+                    match send_rpc("sandbox_snapshot_auto_trigger_status", Value::Null).await {
                         Ok(v) => status.set(AutoEncryptStatus::from_value(&v)),
                         Err(e) => error.set(Some(e)),
                     }

@@ -137,7 +137,19 @@ pub fn PodsView() -> impl IntoView {
         spawn_local(async move {
             match fetch_list("pods", &token).await {
                 Ok(v) => {
-                    let arr = if let Value::Array(a) = v { a } else { vec![v] };
+                    // The daemon wraps the list as `{"pods": [...]}` rather than
+                    // returning a bare array (see secrets.rs's `.get("secrets")`
+                    // for the same pattern) — unwrap that before falling back to
+                    // treating the whole response as a single opaque row.
+                    let arr = match &v {
+                        Value::Array(a) => a.clone(),
+                        Value::Object(_) => v
+                            .get("pods")
+                            .and_then(Value::as_array)
+                            .cloned()
+                            .unwrap_or_else(|| vec![v.clone()]),
+                        _ => vec![v],
+                    };
                     rows.set(Ok(arr));
                 }
                 Err(e) => rows.set(Err(e)),

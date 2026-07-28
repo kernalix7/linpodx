@@ -188,7 +188,7 @@ pub fn ListTable(
         match rows.get() {
             Err(msg) => view! {
                 <div class="error-state">
-                    <Icon name="approval"/>
+                    <span class="error-state__icon"><Icon name="approval"/></span>
                     <span>{msg}</span>
                 </div>
             }

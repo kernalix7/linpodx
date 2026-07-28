@@ -145,17 +145,37 @@ where
 ///
 /// Used by panels that need to trigger a write action (e.g. Images "Push").
 /// The websocket is closed after the response — we don't pool them.
+///
+/// `params` of `Value::Null` omits the `"params"` key from the outgoing frame
+/// entirely, rather than sending `"params":null`. This matters: the daemon's
+/// `Method` enum uses serde's adjacently-tagged representation
+/// (`#[serde(tag = "method", content = "params")]`), and for a unit-variant
+/// method (`secret_list`, `plugin_key_list`,
+/// `sandbox_snapshot_auto_trigger_status`,
+/// `daemon_pin_client_tofu_expiry_status`, …) that only round-trips when the
+/// `params` key is *absent* — `{}` (and, per serde's adjacently-tagged unit
+/// handling, even explicit `null`) fails to deserialize as `RpcRequest` at
+/// all. Because that failure happens before the request's `id` can be
+/// recovered, the daemon's error reply carries `"id":null`; skip that call
+/// site's argument down to `Value::Null` so this function can special-case it.
 pub async fn send_rpc(method: &str, params: Value) -> Result<Value, String> {
     let url = ipc_url().ok_or_else(|| "no window/location".to_string())?;
 
     let ws = WebSocket::open(&url).map_err(|e| format!("ws open failed: {e:?}"))?;
     let (mut tx, mut rx) = ws.split();
-    let req = json!({
-        "jsonrpc": "2.0",
-        "id": 1,
-        "method": method,
-        "params": params,
-    });
+    let req = match params {
+        Value::Null => json!({
+            "jsonrpc": "2.0",
+            "id": 1,
+            "method": method,
+        }),
+        params => json!({
+            "jsonrpc": "2.0",
+            "id": 1,
+            "method": method,
+            "params": params,
+        }),
+    };
     let payload = serde_json::to_string(&req).map_err(|e| format!("encode error: {e}"))?;
     tx.send(Message::Text(payload))
         .await
@@ -171,9 +191,19 @@ pub async fn send_rpc(method: &str, params: Value) -> Result<Value, String> {
             Ok(v) => v,
             Err(_) => continue,
         };
-        // Skip unrelated server-pushed notifications; only the matching response
-        // (id == 1) terminates the call.
         if v.get("id").and_then(|i| i.as_i64()) != Some(1) {
+            // A response the daemon couldn't attribute to our request (no
+            // numeric id) is either an unrelated server-pushed notification —
+            // skip and keep waiting — or a transport/parse-level error the
+            // daemon raised before it could recover our id at all. The latter
+            // never has a follow-up frame coming, so looping forever on it
+            // just presents as a spinner that never resolves; surface it
+            // instead of hanging.
+            if v.get("id").is_none_or(|id| id.is_null()) {
+                if let Some(err) = v.get("error") {
+                    return Err(format!("rpc error: {err}"));
+                }
+            }
             continue;
         }
         if let Some(err) = v.get("error") {

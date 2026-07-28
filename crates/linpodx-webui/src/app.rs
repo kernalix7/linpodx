@@ -69,7 +69,7 @@ pub enum Tab {
 }
 
 impl Tab {
-    fn label(self) -> &'static str {
+    pub fn label(self) -> &'static str {
         match self {
             Tab::Dashboard => "Dashboard",
             Tab::Containers => "Containers",
@@ -120,7 +120,7 @@ impl Tab {
     /// Icon name understood by [`crate::components::Icon`]. Unknown names fall
     /// back to a neutral dot (see `icons.rs`), so `"dashboard"` is safe even
     /// before a bespoke glyph exists.
-    fn icon(self) -> &'static str {
+    pub fn icon(self) -> &'static str {
         match self {
             Tab::Dashboard => "dashboard",
             Tab::Containers => "container",
@@ -1224,10 +1224,14 @@ pub fn AppRoot() -> impl IntoView {
                             Tab::PinnedClients => view! { <PinnedClientsView/> }.into_any(),
                             Tab::Plugins => view! { <PluginsView/> }.into_any(),
                             Tab::Secrets => view! { <SecretsView/> }.into_any(),
-                            // Body delivered by Lane C (`DiskCenter`); placeholder
-                            // keeps the shell compiling until it lands.
-                            Tab::Disk => view! { <DiskCenterPlaceholder/> }.into_any(),
-                            Tab::DiskUsage => view! { <DiskUsageView/> }.into_any(),
+                            // Disk and Disk Usage both mount the same `DiskUsageView`
+                            // — it already wires up real `GET /api/v1/system/df` data
+                            // plus per-category reclaim, which is exactly what the
+                            // "Disk" nav entry's own subtitle promises. Passing the
+                            // active tab keeps the in-panel header text/icon in sync
+                            // with whichever sidebar entry got clicked.
+                            Tab::Disk => view! { <DiskUsageView tab=Tab::Disk/> }.into_any(),
+                            Tab::DiskUsage => view! { <DiskUsageView tab=Tab::DiskUsage/> }.into_any(),
                             Tab::Settings => view! { <Settings/> }.into_any(),
                         };
                         view! { <div class="content-fade">{body}</div> }
@@ -1306,45 +1310,6 @@ fn StatusFooter(shared: DashboardShared, token: RwSignal<Option<String>>) -> imp
                 <Sparkline data=Signal::derive(move || shared.agg_cpu.get())/>
             </span>
         </footer>
-    }
-}
-
-/// Shell-owned §3 page identity header — used by the two placeholder panels
-/// below and available for any panel that wants the shared composition. The
-/// section-accent trio resolves from the enclosing `.section-scope--*` wrapper.
-#[component]
-fn PageHead(tab: Tab) -> impl IntoView {
-    view! {
-        <header class="page-head">
-            <div class="page-head__lead">
-                <div class="page-head__disc"><Icon name=tab.icon()/></div>
-                <div class="page-head__titles">
-                    <div class="page-head__eyebrow">{tab.section().label()}</div>
-                    <div class="page-head__title">{tab.label()}</div>
-                    <div class="page-head__sub">{tab.subtitle()}</div>
-                </div>
-            </div>
-        </header>
-    }
-}
-
-/// Placeholder for `Tab::Disk` until Lane C's `DiskCenter` lands (§5). Renders
-/// the real §3 identity so the tab is never blank, then a quiet notice.
-#[component]
-fn DiskCenterPlaceholder() -> impl IntoView {
-    view! {
-        <div class="dashboard-panel section-scope--system">
-            <PageHead tab=Tab::Disk/>
-            <div class="surface-card">
-                <div class="empty-state empty-state--spot">
-                    <div class="empty-state__spot"><Icon name="disk"/></div>
-                    <div class="empty-state__title">"Disk center"</div>
-                    <div class="empty-state__hint">
-                        "Per-category usage and reclaim tools mount here once the disk module loads."
-                    </div>
-                </div>
-            </div>
-        </div>
     }
 }
 

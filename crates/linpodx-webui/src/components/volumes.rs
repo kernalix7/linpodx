@@ -505,7 +505,7 @@ pub fn VolumeList() -> impl IntoView {
                                 </td>
                                 <td><span class="cell-id" title=name.clone()>{name.clone()}</span></td>
                                 <td><span class="cell">{driver}</span></td>
-                                <td><span class="cell" title=mountpoint.clone()>{mountpoint.clone()}</span></td>
+                                <td><span class="cell mono cell-clip" title=mountpoint.clone()>{mountpoint.clone()}</span></td>
                                 <td><span class="cell">{created}</span></td>
                                 <td>{badge}</td>
                             </tr>

@@ -7,7 +7,7 @@
 use std::collections::HashMap;
 
 use leptos::prelude::*;
-use serde_json::{json, Value};
+use serde_json::Value;
 use wasm_bindgen_futures::spawn_local;
 
 use super::icons::Icon;
@@ -99,8 +99,13 @@ pub fn PluginsView() -> impl IntoView {
                 }
                 Err(_) => {
                     // Fall back to the JSON-RPC method if the REST list isn't
-                    // mounted yet (the daemon ships both surfaces).
-                    match send_rpc("plugin_key_list", json!({})).await {
+                    // mounted yet (the daemon ships both surfaces). `Value::Null`,
+                    // not `json!({})` — see `ws::send_rpc`'s doc comment: this is
+                    // a unit-variant RPC method and an empty-object `params`
+                    // fails to deserialize on the daemon side, hanging this call
+                    // forever (previously the stuck loading skeleton) instead of
+                    // erroring.
+                    match send_rpc("plugin_key_list", Value::Null).await {
                         Ok(v) => {
                             let arr = if let Value::Array(a) = v { a } else { vec![v] };
                             let parsed: Vec<KeyRow> =

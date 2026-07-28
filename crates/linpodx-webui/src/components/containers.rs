@@ -424,7 +424,7 @@ fn render_row(
         // with the neighbouring status column — .cell-clip caps + ellipsizes,
         // full value stays reachable via the title tooltip.
         view! {
-            <span class="cell mono cell-clip" title=image.to_string()>
+            <span class="cell mono cell-clip cell-clip--sm" title=image.to_string()>
                 {image.to_string()}
             </span>
         }
@@ -551,7 +551,7 @@ fn render_row(
             }
         >
             <td>
-                <span class="cell-primary" title=id.clone()>
+                <span class="cell-primary cell-primary--clip" title=id.clone()>
                     <span class="cell-primary__main">{name}</span>
                     <span class="cell-primary__sub">{primary_sub}</span>
                 </span>

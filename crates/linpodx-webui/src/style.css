@@ -56,7 +56,9 @@
  *
  * STATES
  *   .empty-state .empty-state__icon .empty-state__title .empty-state__hint
- *   .error-state               inline red error block
+ *   .error-state .error-state__icon   inline red error block (icon is
+ *                               size-constrained so it never blows out to the
+ *                               SVG's unconstrained intrinsic size)
  *   .loading-inline            small spinner + text
  *
  * BUTTONS  (new .btn-* preferred; legacy .primary/.row-action kept working)
@@ -1202,6 +1204,14 @@ select:focus {
   text-overflow: ellipsis;
   white-space: nowrap;
 }
+/* Pins a `.cell-primary`'s preferred width in `auto`-layout tables with many
+ * columns (containers: name+stack+image+status+created+cpu+mem+actions) so
+ * one long name/image sub-line can't push the trailing numeric columns off
+ * the visible width. Px-based (not %) so it actually counts toward the
+ * table's intrinsic column-width calculation. */
+.cell-primary--clip {
+  max-width: 220px;
+}
 /* compact density modifier (topbar .density-toggle) — collapse row padding
  * and drop the secondary line so more rows fit above the fold. */
 .data-table.table--compact thead th,
@@ -1310,6 +1320,23 @@ select:focus {
   border: 1px solid var(--color-danger-soft);
   border-radius: var(--r-md);
   font-size: var(--fs-sm);
+}
+/* Icons rendered by the shared `Icon` component are bare `<svg viewBox=…>`
+ * with no width/height attributes, so anywhere one is dropped in without a
+ * sizing wrapper it falls back to the browser's unconstrained intrinsic-size
+ * algorithm and can blow up to fill its flex container (see Icon in
+ * icons.rs). This wrapper pins it down the same way `.empty-state__icon`
+ * does for the empty-state path. */
+.error-state__icon {
+  display: grid;
+  place-items: center;
+  flex: none;
+  width: 20px;
+  height: 20px;
+}
+.error-state__icon svg {
+  width: 20px;
+  height: 20px;
 }
 .loading-inline {
   display: inline-flex;
@@ -1824,6 +1851,15 @@ select:focus {
   align-items: center;
   gap: var(--sp-2);
   flex: none;
+}
+/* `.card` is an `auto-fit` grid meant for small field/value pairs side by
+ * side — any child that should instead run the card's full width (a
+ * button row, or a nested table like the Stacks card's member list) needs
+ * an explicit span, or it collapses into a single ~160px auto-fit track
+ * with the rest of the card left as dead space beside it. */
+.card > .panel-toolbar,
+.card > .data-table-wrap {
+  grid-column: 1 / -1;
 }
 .card-actions {
   grid-column: 1 / -1;
@@ -3801,4 +3837,11 @@ mark.log-hl--active,
   text-overflow: ellipsis;
   white-space: nowrap;
   vertical-align: bottom;
+}
+/* Narrower cap for `.cell-clip` used alongside a column that duplicates the
+ * same value elsewhere in the row (containers: the Image column repeats what
+ * the Name column's sub-line already shows) — keeps the value reachable via
+ * the tooltip without it competing for width against the CPU/Mem columns. */
+.cell-clip--sm {
+  max-width: 150px;
 }
