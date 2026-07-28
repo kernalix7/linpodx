@@ -37,6 +37,15 @@ UI 자체도 처음부터 다시 설계한 dark-first 디자인 시스템을 갖
 파일(데몬 dispatch, CLI main)이 도메인별 모듈로 분리되었습니다. 이번 릴리스는
 태그되지 않았던 0.1.2–0.1.4 마일스톤의 내용도 함께 포함합니다 (위 참고 참조).
 
+**웹 UI가 CLI 와 기능 동등성에 도달합니다.** (이전에 Phase 26–27 로 추적되던)
+후속 웨이브는 웹 UI 를 Docker Desktop 급 커버리지로 채웁니다: 컨테이너 생성
+마법사, 실시간 이벤트 피드, 헬스체크 인스펙터가 딸린 이미지 pull 모달, Stacks
+및 Pods 탭(그리고 신규 `linpodx pod` CLI 표면), 리소스 제한 편집기, attach/
+disconnect 를 지원하는 네트워크 IPAM 상세, 볼륨 상세, Secrets 탭. 웹 UI 의
+정보 구조(IA)도 두 차례 재작업되었습니다(그룹화된 사이드바 + 대시보드
+히어로를 도입한 UI v6, 그리고 스크린샷으로 검증된 대시보드/topbar 패스인
+v7), 그리고 e2e 테스트로 드러난 4건의 정합성 버그도 함께 수정되었습니다.
+
 ### 보안
 
 - **감사 로그 해시 체인 v2** — 변조 감지 체인이 이제 payload 뿐 아니라 모든
@@ -98,6 +107,61 @@ UI 자체도 처음부터 다시 설계한 dark-first 디자인 시스템을 갖
   발동하는 조건) 경고하고 `delegate.conf` 수정 방법을 안내합니다.
 - 웹 UI 컨테이너 테이블에 기존 2초 폴링 기반의 실시간 CPU% 및 메모리
   열이 추가되었습니다.
+- **컨테이너 생성 마법사**: `POST /api/v1/containers/create` (bearer 인증,
+  기존 `ContainerCreate` IPC 를 백엔드로 사용) 와 다중 섹션 모달 —
+  이미지, 이름, 반복 가능한 포트/환경변수/볼륨 행, 네트워크 선택, 라벨,
+  재시작 정책, 인라인 검증, 모달 내 에러 상태.
+- **실시간 데몬 이벤트 피드** (대시보드): 신규 `LiveEvents` 컴포넌트가 하나의
+  `/ipc` 소켓으로 8개 컨테이너 라이프사이클 토픽 전체를 구독(신규
+  `ws::subscribe_multi`), 200개 항목의 최신순 링 버퍼, 종류별 색상 배지,
+  호버 시 일시정지(사이드 버퍼 flush 포함), 자동 스크롤 토글, 이벤트의
+  컨테이너가 상세 드로어에 열려 있을 때 강조 표시.
+- **이미지 pull 모달 + 헬스체크 인스펙터**: 기존 `ImagePullJob` 비동기
+  표면을 `/ipc` 로 구동하는 "Pull image" 모달(실시간 진행 로그, 최종
+  성공/실패), prune 옆의 회수 가능 용량 배지; 컨테이너 상세의 Overview 에
+  헬스체크 섹션 추가(명령, interval/timeout/retries/start-period, 현재
+  health 칩, 빈 상태 UI).
+- **Pod 지원 전 구간**: `Method::{PodList,PodCreate,PodStart,PodStop,
+  PodRemove}` IPC arm, `pod.rs` podman pod 래퍼(`ps`/`create`/`start`/
+  `stop`/`rm`), bearer 인증 REST 라우트(`GET /pods`, `POST /pods/create`,
+  `POST /pods/:id/{start,stop,remove}`), Pods 탭(상태 칩, 컨테이너 수,
+  infra id, 스택 배지, pod 생성 모달), CLI 의
+  `linpodx pod {ls,create,start,stop,rm}`. `ContainerSummary` 에 `podman
+  ps` 의 `Labels` 객체에서 파싱한 애디티브(additive) `labels` 필드 추가.
+- **Stacks 탭**: 컨테이너를 compose 프로젝트 라벨 기준으로 그룹화
+  (`com.docker.compose.project` → `io.podman.compose.project` →
+  standalone), 스택별 running/total 칩, 멤버 테이블, 진행률 토스트가 있는
+  일괄 start/stop/restart, 컨테이너 테이블에 스택 배지 + 필터 추가.
+- **리소스 제한 편집기, 네트워크 IPAM, 볼륨 상세, Secrets 탭**: 컨테이너
+  상세에 Edit-limits 섹션 추가(memory/cpus/pids/재시작 정책 →
+  `POST /containers/:id/update`); 네트워크는 확장형 상세 뷰(subnets/
+  gateway/dns, 멤버별 Disconnect 가 있는 멤버 테이블, 컨테이너 연결 선택)를
+  획득; 볼륨은 아코디언 상세(마운트포인트 복사, 드라이버, 생성일, 사람이
+  읽기 쉬운 크기, in-use 칩)를 획득; 신규 Secrets 탭은 list/create/remove
+  를 지원(값은 모달을 닫으면 폼에서 지워집니다).
+- 위 기능들을 뒷받침하는 신규 IPC arm: `ContainerUpdate`,
+  `NetworkInspectDetail`/`NetworkConnect`/`NetworkDisconnect`,
+  `VolumeInspectDetail`, `SecretList`/`SecretCreate`/`SecretRemove`
+  (더 풍부한 inspect 는 `*Detail` 접미사를 가지며, 기존의 가벼운
+  `NetworkInspect`/`VolumeInspect` variant 는 wire 호환을 위해 그대로
+  고정됩니다), podman `update` 래퍼(`Some` 인 필드만 플래그가 됨), 네트워크
+  inspect/connect/disconnect, 볼륨 `inspect_detail`(크기는
+  `system df -v`, in-use 는 `ps --filter volume=`), secret `ls`/
+  `create`/`rm`(비밀 값은 argv 가 아닌 stdin 으로 podman 에 전달되며,
+  secrets 감사 기록에는 이름만 남습니다) 로 구현됩니다.
+- UI v6: 사이드바가 5개의 라벨링된 접이식 섹션(Home / Workloads /
+  Resources / AI Sandbox / System)으로 재구성되고 섹션별 강조 색상과
+  접힘 상태 유지 기능이 추가됨; topbar 에 section›page 브레드크럼, Cmd-K
+  힌트 칩, 전역 "+ Create" 스플릿 버튼 추가; 대시보드 히어로 v2 는 디스크
+  용량 도넛, CPU/Mem 영역 차트, 실시간 이벤트 + 퀵 액션 두 번째 줄 추가;
+  신규 Disk 관리 센터(카테고리별 사용량 바, 회수 가능 용량 안내, 원클릭
+  prune); 검색 하이라이트 + 매치 내비게이션과 파일 다운로드를 지원하는
+  로그 UX; 자체 제작 빈 상태 SVG 일러스트 6종.
+- UI v7: 대시보드 차트와 실시간 이벤트 피드가 마운트 시 빈 화면 대신
+  백필됨; 카운트 열이 클릭 가능한 미니 카드와 Top-consumers 테이블(행별
+  스파크라인, 클릭 시 상세 드로어 열림)로 전환; 기존 `#container/<id>`
+  딥링크와 나란히 동작하는 `?tab=<slug>` URL 라우팅; 7개 엔티티 테이블
+  전체에 우클릭 컨텍스트 메뉴와 `j`/`k`/`Enter` 키보드 내비게이션 추가.
 
 ### 변경됨
 
@@ -118,6 +182,24 @@ UI 자체도 처음부터 다시 설계한 dark-first 디자인 시스템을 갖
 - `cargo-deny`: tauri 스택이 끌어오는 `option-ext` 와 Servo CSS 크레이트에
   대해 범위가 지정된 MPL-2.0 예외 추가 (수정되지 않은 weak-copyleft; MIT
   코드에 영향 없음).
+- 웹 UI 디자인 리뷰 패스 (v6.1): 사이드바 푸터가 더 이상 "read-only - use
+  CLI to mutate" (UI 가 변경 액션을 갖게 된 이후에도 남아 있던 v1 시절
+  문구)를 표시하지 않으며, 대신 실시간 데몬 버전을 보여줍니다. 페이지
+  헤더가 섹션 색상이 은은하게 스민 그라디언트로 시작하고, 접힌 60px
+  레일도 섹션별 툴팁을 유지하며, topbar 에 데몬 헬스 필(점 + running/
+  total)이 추가되고, 카드/타일에 1px 호버 리프트가 적용됩니다
+  (`prefers-reduced-motion` 에서는 비활성화).
+- 웹 UI 밀도 패스 (v6.2): 5개 엔티티 테이블 전반에 Docker Desktop 스타일의
+  두 줄 기본 셀(이름 + 흐린 이미지/id 서브라인)이 적용되고, topbar 에
+  comfortable/compact 밀도 토글이 추가되어 상태가 유지됩니다.
+- 웹 UI 인터랙션 패스 (v7): topbar 의 데몬 상태와 토큰 설정 표시가 더 적은
+  요소로 병합되고 1100px 미만에서는 아이콘 전용 밀도 사이클로 전환됩니다;
+  버튼 SVG 크기가 16px 로 제한됩니다; 긴 이미지 참조는 상태 열과 겹치는
+  대신 툴팁과 함께 말줄임 처리됩니다.
+- `linpodx-daemon` 이 요청마다 kubeconfig 를 다시 파싱하고 TLS 핸드셰이크를
+  다시 협상하는 대신 `K8sAdapter` 를 요청 간 캐시합니다 (6개 k8s dispatch
+  arm 모두 해당); 잘못된 kubeconfig 가 있어도 수정 후 다음 호출까지 매번
+  실패할 필요가 없습니다.
 
 ### 수정됨
 
@@ -143,6 +225,42 @@ UI 자체도 처음부터 다시 설계한 dark-first 디자인 시스템을 갖
   `tracing::warn`) 0 으로 조용히 폴백하지 않습니다. `system info` 의
   `socket_path` 가 `None` 으로 하드코딩되어 있던 것을, 실제 해결된 데몬
   소켓 경로로 전달하도록 수정했습니다.
+- **미리 인증된(mTLS, 헤더, subprotocol, 쿼리 토큰) WS 클라이언트가 더
+  이상 스퓨리어스한 `-32700` 을 받지 않습니다**: CLI 는 구버전 데몬과의
+  호환을 위해 항상 legacy `{"auth":<token>}` 첫 프레임을 보내는데, 소켓이
+  다른 방식으로 이미 인증된 경우 데몬이 이 프레임을 소비하지 않아 stale
+  프레임이 RPC 루프까지 도달했고 그 에러 응답이 첫 실제 응답 자리를
+  차지했습니다(mTLS/remote 버전 라운드트립이 깨짐). 이제 미리 인증된
+  연결은 보수적인 legacy-auth 분류기와 일치하는 프레임을 최대 1개만
+  소비합니다(`auth` 인자를 우연히 가진 실제 RPC 호출은 절대 삼켜지지
+  않습니다).
+- **GPU passthrough**: 호스트 `/etc/group` 에 항목이 없는 이미지(예:
+  Alpine)에서는 이름 기반 `--group-add render/video` 가 결정적으로
+  실패했습니다. 호스트 그룹 이름을 이제 `/etc/group` 을 통해 숫자 GID 로
+  해석하며, 호스트 그룹이 없으면 컨테이너 생성을 실패시키는 대신 경고와
+  함께 해당 플래그를 건너뜁니다.
+- **`linpodx network egress set --profiles-dir`** 가 이제 실제로
+  적용됩니다: 핸들러가 `LINPODX_SANDBOX_PROFILES_DIR` 를 직접 읽었지만,
+  `clap` 은 플래그가 없을 때만 env 로 폴백하므로 플래그만 사용한 호출이
+  잘못된 디렉터리에 조용히 기록되는 동안 `status` 는 실제 디렉터리를
+  읽었습니다(영구적인 `kind=none` 불일치). 이제 다른 프로필 인지 핸들러와
+  마찬가지로 해석된 `cli.profiles_dir` 이 전달되며, 우선순위 규칙은
+  테스트가 있는 `resolve_profiles_dir()` 헬퍼로 분리되었습니다.
+- 웹 UI: 정의되지 않은 CSS 클래스 20개 — 컨테이너 상세 드로어 크롬 전체,
+  차트 호버 레이어, 탭 래퍼 3종, raw HTML 로 렌더링되던 체크박스 행
+  2종 — 가 실제 클래스로 정의되거나 이름이 변경되어, v6 리디자인에서
+  남아 있던 마지막 눈에 띄는 깨짐 영역이 사라졌습니다; compound-aware
+  린트가 이제 크레이트를 undefined-class 0건으로 게이트합니다. 차트
+  툴팁이 `pointer-events: none` 이 되어 호버 깜빡임이 수정되었습니다.
+  1100/900/720px 브레이크포인트에서 v6 의 모든 클래스에 대한 반응형 규칙이
+  추가되었고(히어로가 세로로 쌓이고, management grid 가 1열로 접히고,
+  드로어가 전체 너비가 되고, topbar 칩이 텍스트를 생략함) 라이트 테마
+  색상 워시도 재보정되었습니다.
+- 클러스터: k8s-scale e2e 테스트가 사전 프로비저닝된
+  `linpodx-scale-fixture` 배포가 없는 라이브 클러스터 호스트에서
+  `NotFound` 로 `--ignored` 스위트 전체를 중단시켰습니다; 이제
+  `NotFound` 는 메모와 함께 소프트 스킵되며 다른 에러는 여전히 실패로
+  처리됩니다.
 
 ## [0.1.1] - 2026-05-14
 
