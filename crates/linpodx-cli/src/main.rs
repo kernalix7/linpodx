@@ -8,6 +8,7 @@ use crate::client::Client;
 use crate::commands::cluster::ClusterCmd;
 use crate::commands::completion::Shell as CompletionShell;
 use crate::commands::container::ContainerCmd;
+use crate::commands::container_update::ContainerUpdateArgs;
 use crate::commands::daemon_mgmt::{CertCmd, DaemonCmd};
 use crate::commands::distro::DistroCmd;
 use crate::commands::exec::{handle_exec, handle_exec_pty, handle_logs_follow};
@@ -19,6 +20,7 @@ use crate::commands::passthrough::PassthroughCmd;
 use crate::commands::plugin::PluginCmd;
 use crate::commands::pod::PodCmd;
 use crate::commands::sandbox::SandboxCmd;
+use crate::commands::secret::SecretCmd;
 use crate::commands::session::SessionCmd;
 use crate::commands::snapshot::SnapshotCmd;
 use crate::commands::volume::VolumeCmd;
@@ -137,6 +139,10 @@ enum Cmd {
     /// Manage pods (compose-style stacks). Accepts both `pod` and `pods` (Phase 26).
     #[command(subcommand, visible_alias = "pods")]
     Pod(PodCmd),
+    /// Manage podman secrets (Phase 27). The secret value is never a CLI
+    /// argument — `create` reads it from stdin.
+    #[command(subcommand)]
+    Secret(SecretCmd),
     /// Container lifecycle verbs grouped under one subcommand for users coming
     /// from `docker` / `podman`. Identical behavior to the flat `ps` / `run` /
     /// `start` / `stop` / `rm` / `inspect` / `logs` / `exec` verbs (Phase 18).
@@ -194,6 +200,9 @@ enum Cmd {
         force: bool,
         id: String,
     },
+    /// Live resource-limit update for an existing container (`podman
+    /// update`) — Phase 27.
+    ContainerUpdate(ContainerUpdateArgs),
     /// Show low-level container info as pretty JSON.
     Inspect { id: String },
     /// Print captured stdout/stderr from a container.
@@ -396,6 +405,14 @@ async fn main() -> Result<()> {
                 .await?;
             println!("{}", id);
         }
+        Cmd::ContainerUpdate(args) => {
+            crate::commands::container_update::handle_container_update(
+                &mut client,
+                cli.output,
+                args,
+            )
+            .await?
+        }
         Cmd::Inspect { id } => {
             let id = ContainerId::from(id);
             let inspect: ContainerInspect = client
@@ -461,6 +478,9 @@ async fn main() -> Result<()> {
             .await?
         }
         Cmd::Pod(cmd) => crate::commands::pod::handle_pod(&mut client, cli.output, cmd).await?,
+        Cmd::Secret(cmd) => {
+            crate::commands::secret::handle_secret(&mut client, cli.output, cmd).await?
+        }
         Cmd::Sandbox(cmd) => {
             crate::commands::sandbox::handle_sandbox(&mut client, cli.output, cmd).await?
         }

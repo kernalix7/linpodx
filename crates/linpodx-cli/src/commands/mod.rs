@@ -16,12 +16,18 @@ pub(crate) mod daemon_pin;
 // docker-compat alias surface + shell completion.
 pub(crate) mod completion;
 pub(crate) mod container;
+// Phase 27: flat top-level `linpodx container-update <id>` verb — kept out
+// of `container.rs` (owned by a different lane) on purpose, see the module
+// doc there.
+pub(crate) mod container_update;
 // Sibling files (`image.rs`, `volume.rs`, `network.rs`) hold the rationale
 // for the singular/plural alias mappings on the matching `Cmd` variants in
 // `main.rs`.
 pub(crate) mod image;
 pub(crate) mod network;
 pub(crate) mod pod;
+// Phase 27: `linpodx secret {ls,create,rm}` against podman secrets.
+pub(crate) mod secret;
 pub(crate) mod volume;
 
 // Shared helpers reused by more than one domain module.
