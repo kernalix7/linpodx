@@ -17,6 +17,21 @@ curl -fsSL https://raw.githubusercontent.com/kernalix7/linpodx/main/uninstall.sh
 
 > **상태 (v0.1.0 pre-alpha, 2026-05-13):** Phase 0..17 구현이 저장소에 포함되어 있습니다. 컨테이너 / 이미지 / 볼륨 / 네트워크 CRUD, 데몬 이벤트 버스, Tauri 기반 데스크톱 GUI, YAML 샌드박스 정책, 승인 게이트, 스냅샷, 세션 타임라인, host-stdio 브리지, GUI 패스스루, 멀티 디스트로 템플릿, 원격 데몬, 플러그인, 클러스터 기반, 스냅샷 암호화까지 포함합니다. `cargo test --workspace` 기준 829 passed / 0 failed / 54 ignored 입니다.
 
+데몬이 서빙하는 웹 UI는 18개 탭(Dashboard, Containers, Pods, Stacks, Images, Volumes, Networks, Secrets, Snapshots, Sessions, Sandbox, Audit, Cluster, Pinned Clients, Plugins, Disk, Disk Usage, Settings)으로 구성되며, Tauri 2 데스크톱 셸(`linpodx-gui`)이 로컬에서 동일한 UI를 그대로 띄웁니다. Pods와 Compose 스타일 Stacks로 컨테이너를 묶어 보고, Secrets 탭에서 Podman 시크릿 스토어를 관리하며, Disk 탭에서 이미지·컨테이너·볼륨에 걸친 회수 가능 공간을 정리합니다. 목록의 각 행에는 우클릭 컨텍스트 메뉴가 붙어 있습니다. 컨테이너 매니저 옆에는 AI 에이전트 샌드박스 스위트가 있습니다 — YAML 정책 프로필, 승인 게이트, 해시 체인 기반의 변조 감지 감사 로그, 컨테이너별 세션 타임라인, 스냅샷/롤백 워크플로.
+
+## 스크린샷
+
+<table>
+<tr>
+<td width="50%"><img src="screenshots/dashboard.png" alt="Dashboard 탭 — 디스크 사용량, CPU/메모리 스파크라인, 리소스 카운트, 실시간 이벤트"><br><sub align="center">Dashboard — 디스크, CPU/메모리, 실시간 이벤트를 한눈에</sub></td>
+<td width="50%"><img src="screenshots/containers.png" alt="Containers 탭 — stack, image, status, CPU, memory 열이 있는 컨테이너 목록"><br><sub align="center">Containers — 생명주기 상태, Stack 그룹핑, 리소스 사용량</sub></td>
+</tr>
+<tr>
+<td width="50%"><img src="screenshots/disk.png" alt="Disk 탭 — images, containers, volumes, build cache 별 회수 가능 공간"><br><sub align="center">Disk — 이미지·컨테이너·볼륨별 회수 가능 공간</sub></td>
+<td width="50%"><img src="screenshots/desktop-shell.png" alt="Dashboard 탭을 표시 중인 linpodx-gui Tauri 데스크톱 셸"><br><sub align="center">데스크톱 셸 — 동일한 웹 UI를 표시하는 Tauri 2 앱</sub></td>
+</tr>
+</table>
+
 ---
 
 ## 왜 linpodx인가

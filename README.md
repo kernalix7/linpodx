@@ -44,6 +44,21 @@ curl -fsSL https://raw.githubusercontent.com/kernalix7/linpodx/main/uninstall.sh
 
 **No Docker Desktop VM.** linpodx talks to rootless Podman on Linux, keeps the daemon local by default, and exposes the same container state through CLI, GUI, and event subscriptions.
 
+linpodx pairs an 18-tab daemon-served web UI (Dashboard, Containers, Pods, Stacks, Images, Volumes, Networks, Secrets, Snapshots, Sessions, Sandbox, Audit, Cluster, Pinned Clients, Plugins, Disk, Disk Usage, Settings) with a thin Tauri 2 desktop shell that displays that same UI locally. Pods and compose-style Stacks group related containers, a Secrets tab manages the Podman secret store, a Disk center reclaims space across images/containers/volumes, and resource rows carry right-click context menus for common actions. Alongside the container manager sits the AI-agent sandbox suite: YAML policy profiles, approval gates, a tamper-evident hash-chained audit log, per-container session timelines, and snapshot/rollback workflows.
+
+## Screenshots
+
+<table>
+<tr>
+<td width="50%"><img src="docs/screenshots/dashboard.png" alt="Dashboard tab showing disk usage, CPU/memory sparklines, resource counts, and live events"><br><sub align="center">Dashboard — disk, CPU/memory, and live events at a glance</sub></td>
+<td width="50%"><img src="docs/screenshots/containers.png" alt="Containers tab listing containers with stack, image, status, CPU, and memory columns"><br><sub align="center">Containers — lifecycle state, stack grouping, resource usage</sub></td>
+</tr>
+<tr>
+<td width="50%"><img src="docs/screenshots/disk.png" alt="Disk tab breaking down reclaimable space by images, containers, volumes, and build cache"><br><sub align="center">Disk — reclaimable space by images, containers, and volumes</sub></td>
+<td width="50%"><img src="docs/screenshots/desktop-shell.png" alt="linpodx-gui Tauri desktop shell displaying the Dashboard tab"><br><sub align="center">Desktop shell — the Tauri 2 app displaying the same web UI</sub></td>
+</tr>
+</table>
+
 ## Why linpodx
 
 | Tool | Gap linpodx targets |

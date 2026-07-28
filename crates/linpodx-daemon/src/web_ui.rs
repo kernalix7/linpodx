@@ -123,6 +123,11 @@ pub fn router(
             "/plugin/key/revoke-cluster",
             post(post_plugin_key_revoke_cluster),
         )
+        // Sonnet lane — mount the two REST routes `ClusterView` /
+        // `PluginsView` already handle gracefully when absent (404 falls
+        // back to a friendly empty state / the JSON-RPC leg respectively).
+        .route("/cluster/containers", get(get_cluster_containers))
+        .route("/plugin/keys", get(get_plugin_keys))
         .route(
             "/sandbox/auto-encrypt",
             get(get_sandbox_auto_encrypt).put(put_sandbox_auto_encrypt),
@@ -789,6 +794,48 @@ pub(crate) struct AutoEncryptBody {
 
 async fn get_sandbox_auto_encrypt(State(state): State<WebUiState>) -> Response<Body> {
     dispatch(&state, Method::SandboxSnapshotAutoTriggerStatus).await
+}
+
+/// `GET /api/v1/cluster/containers` — Phase 9/16 aggregated container view.
+///
+/// `ClusterContainerView` itself always succeeds (it falls back to the
+/// gossip aggregation over an empty peer list when no Raft node is wired),
+/// so dispatching it unconditionally would turn "clustering isn't set up on
+/// this daemon" into a spuriously "enabled" empty table. `ClusterView`'s
+/// probe treats `http 404` as the "not enabled" signal (see its hint text,
+/// which points operators at `--cluster-raft`), so gate on the same signal
+/// here: no wired Raft node -> 404, matching the daemon flag that actually
+/// turns clustering on.
+async fn get_cluster_containers(State(state): State<WebUiState>) -> Response<Body> {
+    if state.dispatcher.raft.is_none() {
+        return cluster_not_enabled();
+    }
+    dispatch(&state, Method::ClusterContainerView).await
+}
+
+/// `GET /api/v1/plugin/keys` — Phase 16 `KeyRegistry` listing. Unlike the
+/// cluster view above, `plugin_key_list` has no "disabled" state to gate on
+/// (it always reads `KeyRegistry::from_env`, returning an empty list when
+/// no keys are configured) so this is a direct passthrough; `PluginsView`'s
+/// populated/empty rendering takes over from here.
+async fn get_plugin_keys(State(state): State<WebUiState>) -> Response<Body> {
+    dispatch(&state, Method::PluginKeyList).await
+}
+
+/// 404 envelope for `get_cluster_containers` when no Raft node is wired,
+/// matching the `{ "error": { code, message } }` shape the rest of the Web
+/// UI surface uses (see `unauthorized()` / `error_to_response()`).
+fn cluster_not_enabled() -> Response<Body> {
+    let body = json!({
+        "error": {
+            "code": error_codes::UNSUPPORTED,
+            "message": "clustering not enabled on this daemon \
+                         (start with --cluster-raft to enable cluster.container_view)",
+        }
+    });
+    let mut response = Json(body).into_response();
+    *response.status_mut() = StatusCode::NOT_FOUND;
+    response
 }
 
 async fn put_sandbox_auto_encrypt(

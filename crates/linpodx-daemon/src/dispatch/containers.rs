@@ -369,6 +369,14 @@ impl Dispatcher {
     }
 }
 
+// Fake-podman dispatch-arm coverage harness (podman-free, CI-safe). Lives in a
+// sibling file but is declared here because `linpodx-daemon` has no `lib`
+// target, so it cannot be an integration test under `tests/`. Test-only seam —
+// no production behaviour changes.
+#[cfg(test)]
+#[path = "mock_podman.rs"]
+mod mock_podman;
+
 #[cfg(test)]
 mod tests {
     use chrono::Utc;
