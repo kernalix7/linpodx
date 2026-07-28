@@ -39,32 +39,43 @@ pub struct SnapshotManager {
     /// fully implemented in v0.1, the others are scaffolds that return runtime errors
     /// from their mutating methods.
     backends: HashMap<SnapshotBackendKind, Arc<dyn SnapshotBackend>>,
+    /// Typed handle to the same `OverlayfsBackend` stored (as a trait object) in
+    /// `backends`. The overlayfs backend owns its live fuse-overlayfs mount
+    /// registry as instance state (was a process-global before); the daemon
+    /// looks mounts up through [`SnapshotManager::overlayfs_backend`] so commit
+    /// (via `backends`) and query (via this handle) share one registry — the
+    /// `OverlayfsBackend`'s registry is `Arc`-backed, so the clone in `backends`
+    /// and this field point at the same table.
+    overlayfs: runtime_snapshot::OverlayfsBackend,
 }
 
 impl SnapshotManager {
     pub fn new(db: Arc<Database>, publisher: Arc<dyn EventPublisher>) -> Self {
+        // Construct the overlayfs backend once and share it (Arc-backed registry)
+        // between the trait-object map and the typed lookup handle.
+        let overlayfs = runtime_snapshot::OverlayfsBackend::default();
         let mut backends: HashMap<SnapshotBackendKind, Arc<dyn SnapshotBackend>> = HashMap::new();
         backends.insert(
             SnapshotBackendKind::PodmanCommit,
             Arc::new(runtime_snapshot::PodmanCommitBackend),
         );
-        backends.insert(
-            SnapshotBackendKind::Overlayfs,
-            Arc::new(runtime_snapshot::OverlayfsBackend),
-        );
+        backends.insert(SnapshotBackendKind::Overlayfs, Arc::new(overlayfs.clone()));
         backends.insert(
             SnapshotBackendKind::Btrfs,
-            Arc::new(runtime_snapshot::BtrfsBackend),
+            Arc::new(runtime_snapshot::BtrfsBackend::default()),
         );
         Self {
             db,
             publisher,
             backends,
+            overlayfs,
         }
     }
 
     /// Test-only / explicit backend injection. Replaces the default registry — useful for
-    /// unit tests that want to verify the manager dispatches to a specific backend.
+    /// unit tests that want to verify the manager dispatches to a specific backend. The
+    /// overlayfs mount-lookup handle is a fresh default (tests that inject backends do not
+    /// exercise `overlayfs_backend()`).
     pub fn with_backends(
         db: Arc<Database>,
         publisher: Arc<dyn EventPublisher>,
@@ -74,7 +85,15 @@ impl SnapshotManager {
             db,
             publisher,
             backends,
+            overlayfs: runtime_snapshot::OverlayfsBackend::default(),
         }
+    }
+
+    /// The overlayfs backend that owns this manager's live fuse-overlayfs mount
+    /// registry. The daemon uses it to resolve a snapshot image's live mount path
+    /// (for `--rootfs` injection) instead of the former process-global lookup.
+    pub fn overlayfs_backend(&self) -> &runtime_snapshot::OverlayfsBackend {
+        &self.overlayfs
     }
 
     /// Read the backend kind recorded on a `snapshots` row. Returns `None` if the row

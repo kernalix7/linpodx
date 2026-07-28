@@ -24,9 +24,9 @@ use linpodx_common::types::{ContainerId, ImageId};
 use sha2::{Digest, Sha256};
 use sqlx::Row;
 use std::collections::HashMap;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::process::Stdio;
-use std::sync::{Arc, Mutex, OnceLock};
+use std::sync::{Arc, Mutex};
 use std::time::SystemTime;
 use tokio::io::{AsyncBufReadExt, BufReader};
 use tracing::{instrument, warn};
@@ -624,10 +624,11 @@ pub trait SnapshotBackend: Send + Sync {
     /// Short human-readable note describing the backend's status / limitations. Surfaced
     /// in the `snapshot backend list` CLI output.
     fn note(&self) -> &'static str;
-    /// Phase 16 Stream B — at-rest encryption config. Returns `Some(_)` when the
-    /// backend was constructed with `LINPODX_SNAPSHOT_ENCRYPT_PASSPHRASE` /
-    /// `LINPODX_SNAPSHOT_KEY` set; `None` otherwise (encryption disabled). The
-    /// default is `None` so existing backends keep working unchanged.
+    /// Phase 16 Stream B — at-rest encryption config. The default is `None`
+    /// (encryption disabled). Backends do not encrypt in their `commit` flow;
+    /// at-rest encryption is owned by the daemon-side encryptor / rotation
+    /// paths (see [`PodmanCommitBackend`]'s note), so no shipped backend
+    /// overrides this.
     fn encryption_config(&self) -> Option<&EncryptionConfig> {
         None
     }
@@ -635,12 +636,13 @@ pub trait SnapshotBackend: Send + Sync {
 
 /// Default backend: wraps the existing `podman commit` / `tag` / `inspect` / `rmi` flow.
 ///
-/// Phase 16 Stream B: encryption is opt-in via the `LINPODX_SNAPSHOT_KEY` /
-/// `LINPODX_SNAPSHOT_ENCRYPT_PASSPHRASE` env vars. The backend itself stays a
-/// unit struct so existing call sites (`PodmanCommitBackend`, no `()`) keep
-/// compiling. The active config is read on demand by [`active_encryption_config`]
-/// — cheap (a single env read + KDF) and avoids forcing every backend
-/// constructor to thread a config through.
+/// The backend stays a zero-sized unit struct so cross-crate call sites can keep
+/// constructing it by bare name (`PodmanCommitBackend`). At-rest snapshot
+/// encryption is deliberately *not* a backend concern: it is driven separately
+/// by the daemon's auto-encrypt hook and the key-rotation path, each of which
+/// owns its own [`EncryptionConfig`] (constructed once at daemon startup from
+/// the `LINPODX_SNAPSHOT_KEY` / `LINPODX_SNAPSHOT_ENCRYPT_PASSPHRASE` env vars,
+/// injectable for tests, and replaceable on rotation).
 #[derive(Debug, Default, Clone, Copy)]
 pub struct PodmanCommitBackend;
 
@@ -672,30 +674,19 @@ impl SnapshotBackend for PodmanCommitBackend {
     fn note(&self) -> &'static str {
         "default; uses `podman commit` to build an OCI image (works on every host)"
     }
-    fn encryption_config(&self) -> Option<&EncryptionConfig> {
-        active_encryption_config()
-    }
-}
-
-/// Phase 16 Stream B — process-wide active encryption config, cached once at
-/// first call. `OnceLock` guarantees no repeated KDF work; tests bypass the
-/// cache by going through [`encrypt_committed_image`] with an explicit config.
-///
-/// Returns `None` when neither encryption env var is set (encryption disabled
-/// — the v0.1 backward-compatible default). Returns `Some(cfg)` otherwise.
-pub fn active_encryption_config() -> Option<&'static EncryptionConfig> {
-    static SLOT: OnceLock<Option<EncryptionConfig>> = OnceLock::new();
-    SLOT.get_or_init(|| snapshot_crypto::EncryptionConfig::from_env().ok().flatten())
-        .as_ref()
-}
-
-impl PodmanCommitBackend {
-    /// Resolve the active encryption config. Convenience wrapper around the
-    /// process-wide [`active_encryption_config`] — returned by reference so the
-    /// trait method's `Option<&EncryptionConfig>` signature works.
-    pub fn current_encryption() -> Option<&'static EncryptionConfig> {
-        active_encryption_config()
-    }
+    // `encryption_config()` intentionally uses the trait default (`None`).
+    //
+    // At-rest snapshot encryption is NOT performed by the backend's `commit`
+    // flow — it is a separate step driven by the daemon's auto-encrypt hook
+    // (`RuntimeSnapshotEncryptor`, which *owns* its `EncryptionConfig`,
+    // constructed once at daemon startup from `LINPODX_SNAPSHOT_KEY` /
+    // `LINPODX_SNAPSHOT_ENCRYPT_PASSPHRASE`) and by the key-rotation path
+    // (`rotate_snapshot_key`, which takes explicit old/new configs). Neither
+    // reads the backend's `encryption_config()`, so exposing a process-wide
+    // frozen config here (the old `active_encryption_config` `OnceLock`) served
+    // no production consumer and actively fought key rotation: once seeded it
+    // could never reflect a rotated key. The owned/injectable/replaceable
+    // config now lives entirely on those daemon-side owners.
 }
 
 // =====================================================================================
@@ -765,6 +756,20 @@ pub fn encrypted_store_root() -> PathBuf {
         })
         .unwrap_or_else(|| PathBuf::from("/tmp"));
     base.join("linpodx/encrypted-snapshots")
+}
+
+/// Single crate-wide serialisation lock for tests that mutate
+/// `LINPODX_ENCRYPTED_SNAPSHOT_ROOT`. `encrypted_store_root()` still reads that
+/// env var in production (unchanged), and unlike the on-disk overlay store there
+/// is no owned-config seam for it (the encryption pipeline's public fns are
+/// consumed by the daemon and can't take a root param here). So the tests in
+/// `snapshot::tests` and `snapshot_key_rotation::tests` that pin the encrypted
+/// root to a tempdir must share **one** mutex — previously they used two
+/// independent locks and raced on the shared env var under parallel `cargo test`.
+#[cfg(test)]
+pub(crate) fn encrypted_root_test_lock() -> &'static Mutex<()> {
+    static LOCK: std::sync::OnceLock<Mutex<()>> = std::sync::OnceLock::new();
+    LOCK.get_or_init(|| Mutex::new(()))
 }
 
 /// Per-image directory under [`encrypted_store_root`].
@@ -997,61 +1002,84 @@ pub fn remove_encrypted_artifacts(image_ref: &str) -> Result<()> {
 ///
 /// Phase 9 Stream D: when `fuse-overlayfs` is on PATH, `commit` additionally
 /// mounts the resulting `lower/upper/work` triple at
-/// `/tmp/linpodx-overlay-<sha8>` and parks the [`MountedRoot`] handle in a
-/// process-level registry keyed by image_ref. Hosts without the binary fall
+/// `/tmp/linpodx-overlay-<sha8>` and parks the [`MountedRoot`] handle in an
+/// instance-owned registry keyed by image_ref. Hosts without the binary fall
 /// back to the metadata-only behaviour and emit a warn (no audit entry).
-#[derive(Debug, Default, Clone, Copy)]
-pub struct OverlayfsBackend;
-
-const OVERLAYFS_MODULE_PATH: &str = "/sys/module/overlay";
-
-/// Process-level registry mapping `image_ref` → live mount handle. Survives
-/// across `commit`/`mount_path_for` calls within the same daemon process; on
-/// shutdown the handles' Drop impls run `fusermount3 -u`.
-fn mount_registry() -> &'static Mutex<HashMap<String, MountedRoot>> {
-    static REG: OnceLock<Mutex<HashMap<String, MountedRoot>>> = OnceLock::new();
-    REG.get_or_init(|| Mutex::new(HashMap::new()))
+///
+/// State ownership (was process-global `OnceLock`s before): the on-disk store
+/// root, the live-mount registry, and the audit sink are all owned fields
+/// resolved once at construction. [`OverlayfsBackend::default`] reads
+/// `LINPODX_OVERLAYFS_ROOT` exactly once (operator behaviour unchanged); tests
+/// inject a tempdir via [`OverlayfsBackend::with_store_root`]. The registry is
+/// an `Arc<Mutex<_>>` so cloning the backend (e.g. to place one copy in a
+/// `SnapshotManager` backend map and keep a typed handle for mount lookups)
+/// shares the same live-mount table.
+#[derive(Clone)]
+pub struct OverlayfsBackend {
+    /// On-disk store root, resolved once at construction.
+    store_root: PathBuf,
+    /// Live fuse-overlayfs mounts keyed by image_ref. `Arc` so clones share it.
+    registry: Arc<Mutex<HashMap<String, MountedRoot>>>,
+    /// Audit sink for mount/unmount events. Defaults to [`NoopAuditSink`]
+    /// (the daemon never installed a different one in production).
+    audit_sink: Arc<dyn AuditSink>,
 }
 
-/// Process-level audit sink used by `OverlayfsBackend.commit` when it triggers
-/// a mount. Defaults to `NoopAuditSink`. The daemon installs the real sandbox
-/// audit sink at startup via [`set_overlayfs_audit_sink`].
-fn audit_sink_slot() -> &'static Mutex<Arc<dyn AuditSink>> {
-    static SINK: OnceLock<Mutex<Arc<dyn AuditSink>>> = OnceLock::new();
-    SINK.get_or_init(|| Mutex::new(Arc::new(NoopAuditSink)))
-}
-
-/// Install the audit sink used by future `OverlayfsBackend` mount events. Idempotent —
-/// the daemon calls this once during startup. Tests override per-call by inserting their
-/// own sink, then restoring `NoopAuditSink` on teardown if desired.
-pub fn set_overlayfs_audit_sink(sink: Arc<dyn AuditSink>) {
-    if let Ok(mut g) = audit_sink_slot().lock() {
-        *g = sink;
+impl std::fmt::Debug for OverlayfsBackend {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        // `audit_sink` is a trait object without `Debug`; elide it.
+        f.debug_struct("OverlayfsBackend")
+            .field("store_root", &self.store_root)
+            .finish_non_exhaustive()
     }
 }
 
-fn current_audit_sink() -> Arc<dyn AuditSink> {
-    audit_sink_slot()
-        .lock()
-        .map(|g| Arc::clone(&*g))
-        .unwrap_or_else(|p| Arc::clone(&*p.into_inner()))
+const OVERLAYFS_MODULE_PATH: &str = "/sys/module/overlay";
+
+impl Default for OverlayfsBackend {
+    fn default() -> Self {
+        // Single startup env read of `LINPODX_OVERLAYFS_ROOT`.
+        Self::with_store_root(overlayfs::store_root())
+    }
 }
 
 impl OverlayfsBackend {
+    /// Construct a backend rooted at an explicit on-disk store `store_root`,
+    /// with a fresh (empty) live-mount registry and a no-op audit sink. This is
+    /// the injection seam tests use instead of mutating `LINPODX_OVERLAYFS_ROOT`.
+    pub fn with_store_root(store_root: PathBuf) -> Self {
+        Self {
+            store_root,
+            registry: Arc::new(Mutex::new(HashMap::new())),
+            audit_sink: Arc::new(NoopAuditSink),
+        }
+    }
+
+    /// Builder-style override of the audit sink used for mount/unmount events.
+    pub fn with_audit_sink(mut self, sink: Arc<dyn AuditSink>) -> Self {
+        self.audit_sink = sink;
+        self
+    }
+
+    /// The resolved on-disk store root this backend materialises snapshots under.
+    pub fn store_root(&self) -> &Path {
+        &self.store_root
+    }
+
     /// Mount path currently registered for `image_ref`, if any. Returns `None`
     /// when the image was committed on a host without `fuse-overlayfs`, or when
-    /// no commit has happened in this process yet.
-    pub fn mount_path_for(image_ref: &str) -> Option<PathBuf> {
-        let g = mount_registry().lock().ok()?;
+    /// no commit has happened through this backend yet.
+    pub fn mount_path_for(&self, image_ref: &str) -> Option<PathBuf> {
+        let g = self.registry.lock().ok()?;
         g.get(image_ref).map(|m| m.mount_path().to_path_buf())
     }
 
     /// Drop and unmount the registered mount for `image_ref` (if any). Emits
     /// `SnapshotUnmounted` on success. Used by `remove` and by tests/cleanup
     /// paths that want explicit teardown rather than waiting for process exit.
-    pub async fn unmount_for(image_ref: &str) {
+    pub async fn unmount_for(&self, image_ref: &str) {
         let path = {
-            let mut g = match mount_registry().lock() {
+            let mut g = match self.registry.lock() {
                 Ok(g) => g,
                 Err(p) => p.into_inner(),
             };
@@ -1062,7 +1090,7 @@ impl OverlayfsBackend {
                 "image_ref": image_ref,
                 "mount_path": p.display().to_string(),
             });
-            current_audit_sink()
+            self.audit_sink
                 .record(AuditSinkKind::SnapshotUnmounted, None, None, payload)
                 .await;
             // The MountedRoot Drop already ran when removed from the registry above.
@@ -1088,7 +1116,8 @@ impl SnapshotBackend for OverlayfsBackend {
         // ensure_dirs is sync FS work; defer to a blocking task.
         let dirs = {
             let image_ref = image_ref.clone();
-            tokio::task::spawn_blocking(move || overlayfs::ensure_dirs(&image_ref))
+            let root = self.store_root.clone();
+            tokio::task::spawn_blocking(move || overlayfs::ensure_dirs_in(&root, &image_ref))
                 .await
                 .map_err(|e| Error::Runtime {
                     message: format!("overlayfs ensure_dirs join: {e}"),
@@ -1129,7 +1158,8 @@ impl SnapshotBackend for OverlayfsBackend {
         };
         {
             let image_ref = image_ref.clone();
-            tokio::task::spawn_blocking(move || overlayfs::write_meta(&image_ref, &meta))
+            let root = self.store_root.clone();
+            tokio::task::spawn_blocking(move || overlayfs::write_meta_in(&root, &image_ref, &meta))
                 .await
                 .map_err(|e| Error::Runtime {
                     message: format!("overlayfs write_meta join: {e}"),
@@ -1142,10 +1172,10 @@ impl SnapshotBackend for OverlayfsBackend {
         // Phase 9 Stream D: best-effort `fuse-overlayfs` mount. Failures are
         // logged and swallowed — the metadata-only commit above is the source
         // of truth; a missing mount is a degraded (not failed) state.
-        let audit = current_audit_sink();
-        match overlayfs::mount_layers(&image_ref, audit).await {
+        let audit = Arc::clone(&self.audit_sink);
+        match overlayfs::mount_layers_in(&self.store_root, &image_ref, audit).await {
             Ok(Some(handle)) => {
-                if let Ok(mut g) = mount_registry().lock() {
+                if let Ok(mut g) = self.registry.lock() {
                     g.insert(image_ref.clone(), handle);
                 }
             }
@@ -1161,11 +1191,11 @@ impl SnapshotBackend for OverlayfsBackend {
     }
 
     async fn tag(&self, _podman: &Podman, source: &str, target: &str) -> Result<()> {
-        let source_dir = overlayfs::image_dir(source);
+        let source_dir = overlayfs::image_dir_in(&self.store_root, source);
         if !source_dir.exists() {
             return Err(Error::NotFound(format!("overlayfs image {source}")));
         }
-        let target_dir = overlayfs::image_dir(target);
+        let target_dir = overlayfs::image_dir_in(&self.store_root, target);
         // Don't clobber an existing target — reject so callers don't lose data.
         if target_dir.exists() {
             return Err(Error::Runtime {
@@ -1203,16 +1233,18 @@ impl SnapshotBackend for OverlayfsBackend {
 
     async fn image_size(&self, _podman: &Podman, image: &str) -> Result<i64> {
         let image_owned = image.to_string();
-        let cached = tokio::task::spawn_blocking(move || overlayfs::read_meta(&image_owned))
-            .await
-            .map_err(|e| Error::Runtime {
-                message: format!("overlayfs read_meta join: {e}"),
-            })?;
+        let root = self.store_root.clone();
+        let cached =
+            tokio::task::spawn_blocking(move || overlayfs::read_meta_in(&root, &image_owned))
+                .await
+                .map_err(|e| Error::Runtime {
+                    message: format!("overlayfs read_meta join: {e}"),
+                })?;
         if let Ok(meta) = cached {
             return Ok(meta.size_bytes as i64);
         }
         // Fall back to a recursive walk of upper/.
-        let upper = overlayfs::image_dir(image).join("upper");
+        let upper = overlayfs::image_dir_in(&self.store_root, image).join("upper");
         if !upper.exists() {
             return Err(Error::NotFound(format!("overlayfs image {image}")));
         }
@@ -1230,8 +1262,8 @@ impl SnapshotBackend for OverlayfsBackend {
     async fn remove(&self, _podman: &Podman, image: &str, force: bool) -> Result<()> {
         // Drop any live fuse-overlayfs mount before deleting the on-disk store
         // so `fusermount3 -u` runs against a path that still exists.
-        Self::unmount_for(image).await;
-        let dir = overlayfs::image_dir(image);
+        self.unmount_for(image).await;
+        let dir = overlayfs::image_dir_in(&self.store_root, image);
         match tokio::fs::remove_dir_all(&dir).await {
             Ok(()) => Ok(()),
             Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
@@ -1287,8 +1319,50 @@ async fn resolve_container_image(podman: &Podman, container_id: &str) -> Result<
 /// `podman inspect` and snapshots that subvolume; if the inspect path can't be
 /// resolved (rootless / vfs storage), `commit` falls back to `PodmanCommitBackend`
 /// with a warn so callers still get an image rather than an outright failure.
-#[derive(Debug, Default, Clone, Copy)]
-pub struct BtrfsBackend;
+///
+/// State ownership (was env reads before): the store root and an optional
+/// availability override are owned fields resolved once at construction.
+/// [`BtrfsBackend::default`] reads `LINPODX_OVERLAYFS_ROOT` (via
+/// `overlayfs::store_root`) and `LINPODX_BTRFS_AVAILABLE` exactly once — operator
+/// behaviour unchanged. Tests inject both directly via
+/// [`BtrfsBackend::with_config`] instead of mutating process env.
+#[derive(Debug, Clone)]
+pub struct BtrfsBackend {
+    /// Store root that per-image subvolumes live under.
+    store_root: PathBuf,
+    /// `Some(true|false)` forces `is_available()` deterministically (test seam,
+    /// formerly the `LINPODX_BTRFS_AVAILABLE` env override); `None` probes the
+    /// host (`btrfs --version` + `stat -f` on the store root).
+    available_override: Option<bool>,
+}
+
+impl Default for BtrfsBackend {
+    fn default() -> Self {
+        // Single startup read of both env knobs.
+        let available_override = std::env::var_os("LINPODX_BTRFS_AVAILABLE").map(|v| v == "1");
+        Self {
+            store_root: overlayfs::store_root(),
+            available_override,
+        }
+    }
+}
+
+impl BtrfsBackend {
+    /// Construct a backend with an explicit store root and availability override.
+    /// The injection seam tests use instead of mutating process env.
+    pub fn with_config(store_root: PathBuf, available_override: Option<bool>) -> Self {
+        Self {
+            store_root,
+            available_override,
+        }
+    }
+
+    /// Per-image subvolume path: `<store_root>/<sha8(image_ref)>`. Reuses
+    /// `overlayfs::sha8` so btrfs and overlayfs share a stable naming scheme.
+    fn image_path(&self, image_ref: &str) -> PathBuf {
+        self.store_root.join(overlayfs::sha8(image_ref))
+    }
+}
 
 mod btrfs_cmd {
     //! Thin async wrappers around the `btrfs` CLI. Each helper returns
@@ -1341,12 +1415,6 @@ mod btrfs_cmd {
     }
 }
 
-/// Resolve the per-image subvolume path under the overlay store root. Reuses
-/// `overlayfs::sha8` so btrfs and overlayfs share a stable naming scheme.
-fn btrfs_image_path(image_ref: &str) -> PathBuf {
-    overlayfs::store_root().join(overlayfs::sha8(image_ref))
-}
-
 async fn btrfs_resolve_merged_dir(podman: &Podman, container_id: &str) -> Result<PathBuf> {
     let mut cmd = podman.base_command();
     cmd.arg("inspect")
@@ -1377,7 +1445,7 @@ impl SnapshotBackend for BtrfsBackend {
         container_id: &ContainerId,
         image_ref: &str,
     ) -> Result<ImageId> {
-        let dest = btrfs_image_path(image_ref);
+        let dest = self.image_path(image_ref);
         if let Some(parent) = dest.parent() {
             tokio::fs::create_dir_all(parent)
                 .await
@@ -1410,11 +1478,11 @@ impl SnapshotBackend for BtrfsBackend {
         }
     }
     async fn tag(&self, _podman: &Podman, source: &str, target: &str) -> Result<()> {
-        let src = btrfs_image_path(source);
+        let src = self.image_path(source);
         if !src.exists() {
             return Err(Error::NotFound(format!("btrfs image {source}")));
         }
-        let dst = btrfs_image_path(target);
+        let dst = self.image_path(target);
         if dst.exists() {
             return Err(Error::Runtime {
                 message: format!("btrfs target image already exists: {target}"),
@@ -1437,7 +1505,7 @@ impl SnapshotBackend for BtrfsBackend {
             })
     }
     async fn image_size(&self, _podman: &Podman, image: &str) -> Result<i64> {
-        let path = btrfs_image_path(image);
+        let path = self.image_path(image);
         if !path.exists() {
             return Err(Error::NotFound(format!("btrfs image {image}")));
         }
@@ -1464,7 +1532,7 @@ impl SnapshotBackend for BtrfsBackend {
         })
     }
     async fn remove(&self, _podman: &Podman, image: &str, force: bool) -> Result<()> {
-        let path = btrfs_image_path(image);
+        let path = self.image_path(image);
         if !path.exists() {
             return if force {
                 Ok(())
@@ -1485,9 +1553,10 @@ impl SnapshotBackend for BtrfsBackend {
         }
     }
     async fn is_available(&self) -> bool {
-        // Test override so unit tests can drive both branches deterministically.
-        if let Some(v) = std::env::var_os("LINPODX_BTRFS_AVAILABLE") {
-            return v == "1";
+        // Owned override (was the `LINPODX_BTRFS_AVAILABLE` env read) lets unit
+        // tests drive both branches deterministically without touching process env.
+        if let Some(forced) = self.available_override {
+            return forced;
         }
         // Two probes: btrfs CLI installed AND store_root resides on btrfs.
         let cli_ok = tokio::process::Command::new("btrfs")
@@ -1501,7 +1570,7 @@ impl SnapshotBackend for BtrfsBackend {
         if !cli_ok {
             return false;
         }
-        let store = overlayfs::store_root();
+        let store = self.store_root.clone();
         // Best effort: probe the parent if the store_root itself doesn't exist yet.
         let probe = if store.exists() {
             store.clone()
@@ -1532,8 +1601,8 @@ impl SnapshotBackend for BtrfsBackend {
 pub async fn backend_list() -> SnapshotBackendListResponse {
     let backends: Vec<Box<dyn SnapshotBackend>> = vec![
         Box::new(PodmanCommitBackend),
-        Box::new(OverlayfsBackend),
-        Box::new(BtrfsBackend),
+        Box::new(OverlayfsBackend::default()),
+        Box::new(BtrfsBackend::default()),
     ];
     let mut out = Vec::with_capacity(backends.len());
     for b in &backends {
@@ -1546,12 +1615,17 @@ pub async fn backend_list() -> SnapshotBackendListResponse {
     out
 }
 
-/// Construct a backend instance for a given kind. Cheap — backends are zero-sized.
+/// Construct a backend instance for a given kind. Cheap — `PodmanCommit` is
+/// zero-sized; `Overlayfs` / `Btrfs` resolve their store root (and, for btrfs,
+/// the availability override) from the environment once via `default()`. This
+/// factory is used for one-shot operations (e.g. `snapshot backend list`); the
+/// daemon's long-lived `SnapshotManager` owns a single shared backend set so
+/// the overlayfs live-mount registry is consistent across commit/query.
 pub fn backend_for(kind: SnapshotBackendKind) -> Box<dyn SnapshotBackend> {
     match kind {
         SnapshotBackendKind::PodmanCommit => Box::new(PodmanCommitBackend),
-        SnapshotBackendKind::Overlayfs => Box::new(OverlayfsBackend),
-        SnapshotBackendKind::Btrfs => Box::new(BtrfsBackend),
+        SnapshotBackendKind::Overlayfs => Box::new(OverlayfsBackend::default()),
+        SnapshotBackendKind::Btrfs => Box::new(BtrfsBackend::default()),
     }
 }
 
@@ -2094,12 +2168,15 @@ mod tests {
 
     #[test]
     fn overlayfs_backend_kind_is_overlayfs() {
-        assert_eq!(OverlayfsBackend.kind(), SnapshotBackendKind::Overlayfs);
+        assert_eq!(
+            OverlayfsBackend::default().kind(),
+            SnapshotBackendKind::Overlayfs
+        );
     }
 
     #[test]
     fn btrfs_backend_kind_is_btrfs() {
-        assert_eq!(BtrfsBackend.kind(), SnapshotBackendKind::Btrfs);
+        assert_eq!(BtrfsBackend::default().kind(), SnapshotBackendKind::Btrfs);
     }
 
     #[tokio::test]
@@ -2112,19 +2189,25 @@ mod tests {
         // Either the host has /sys/module/overlay (true) or it doesn't (false). Verify the
         // probe matches a direct filesystem check — no flaky network or process required.
         let direct = std::path::Path::new(OVERLAYFS_MODULE_PATH).exists();
-        assert_eq!(OverlayfsBackend.is_available().await, direct);
+        assert_eq!(OverlayfsBackend::default().is_available().await, direct);
     }
 
-    use crate::overlayfs::test_support::OverlayRootGuard;
+    /// Build an overlayfs backend rooted at a fresh tempdir. Returns the guard so
+    /// the caller keeps the dir alive for the test body. Replaces the old
+    /// env-mutating `OverlayRootGuard` — the root is injected, not global.
+    fn overlay_backend() -> (OverlayfsBackend, tempfile::TempDir) {
+        let tmp = tempfile::tempdir().expect("store tempdir");
+        let b = OverlayfsBackend::with_store_root(tmp.path().to_path_buf());
+        (b, tmp)
+    }
 
     #[tokio::test]
     async fn overlayfs_remove_missing_image_is_not_found_without_force() {
-        let _g = OverlayRootGuard::new();
+        let (b, _store) = overlay_backend();
         let podman = Podman::with_config(PodmanConfig {
             binary: Some(PathBuf::from("/nonexistent/podman")),
             ..Default::default()
         });
-        let b = OverlayfsBackend;
         match b.remove(&podman, "ghost-image", false).await {
             Err(Error::NotFound(_)) => {}
             other => panic!("expected NotFound, got {other:?}"),
@@ -2137,50 +2220,44 @@ mod tests {
 
     #[tokio::test]
     async fn overlayfs_image_size_uses_meta_when_present() {
-        let _g = OverlayRootGuard::new();
+        let (b, store) = overlay_backend();
         let meta = crate::overlayfs::OverlayMeta {
             original_image: "alpine:3".into(),
             created_at: Utc::now(),
             size_bytes: 12345,
             layer_count: 1,
         };
-        crate::overlayfs::write_meta("ref-meta-size", &meta).expect("write");
+        crate::overlayfs::write_meta_in(store.path(), "ref-meta-size", &meta).expect("write");
         let podman = Podman::with_config(PodmanConfig {
             binary: Some(PathBuf::from("/nonexistent/podman")),
             ..Default::default()
         });
-        let got = OverlayfsBackend
-            .image_size(&podman, "ref-meta-size")
-            .await
-            .expect("size");
+        let got = b.image_size(&podman, "ref-meta-size").await.expect("size");
         assert_eq!(got, 12345);
     }
 
     #[tokio::test]
     async fn overlayfs_image_size_falls_back_to_dir_walk() {
-        let _g = OverlayRootGuard::new();
-        let dirs = crate::overlayfs::ensure_dirs("ref-walk").expect("ensure");
+        let (b, store) = overlay_backend();
+        let dirs = crate::overlayfs::ensure_dirs_in(store.path(), "ref-walk").expect("ensure");
         std::fs::write(dirs.upper.join("a"), b"abcdef").unwrap(); // 6 bytes
         std::fs::write(dirs.upper.join("b"), b"xy").unwrap(); // 2 bytes
         let podman = Podman::with_config(PodmanConfig {
             binary: Some(PathBuf::from("/nonexistent/podman")),
             ..Default::default()
         });
-        let got = OverlayfsBackend
-            .image_size(&podman, "ref-walk")
-            .await
-            .expect("size");
+        let got = b.image_size(&podman, "ref-walk").await.expect("size");
         assert_eq!(got, 8);
     }
 
     #[tokio::test]
     async fn overlayfs_image_size_missing_image_is_not_found() {
-        let _g = OverlayRootGuard::new();
+        let (b, _store) = overlay_backend();
         let podman = Podman::with_config(PodmanConfig {
             binary: Some(PathBuf::from("/nonexistent/podman")),
             ..Default::default()
         });
-        match OverlayfsBackend.image_size(&podman, "nope").await {
+        match b.image_size(&podman, "nope").await {
             Err(Error::NotFound(_)) => {}
             other => panic!("expected NotFound, got {other:?}"),
         }
@@ -2188,9 +2265,9 @@ mod tests {
 
     #[tokio::test]
     async fn overlayfs_tag_hardlinks_tree_and_meta() {
-        let _g = OverlayRootGuard::new();
+        let (b, store) = overlay_backend();
         // Lay down a source: dirs + a file under upper/ + a meta sidecar.
-        let dirs = crate::overlayfs::ensure_dirs("src").expect("ensure src");
+        let dirs = crate::overlayfs::ensure_dirs_in(store.path(), "src").expect("ensure src");
         std::fs::write(dirs.upper.join("hello"), b"world").unwrap();
         let meta = crate::overlayfs::OverlayMeta {
             original_image: "alpine:3".into(),
@@ -2198,27 +2275,24 @@ mod tests {
             size_bytes: 5,
             layer_count: 1,
         };
-        crate::overlayfs::write_meta("src", &meta).expect("write meta");
+        crate::overlayfs::write_meta_in(store.path(), "src", &meta).expect("write meta");
 
         let podman = Podman::with_config(PodmanConfig {
             binary: Some(PathBuf::from("/nonexistent/podman")),
             ..Default::default()
         });
-        OverlayfsBackend
-            .tag(&podman, "src", "dst")
-            .await
-            .expect("tag");
+        b.tag(&podman, "src", "dst").await.expect("tag");
 
-        let dst_root = crate::overlayfs::image_dir("dst");
+        let dst_root = crate::overlayfs::image_dir_in(store.path(), "dst");
         assert!(dst_root.is_dir(), "dst root missing");
         assert!(dst_root.join("upper").join("hello").is_file());
-        let dst_meta = crate::overlayfs::read_meta("dst").expect("dst meta");
+        let dst_meta = crate::overlayfs::read_meta_in(store.path(), "dst").expect("dst meta");
         assert_eq!(dst_meta.size_bytes, 5);
 
         // cp -al ⇒ hardlink: same inode for src and dst content file.
         let src_inode = std::os::unix::fs::MetadataExt::ino(
             &std::fs::metadata(
-                crate::overlayfs::image_dir("src")
+                crate::overlayfs::image_dir_in(store.path(), "src")
                     .join("upper")
                     .join("hello"),
             )
@@ -2232,12 +2306,12 @@ mod tests {
 
     #[tokio::test]
     async fn overlayfs_tag_missing_source_is_not_found() {
-        let _g = OverlayRootGuard::new();
+        let (b, _store) = overlay_backend();
         let podman = Podman::with_config(PodmanConfig {
             binary: Some(PathBuf::from("/nonexistent/podman")),
             ..Default::default()
         });
-        match OverlayfsBackend.tag(&podman, "ghost-src", "dst").await {
+        match b.tag(&podman, "ghost-src", "dst").await {
             Err(Error::NotFound(_)) => {}
             other => panic!("expected NotFound, got {other:?}"),
         }
@@ -2245,14 +2319,14 @@ mod tests {
 
     #[tokio::test]
     async fn overlayfs_tag_existing_target_is_runtime_error() {
-        let _g = OverlayRootGuard::new();
-        crate::overlayfs::ensure_dirs("src-x").expect("src");
-        crate::overlayfs::ensure_dirs("dst-x").expect("dst");
+        let (b, store) = overlay_backend();
+        crate::overlayfs::ensure_dirs_in(store.path(), "src-x").expect("src");
+        crate::overlayfs::ensure_dirs_in(store.path(), "dst-x").expect("dst");
         let podman = Podman::with_config(PodmanConfig {
             binary: Some(PathBuf::from("/nonexistent/podman")),
             ..Default::default()
         });
-        match OverlayfsBackend.tag(&podman, "src-x", "dst-x").await {
+        match b.tag(&podman, "src-x", "dst-x").await {
             Err(Error::Runtime { .. }) => {}
             other => panic!("expected Runtime, got {other:?}"),
         }
@@ -2260,18 +2334,15 @@ mod tests {
 
     #[tokio::test]
     async fn overlayfs_remove_cleans_up_image_dir() {
-        let _g = OverlayRootGuard::new();
-        crate::overlayfs::ensure_dirs("to-remove").expect("ensure");
-        assert!(crate::overlayfs::image_dir("to-remove").exists());
+        let (b, store) = overlay_backend();
+        crate::overlayfs::ensure_dirs_in(store.path(), "to-remove").expect("ensure");
+        assert!(crate::overlayfs::image_dir_in(store.path(), "to-remove").exists());
         let podman = Podman::with_config(PodmanConfig {
             binary: Some(PathBuf::from("/nonexistent/podman")),
             ..Default::default()
         });
-        OverlayfsBackend
-            .remove(&podman, "to-remove", false)
-            .await
-            .expect("remove");
-        assert!(!crate::overlayfs::image_dir("to-remove").exists());
+        b.remove(&podman, "to-remove", false).await.expect("remove");
+        assert!(!crate::overlayfs::image_dir_in(store.path(), "to-remove").exists());
     }
 
     #[tokio::test]
@@ -2281,7 +2352,8 @@ mod tests {
         use std::time::Duration;
         use tempfile::tempdir;
 
-        let _g = OverlayRootGuard::new();
+        let store = tempdir().expect("store tempdir");
+        let b = OverlayfsBackend::with_store_root(store.path().to_path_buf());
         let root = tempdir().expect("root tempdir");
         let runroot = tempdir().expect("runroot tempdir");
         let podman = Podman::with_config(PodmanConfig {
@@ -2308,25 +2380,16 @@ mod tests {
         podman.start(&cid).await.expect("start");
 
         let snap_ref = "linpodx-overlay-e2e-v1";
-        let id = OverlayfsBackend
-            .commit(&podman, &cid, snap_ref)
-            .await
-            .expect("commit");
+        let id = b.commit(&podman, &cid, snap_ref).await.expect("commit");
         assert_eq!(id.0, snap_ref);
 
-        let meta = crate::overlayfs::read_meta(snap_ref).expect("meta");
+        let meta = crate::overlayfs::read_meta_in(store.path(), snap_ref).expect("meta");
         assert!(meta.size_bytes > 0, "alpine rootfs should be non-empty");
 
-        let size = OverlayfsBackend
-            .image_size(&podman, snap_ref)
-            .await
-            .expect("size");
+        let size = b.image_size(&podman, snap_ref).await.expect("size");
         assert_eq!(size as u64, meta.size_bytes);
 
-        OverlayfsBackend
-            .remove(&podman, snap_ref, false)
-            .await
-            .expect("remove");
+        b.remove(&podman, snap_ref, false).await.expect("remove");
 
         podman
             .stop(&cid, Some(Duration::from_secs(2)))
@@ -2335,14 +2398,22 @@ mod tests {
         podman.remove(&cid, true).await.expect("remove ctr");
     }
 
+    /// Build a btrfs backend rooted at a fresh tempdir with no availability
+    /// override (real host probe). Returns the guard to keep the dir alive.
+    fn btrfs_backend() -> (BtrfsBackend, tempfile::TempDir) {
+        let tmp = tempfile::tempdir().expect("store tempdir");
+        let b = BtrfsBackend::with_config(tmp.path().to_path_buf(), None);
+        (b, tmp)
+    }
+
     #[tokio::test]
     async fn btrfs_backend_image_size_missing_is_not_found() {
-        let _g = OverlayRootGuard::new();
+        let (b, _store) = btrfs_backend();
         let podman = Podman::with_config(PodmanConfig {
             binary: Some(PathBuf::from("/nonexistent/podman")),
             ..Default::default()
         });
-        match BtrfsBackend.image_size(&podman, "ghost").await {
+        match b.image_size(&podman, "ghost").await {
             Err(Error::NotFound(_)) => {}
             other => panic!("expected NotFound, got {other:?}"),
         }
@@ -2350,55 +2421,53 @@ mod tests {
 
     #[tokio::test]
     async fn btrfs_backend_remove_missing_force_swallows() {
-        let _g = OverlayRootGuard::new();
+        let (b, _store) = btrfs_backend();
         let podman = Podman::with_config(PodmanConfig {
             binary: Some(PathBuf::from("/nonexistent/podman")),
             ..Default::default()
         });
         // No image exists; force=true should be a no-op success.
-        BtrfsBackend
-            .remove(&podman, "ghost", true)
+        b.remove(&podman, "ghost", true)
             .await
             .expect("force remove ok");
-        match BtrfsBackend.remove(&podman, "ghost", false).await {
+        match b.remove(&podman, "ghost", false).await {
             Err(Error::NotFound(_)) => {}
             other => panic!("expected NotFound without force, got {other:?}"),
         }
     }
 
     #[tokio::test]
-    async fn btrfs_backend_is_available_respects_env_override() {
-        let prev = std::env::var_os("LINPODX_BTRFS_AVAILABLE");
-        std::env::set_var("LINPODX_BTRFS_AVAILABLE", "1");
-        assert!(BtrfsBackend.is_available().await);
-        std::env::set_var("LINPODX_BTRFS_AVAILABLE", "0");
-        assert!(!BtrfsBackend.is_available().await);
-        match prev {
-            Some(v) => std::env::set_var("LINPODX_BTRFS_AVAILABLE", v),
-            None => std::env::remove_var("LINPODX_BTRFS_AVAILABLE"),
-        }
+    async fn btrfs_backend_is_available_respects_override() {
+        // Owned availability override (was the `LINPODX_BTRFS_AVAILABLE` env
+        // read) — no process env mutation, so this is race-free in parallel.
+        let store = tempfile::tempdir().expect("store tempdir");
+        let yes = BtrfsBackend::with_config(store.path().to_path_buf(), Some(true));
+        assert!(yes.is_available().await);
+        let no = BtrfsBackend::with_config(store.path().to_path_buf(), Some(false));
+        assert!(!no.is_available().await);
     }
 
     #[test]
     fn btrfs_image_path_uses_store_root_and_sha8() {
-        let _g = OverlayRootGuard::new();
-        let p = btrfs_image_path("alpine:edge");
-        let expected = overlayfs::store_root().join(overlayfs::sha8("alpine:edge"));
+        let store = tempfile::tempdir().expect("store tempdir");
+        let b = BtrfsBackend::with_config(store.path().to_path_buf(), None);
+        let p = b.image_path("alpine:edge");
+        let expected = store.path().join(overlayfs::sha8("alpine:edge"));
         assert_eq!(p, expected);
     }
 
     #[tokio::test]
     async fn overlayfs_mount_path_for_returns_none_when_not_mounted() {
-        let _g = OverlayRootGuard::new();
+        let (b, _store) = overlay_backend();
         // Fresh image_ref nobody has committed — registry should miss.
-        assert!(OverlayfsBackend::mount_path_for("never-committed").is_none());
+        assert!(b.mount_path_for("never-committed").is_none());
     }
 
     #[tokio::test]
     async fn overlayfs_unmount_for_unknown_image_is_noop() {
-        let _g = OverlayRootGuard::new();
+        let (b, _store) = overlay_backend();
         // Should not panic / error / emit audit entries.
-        OverlayfsBackend::unmount_for("never-committed").await;
+        b.unmount_for("never-committed").await;
     }
 
     /// E2E: requires a host with `fuse-overlayfs` installed. Mounts and then
@@ -2406,14 +2475,14 @@ mod tests {
     #[tokio::test]
     #[ignore]
     async fn fuse_overlayfs_real_mount_round_trip() {
-        let _g = OverlayRootGuard::new();
+        let store = tempfile::tempdir().expect("store tempdir");
         // Skip if the binary isn't on PATH.
         if !overlayfs::fuse_overlayfs_available() {
             eprintln!("fuse-overlayfs not on PATH — skipping");
             return;
         }
         let audit: Arc<dyn AuditSink> = Arc::new(linpodx_common::audit_sink::NoopAuditSink);
-        let mounted = overlayfs::mount_layers("e2e-mount-img", audit)
+        let mounted = overlayfs::mount_layers_in(store.path(), "e2e-mount-img", audit)
             .await
             .expect("mount_layers")
             .expect("Some(MountedRoot)");
@@ -2432,21 +2501,22 @@ mod tests {
     #[tokio::test]
     #[ignore]
     async fn btrfs_real_subvolume_round_trip() {
-        let _g = OverlayRootGuard::new();
+        let store = tempfile::tempdir().expect("store tempdir");
+        let b = BtrfsBackend::with_config(store.path().to_path_buf(), None);
         let podman = Podman::with_config(PodmanConfig {
             binary: Some(PathBuf::from("/nonexistent/podman")),
             ..Default::default()
         });
-        if !BtrfsBackend.is_available().await {
+        if !b.is_available().await {
             eprintln!("btrfs not available on store_root — skipping");
             return;
         }
         // The test caller is responsible for placing a btrfs subvolume at
-        // store_root()/<sha8("btrfs-e2e-src")> before running this test. We
+        // <store_root>/<sha8("btrfs-e2e-src")> before running this test. We
         // assert is_available + image_size paths cleanly.
-        let path = btrfs_image_path("btrfs-e2e-missing");
+        let path = b.image_path("btrfs-e2e-missing");
         assert!(!path.exists());
-        match BtrfsBackend.image_size(&podman, "btrfs-e2e-missing").await {
+        match b.image_size(&podman, "btrfs-e2e-missing").await {
             Err(Error::NotFound(_)) => {}
             other => panic!("expected NotFound for missing image, got {other:?}"),
         }
@@ -2787,13 +2857,10 @@ mod tests {
     // ----- Phase 16 Stream B: encryption pipeline unit tests -----
 
     /// Pin LINPODX_ENCRYPTED_SNAPSHOT_ROOT to a per-test tempdir so concurrent
-    /// tests don't trample each other's blobs. Restored on Drop. Holds a
-    /// process-wide Mutex so two encryption-pipeline tests never race on the
-    /// shared env var.
-    fn enc_lock() -> &'static std::sync::Mutex<()> {
-        static LOCK: std::sync::OnceLock<std::sync::Mutex<()>> = std::sync::OnceLock::new();
-        LOCK.get_or_init(|| std::sync::Mutex::new(()))
-    }
+    /// tests don't trample each other's blobs. Restored on Drop. Shares the
+    /// crate-wide [`super::encrypted_root_test_lock`] with the rotation-module
+    /// tests so the two suites never race on the shared env var.
+    use super::encrypted_root_test_lock as enc_lock;
     struct EncRootGuard {
         prev: Option<String>,
         _dir: tempfile::TempDir,
@@ -2822,14 +2889,13 @@ mod tests {
     }
 
     #[test]
-    fn podman_commit_backend_encryption_reflects_active_config() {
-        // The accessor returns whatever `active_encryption_config()` resolved to
-        // at process start. We only assert that calling the trait method is
-        // *consistent* with the free function — actual presence depends on env
-        // state which other tests serialise over.
-        let from_trait = PodmanCommitBackend.encryption_config().map(|c| c.algorithm);
-        let from_free = active_encryption_config().map(|c| c.algorithm);
-        assert_eq!(from_trait, from_free);
+    fn podman_commit_backend_reports_no_backend_level_encryption() {
+        // At-rest encryption is owned by the daemon-side encryptor / rotation
+        // paths, never by the backend's `commit` flow. The backend therefore
+        // reports no encryption config — this is deterministic and does not
+        // depend on any process-wide env state (the old frozen
+        // `active_encryption_config` `OnceLock` has been removed).
+        assert!(PodmanCommitBackend.encryption_config().is_none());
     }
 
     #[test]

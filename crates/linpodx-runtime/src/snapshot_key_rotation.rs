@@ -316,15 +316,10 @@ pub fn meta_indicates_rotation(meta: &EncryptedSnapshotMeta) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::snapshot::encrypted_root_test_lock as env_lock;
     use crate::snapshot::{encrypted_image_dir, read_encrypted_meta, EncryptedSnapshotMeta};
     use crate::snapshot_crypto::{encrypt_bytes, sha256_hex, EncryptionConfig, Kdf, KeySource};
     use linpodx_common::db::Database;
-    use std::sync::{Mutex, OnceLock};
-
-    fn env_lock() -> &'static Mutex<()> {
-        static LOCK: OnceLock<Mutex<()>> = OnceLock::new();
-        LOCK.get_or_init(|| Mutex::new(()))
-    }
 
     struct EncRootGuard {
         _lock: std::sync::MutexGuard<'static, ()>,

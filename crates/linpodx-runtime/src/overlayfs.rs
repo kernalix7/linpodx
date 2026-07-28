@@ -77,9 +77,21 @@ pub fn sha8(image_ref: &str) -> String {
     out
 }
 
+/// Root directory for a specific image under an explicit store `root`:
+/// `<root>/<sha8(image_ref)>`. The `*_in` helpers take the store root as a
+/// parameter so a caller (e.g. a backend that owns its resolved root, or a
+/// test with a tempdir) never has to go through the process-global
+/// `LINPODX_OVERLAYFS_ROOT` env var.
+pub fn image_dir_in(root: &Path, image_ref: &str) -> PathBuf {
+    root.join(sha8(image_ref))
+}
+
 /// Root directory for a specific image: `store_root()/<sha8(image_ref)>`.
+///
+/// Convenience wrapper that resolves the store root from the environment. Owned
+/// callers should prefer [`image_dir_in`] with their resolved root.
 pub fn image_dir(image_ref: &str) -> PathBuf {
-    store_root().join(sha8(image_ref))
+    image_dir_in(&store_root(), image_ref)
 }
 
 /// Triple of overlayfs directories plus the parent `root` (the per-image dir).
@@ -91,12 +103,13 @@ pub struct LayerDirs {
     pub root: PathBuf,
 }
 
-/// Create `<image_dir>/{lower,upper,work}` (idempotent) and return the resolved paths.
-pub fn ensure_dirs(image_ref: &str) -> io::Result<LayerDirs> {
-    let root = image_dir(image_ref);
-    let lower = root.join("lower");
-    let upper = root.join("upper");
-    let work = root.join("work");
+/// Create `<root>/<sha8>/{lower,upper,work}` (idempotent) under an explicit
+/// store `root` and return the resolved paths.
+pub fn ensure_dirs_in(root: &Path, image_ref: &str) -> io::Result<LayerDirs> {
+    let image_root = image_dir_in(root, image_ref);
+    let lower = image_root.join("lower");
+    let upper = image_root.join("upper");
+    let work = image_root.join("work");
     fs::create_dir_all(&lower)?;
     fs::create_dir_all(&upper)?;
     fs::create_dir_all(&work)?;
@@ -104,8 +117,16 @@ pub fn ensure_dirs(image_ref: &str) -> io::Result<LayerDirs> {
         lower,
         upper,
         work,
-        root,
+        root: image_root,
     })
+}
+
+/// Create `<image_dir>/{lower,upper,work}` (idempotent) and return the resolved paths.
+///
+/// Convenience wrapper over [`ensure_dirs_in`] that resolves the store root from
+/// the environment.
+pub fn ensure_dirs(image_ref: &str) -> io::Result<LayerDirs> {
+    ensure_dirs_in(&store_root(), image_ref)
 }
 
 /// Sidecar metadata persisted next to an overlay image.
@@ -119,9 +140,10 @@ pub struct OverlayMeta {
     pub layer_count: usize,
 }
 
-/// Write `meta` to `<image_dir>/meta.json`. Creates the image dir if missing.
-pub fn write_meta(image_ref: &str, meta: &OverlayMeta) -> io::Result<()> {
-    let dir = image_dir(image_ref);
+/// Write `meta` to `<root>/<sha8>/meta.json` under an explicit store `root`.
+/// Creates the image dir if missing.
+pub fn write_meta_in(root: &Path, image_ref: &str, meta: &OverlayMeta) -> io::Result<()> {
+    let dir = image_dir_in(root, image_ref);
     fs::create_dir_all(&dir)?;
     let path = dir.join(META_FILENAME);
     let bytes = serde_json::to_vec_pretty(meta)
@@ -129,12 +151,27 @@ pub fn write_meta(image_ref: &str, meta: &OverlayMeta) -> io::Result<()> {
     fs::write(path, bytes)
 }
 
-/// Read `<image_dir>/meta.json`. Returns `NotFound` when the sidecar is absent.
-pub fn read_meta(image_ref: &str) -> io::Result<OverlayMeta> {
-    let path = image_dir(image_ref).join(META_FILENAME);
+/// Write `meta` to `<image_dir>/meta.json`. Creates the image dir if missing.
+///
+/// Convenience wrapper over [`write_meta_in`] using the env-resolved store root.
+pub fn write_meta(image_ref: &str, meta: &OverlayMeta) -> io::Result<()> {
+    write_meta_in(&store_root(), image_ref, meta)
+}
+
+/// Read `<root>/<sha8>/meta.json` under an explicit store `root`. Returns
+/// `NotFound` when the sidecar is absent.
+pub fn read_meta_in(root: &Path, image_ref: &str) -> io::Result<OverlayMeta> {
+    let path = image_dir_in(root, image_ref).join(META_FILENAME);
     let raw = fs::read(&path)?;
     serde_json::from_slice::<OverlayMeta>(&raw)
         .map_err(|e| io::Error::new(io::ErrorKind::InvalidData, e))
+}
+
+/// Read `<image_dir>/meta.json`. Returns `NotFound` when the sidecar is absent.
+///
+/// Convenience wrapper over [`read_meta_in`] using the env-resolved store root.
+pub fn read_meta(image_ref: &str) -> io::Result<OverlayMeta> {
+    read_meta_in(&store_root(), image_ref)
 }
 
 /// Recursively sum the sizes of regular files under `dir`. Symlinks are not followed.
@@ -254,6 +291,18 @@ pub async fn mount_layers(
     image_ref: &str,
     audit: Arc<dyn AuditSink>,
 ) -> io::Result<Option<MountedRoot>> {
+    mount_layers_in(&store_root(), image_ref, audit).await
+}
+
+/// [`mount_layers`] against an explicit store `root` (the layer dirs are
+/// resolved under `root` instead of the env-global store root). The mount point
+/// itself stays under `/tmp` (see [`mount_path`]) — it is process-scratch, not
+/// part of the persistent store.
+pub async fn mount_layers_in(
+    root: &Path,
+    image_ref: &str,
+    audit: Arc<dyn AuditSink>,
+) -> io::Result<Option<MountedRoot>> {
     if !fuse_overlayfs_available() {
         warn!(
             image_ref,
@@ -261,7 +310,7 @@ pub async fn mount_layers(
         );
         return Ok(None);
     }
-    let dirs = ensure_dirs(image_ref)?;
+    let dirs = ensure_dirs_in(root, image_ref)?;
     let mp = mount_path(image_ref);
     fs::create_dir_all(&mp)?;
 
@@ -298,66 +347,23 @@ pub async fn mount_layers(
 }
 
 #[cfg(test)]
-pub(crate) mod test_support {
-    //! Cross-test serialisation for `LINPODX_OVERLAYFS_ROOT`. Tests in this crate (in
-    //! both `overlayfs::tests` and `snapshot::tests`) mutate a shared env var; without
-    //! a process-wide mutex they race when cargo runs them in parallel and read each
-    //! other's tempdirs. The guard restores any pre-existing value on drop.
-
-    use std::ffi::OsString;
-    use std::sync::{Mutex, MutexGuard, OnceLock};
-
-    fn lock() -> &'static Mutex<()> {
-        static M: OnceLock<Mutex<()>> = OnceLock::new();
-        M.get_or_init(|| Mutex::new(()))
-    }
-
-    pub struct OverlayRootGuard {
-        _dir: tempfile::TempDir,
-        prev: Option<OsString>,
-        // Keep the lock alive for the test body; poison ignored — env restoration is
-        // best-effort and the next test will rebuild fresh state anyway.
-        _g: MutexGuard<'static, ()>,
-    }
-
-    impl OverlayRootGuard {
-        pub fn new() -> Self {
-            let g = lock().lock().unwrap_or_else(|p| p.into_inner());
-            let dir = tempfile::tempdir().expect("tempdir");
-            let prev = std::env::var_os("LINPODX_OVERLAYFS_ROOT");
-            std::env::set_var("LINPODX_OVERLAYFS_ROOT", dir.path());
-            Self {
-                _dir: dir,
-                prev,
-                _g: g,
-            }
-        }
-    }
-
-    impl Drop for OverlayRootGuard {
-        fn drop(&mut self) {
-            match self.prev.take() {
-                Some(p) => std::env::set_var("LINPODX_OVERLAYFS_ROOT", p),
-                None => std::env::remove_var("LINPODX_OVERLAYFS_ROOT"),
-            }
-        }
-    }
-}
-
-#[cfg(test)]
 mod tests {
-    use super::test_support::OverlayRootGuard;
     use super::*;
 
     #[test]
     fn store_root_honours_env_override() {
-        let g = OverlayRootGuard::new();
-        // The override is set; verify store_root reads it.
-        let from_env = std::env::var_os("LINPODX_OVERLAYFS_ROOT")
-            .map(PathBuf::from)
-            .expect("env set by guard");
-        assert_eq!(store_root(), from_env);
-        drop(g);
+        // The single remaining test that exercises the env-var path. All other
+        // tests use the explicit-root `*_in` helpers, so nothing else in this
+        // binary reads `LINPODX_OVERLAYFS_ROOT` concurrently — no cross-test
+        // mutex is needed. Save/restore locally to stay hermetic.
+        let prev = std::env::var_os("LINPODX_OVERLAYFS_ROOT");
+        let dir = tempfile::tempdir().expect("tempdir");
+        std::env::set_var("LINPODX_OVERLAYFS_ROOT", dir.path());
+        assert_eq!(store_root(), dir.path());
+        match prev {
+            Some(p) => std::env::set_var("LINPODX_OVERLAYFS_ROOT", p),
+            None => std::env::remove_var("LINPODX_OVERLAYFS_ROOT"),
+        }
     }
 
     #[test]
@@ -371,42 +377,42 @@ mod tests {
     }
 
     #[test]
-    fn image_dir_is_deterministic_for_same_ref() {
-        let _g = OverlayRootGuard::new();
-        let p1 = image_dir("ref-x");
-        let p2 = image_dir("ref-x");
+    fn image_dir_in_is_deterministic_for_same_ref() {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let p1 = image_dir_in(tmp.path(), "ref-x");
+        let p2 = image_dir_in(tmp.path(), "ref-x");
         assert_eq!(p1, p2);
     }
 
     #[test]
-    fn ensure_dirs_creates_three_subdirs() {
-        let _g = OverlayRootGuard::new();
-        let dirs = ensure_dirs("img1").expect("ensure_dirs");
+    fn ensure_dirs_in_creates_three_subdirs() {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let dirs = ensure_dirs_in(tmp.path(), "img1").expect("ensure_dirs_in");
         assert!(dirs.lower.is_dir(), "lower not a dir: {:?}", dirs.lower);
         assert!(dirs.upper.is_dir(), "upper not a dir: {:?}", dirs.upper);
         assert!(dirs.work.is_dir(), "work not a dir: {:?}", dirs.work);
-        assert_eq!(dirs.root, image_dir("img1"));
+        assert_eq!(dirs.root, image_dir_in(tmp.path(), "img1"));
     }
 
     #[test]
-    fn ensure_dirs_is_idempotent() {
-        let _g = OverlayRootGuard::new();
-        let _a = ensure_dirs("img-idem").expect("first");
-        let b = ensure_dirs("img-idem").expect("second");
+    fn ensure_dirs_in_is_idempotent() {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let _a = ensure_dirs_in(tmp.path(), "img-idem").expect("first");
+        let b = ensure_dirs_in(tmp.path(), "img-idem").expect("second");
         assert!(b.upper.is_dir());
     }
 
     #[test]
-    fn write_then_read_meta_round_trip() {
-        let _g = OverlayRootGuard::new();
+    fn write_then_read_meta_in_round_trip() {
+        let tmp = tempfile::tempdir().expect("tempdir");
         let meta = OverlayMeta {
             original_image: "alpine:latest".into(),
             created_at: Utc::now(),
             size_bytes: 4096,
             layer_count: 1,
         };
-        write_meta("ref-meta", &meta).expect("write");
-        let back = read_meta("ref-meta").expect("read");
+        write_meta_in(tmp.path(), "ref-meta", &meta).expect("write");
+        let back = read_meta_in(tmp.path(), "ref-meta").expect("read");
         assert_eq!(back.original_image, meta.original_image);
         assert_eq!(back.size_bytes, meta.size_bytes);
         assert_eq!(back.layer_count, meta.layer_count);
@@ -415,16 +421,16 @@ mod tests {
     }
 
     #[test]
-    fn read_meta_missing_is_not_found() {
-        let _g = OverlayRootGuard::new();
-        let err = read_meta("never-written").unwrap_err();
+    fn read_meta_in_missing_is_not_found() {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let err = read_meta_in(tmp.path(), "never-written").unwrap_err();
         assert_eq!(err.kind(), io::ErrorKind::NotFound);
     }
 
     #[test]
     fn dir_size_bytes_sums_regular_files() {
-        let _g = OverlayRootGuard::new();
-        let dirs = ensure_dirs("img-size").expect("ensure_dirs");
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let dirs = ensure_dirs_in(tmp.path(), "img-size").expect("ensure_dirs_in");
         std::fs::write(dirs.upper.join("a"), b"hello").unwrap();
         std::fs::write(dirs.upper.join("b"), b"world!").unwrap();
         let total = dir_size_bytes(&dirs.upper).expect("size");
@@ -433,8 +439,8 @@ mod tests {
 
     #[test]
     fn dir_size_bytes_missing_dir_is_zero() {
-        let _g = OverlayRootGuard::new();
-        let p = image_dir("nope").join("upper");
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let p = image_dir_in(tmp.path(), "nope").join("upper");
         assert_eq!(dir_size_bytes(&p).unwrap(), 0);
     }
 
@@ -466,12 +472,14 @@ mod tests {
     #[tokio::test]
     async fn mount_layers_returns_none_when_fuse_overlayfs_missing() {
         use linpodx_common::audit_sink::NoopAuditSink;
-        let _g = OverlayRootGuard::new();
+        let tmp = tempfile::tempdir().expect("tempdir");
         let prev = std::env::var_os("LINPODX_FUSE_OVERLAYFS_AVAILABLE");
         std::env::set_var("LINPODX_FUSE_OVERLAYFS_AVAILABLE", "0");
 
         let audit: Arc<dyn AuditSink> = Arc::new(NoopAuditSink);
-        let res = mount_layers("img-no-fuse", audit).await.expect("mount");
+        let res = mount_layers_in(tmp.path(), "img-no-fuse", audit)
+            .await
+            .expect("mount");
         assert!(
             res.is_none(),
             "expected None when fuse-overlayfs unavailable"

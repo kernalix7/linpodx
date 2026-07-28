@@ -34,8 +34,7 @@ pub use podman::{
     PodmanConfig, PtyExecOptions, PtyHandle, StreamKind,
 };
 pub use snapshot::{
-    backend_for, backend_list, set_overlayfs_audit_sink, BtrfsBackend, OverlayfsBackend,
-    PodmanCommitBackend, SnapshotBackend,
+    backend_for, backend_list, BtrfsBackend, OverlayfsBackend, PodmanCommitBackend, SnapshotBackend,
 };
 pub use snapshot_crypto::{
     decrypt_bytes, derive_key, derive_key_argon2id, derive_key_from_passphrase,

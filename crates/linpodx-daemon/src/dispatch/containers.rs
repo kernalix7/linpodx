@@ -79,12 +79,16 @@ impl Dispatcher {
             }
         }
         // Phase 10: promote the Phase 9 audit-only overlayfs hook to actual
-        // rootfs injection. When OverlayfsBackend has a live fuse-overlayfs
+        // rootfs injection. When the overlayfs backend has a live fuse-overlayfs
         // mount for this image (created by an earlier snapshot commit), pass
         // it to podman as --rootfs and drop the image positional. The audit
         // entry below still fires so the linkage is visible in the chain.
-        let mounted_rootfs =
-            OverlayfsBackend::mount_path_for(&opts.image).map(|p| p.display().to_string());
+        // The live-mount registry is now instance state owned by the snapshot
+        // manager's overlayfs backend (was a process-global), so query that.
+        let overlayfs: &OverlayfsBackend = self.snapshot.overlayfs_backend();
+        let mounted_rootfs = overlayfs
+            .mount_path_for(&opts.image)
+            .map(|p| p.display().to_string());
         if let Some(rootfs_path) = mounted_rootfs.as_ref() {
             opts.rootfs = Some(rootfs_path.clone());
         }
