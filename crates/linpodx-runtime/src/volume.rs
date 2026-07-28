@@ -161,15 +161,40 @@ mod tests {
     use crate::podman::PodmanConfig;
     use std::io::Write;
     use std::os::unix::fs::PermissionsExt;
+    use std::path::PathBuf;
+    use std::sync::OnceLock;
 
-    /// Writes an executable shell script that dispatches on the podman
-    /// subcommand (first arg) and prints the given real-world-shaped JSON
-    /// fixtures, mimicking `podman volume inspect` / `podman system df -v` /
-    /// `podman ps -a --filter volume=`. Returns a [`Podman`] configured to
-    /// invoke it as the "binary".
-    fn fake_podman(dir: &tempfile::TempDir) -> Podman {
-        let script_path = dir.path().join("podman");
-        let script = r#"#!/bin/sh
+    /// Path to the fake `podman` script, written exactly once per test
+    /// binary run (see [`fake_podman`] for why).
+    static FAKE_PODMAN_SCRIPT: OnceLock<PathBuf> = OnceLock::new();
+
+    /// Returns a [`Podman`] configured to invoke a fake `podman` shell script
+    /// that dispatches on the subcommand (first arg) and prints
+    /// real-world-shaped JSON fixtures, mimicking `podman volume inspect` /
+    /// `podman system df -v` / `podman ps -a --filter volume=`.
+    ///
+    /// The script is written **once** for the whole test binary process (via
+    /// `OnceLock`), not per-test. Writing a fresh script file and `exec`-ing
+    /// it immediately after, repeated across many concurrently-running
+    /// `#[tokio::test]`s, hits a well-known Linux race: `fork()` duplicates a
+    /// thread's still-open write file descriptor into *every* child process
+    /// spawned by *any other thread* at that instant (fd tables are
+    /// process-wide, not per-thread), and `O_CLOEXEC` only closes it at that
+    /// child's own `execve()` — not at fork time. If some unrelated
+    /// concurrently-spawned child hasn't exec'd/exited yet and is still
+    /// holding that inherited duplicate, a later `execve()` of the just-written
+    /// script gets `ETXTBSY` ("Text file busy") even though the writer's own
+    /// fd was already closed and the script's tempdir was never shared with
+    /// any other test. Writing the (identical, read-only) script contents a
+    /// single time — fully written and closed, guarded by `OnceLock` so no
+    /// test can observe a partially-initialized path — removes the race
+    /// entirely: after the one-time setup nothing ever opens the file for
+    /// writing again, so `execve()` never has a writer to collide with.
+    fn fake_podman() -> Podman {
+        let script_path = FAKE_PODMAN_SCRIPT.get_or_init(|| {
+            let dir = tempfile::tempdir().expect("tempdir");
+            let script_path = dir.path().join("podman");
+            let script = r#"#!/bin/sh
 case "$1" in
   volume)
     cat <<'EOF'
@@ -192,14 +217,21 @@ EOF
     ;;
 esac
 "#;
-        let mut f = std::fs::File::create(&script_path).expect("write fake podman script");
-        f.write_all(script.as_bytes())
-            .expect("write fake podman script contents");
-        let mut perms = f.metadata().expect("script metadata").permissions();
-        perms.set_mode(0o755);
-        std::fs::set_permissions(&script_path, perms).expect("chmod fake podman script");
+            let mut f = std::fs::File::create(&script_path).expect("write fake podman script");
+            f.write_all(script.as_bytes())
+                .expect("write fake podman script contents");
+            let mut perms = f.metadata().expect("script metadata").permissions();
+            perms.set_mode(0o755);
+            std::fs::set_permissions(&script_path, perms).expect("chmod fake podman script");
+            drop(f);
+            // Persist the tempdir for the rest of the process instead of
+            // letting it delete the script on drop — every test needs this
+            // same script to keep existing for the whole run.
+            let persisted_dir = dir.keep();
+            persisted_dir.join("podman")
+        });
         Podman::with_config(PodmanConfig {
-            binary: Some(script_path),
+            binary: Some(script_path.clone()),
             root: None,
             runroot: None,
         })
@@ -207,32 +239,28 @@ esac
 
     #[tokio::test]
     async fn volume_size_bytes_matches_row_by_name() {
-        let dir = tempfile::tempdir().expect("tempdir");
-        let podman = fake_podman(&dir);
+        let podman = fake_podman();
         let size = volume_size_bytes(&podman, "data-vol").await;
         assert_eq!(size, Some(104_857_600));
     }
 
     #[tokio::test]
     async fn volume_size_bytes_none_when_name_absent() {
-        let dir = tempfile::tempdir().expect("tempdir");
-        let podman = fake_podman(&dir);
+        let podman = fake_podman();
         let size = volume_size_bytes(&podman, "missing-vol").await;
         assert_eq!(size, None);
     }
 
     #[tokio::test]
     async fn volume_in_use_by_lists_container_names() {
-        let dir = tempfile::tempdir().expect("tempdir");
-        let podman = fake_podman(&dir);
+        let podman = fake_podman();
         let names = volume_in_use_by(&podman, "data-vol").await;
         assert_eq!(names, vec!["web".to_string(), "worker".to_string()]);
     }
 
     #[tokio::test]
     async fn inspect_detail_composes_base_size_and_in_use_by() {
-        let dir = tempfile::tempdir().expect("tempdir");
-        let podman = fake_podman(&dir);
+        let podman = fake_podman();
         let detail = inspect_detail(&podman, &VolumeId::from("data-vol"))
             .await
             .expect("inspect_detail");
