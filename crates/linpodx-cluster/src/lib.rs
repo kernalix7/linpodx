@@ -18,9 +18,10 @@ pub mod store;
 pub mod view;
 
 pub use election::{
-    node_id_from_string, AppData, AppResponse, ClusterStateSnapshot, LeaderState,
-    MembershipNodeView, MembershipSnapshot, MetricSnapshot, NoopVoteSink, PluginRevocationSink,
-    RaftNode, RaftStartConfig, SqliteVoteSink, VoteSink,
+    decide_raft_bootstrap, node_id_from_string, raft_bootstrap_env_enabled, AppData, AppResponse,
+    ClusterStateSnapshot, LeaderState, MembershipNodeView, MembershipSnapshot, MetricSnapshot,
+    NoopVoteSink, PluginRevocationSink, RaftBootstrapDecision, RaftNode, RaftStartConfig,
+    SqliteVoteSink, VoteSink, RAFT_BOOTSTRAP_ENV,
 };
 pub use k8s::K8sAdapter;
 pub use peer::PeerInfo;

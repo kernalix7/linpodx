@@ -9,8 +9,17 @@
 //!   membership). Container-view consensus arrives in a later phase.
 //! * **In-memory log + state machine** with opportunistic SQLite persistence
 //!   of the **vote only** (key/value rows in `raft_state`). A daemon restart
-//!   resets the cluster to bootstrap; that is acceptable for v0.1 because the
-//!   audit log already records `ClusterLeaderElected` on every fresh round.
+//!   resets membership/log state for v0.1; a restarted non-bootstrapper must
+//!   be reintroduced by the leader through the same `cluster_join` ->
+//!   `add_learner` path used for first join.
+//! * **Single-bootstrapper contract.** In a multi-node Raft deployment,
+//!   exactly one daemon is allowed to start with `bootstrap_single_node=true`
+//!   for a fresh cluster. Every other raft-enabled daemon must start with
+//!   `bootstrap_single_node=false` and remain a blank follower/learner until
+//!   the bootstrapper receives `cluster_join`, adds it as a learner, and later
+//!   promotes it through the gossip membership sync. Starting more than one
+//!   node with `bootstrap_single_node=true` creates independent clusters with
+//!   incompatible terms/logs.
 //! * **HTTP transport** — see [`crate::raft_http`]. The peer endpoints live
 //!   under `/cluster/raft/{append,vote,snapshot}` and reuse the existing axum
 //!   listener spawned by the daemon.
@@ -27,6 +36,7 @@ use std::fmt::Debug;
 use std::io::Cursor;
 use std::ops::RangeBounds;
 use std::sync::Arc;
+use std::time::Duration;
 
 use crate::ClusterError;
 use chrono::Utc;
@@ -57,6 +67,17 @@ use std::sync::Mutex as StdMutex;
 use tokio::sync::watch;
 use tokio::sync::RwLock;
 use tracing::{debug, info, warn};
+
+/// Environment fallback for the daemon bootstrapper bit while the real Clap
+/// flag lives outside this task's owned edit paths.
+pub const RAFT_BOOTSTRAP_ENV: &str = "LINPODX_CLUSTER_RAFT_BOOTSTRAP";
+
+/// Grace period before a non-bootstrap raft node logs join guidance.
+pub const NON_BOOTSTRAP_LEADER_GRACE: Duration = Duration::from_secs(10);
+
+/// Upper bound for Raft membership mutations initiated from daemon join/leave
+/// paths. A dead or half-started peer should not wedge request handling.
+pub const RAFT_MEMBERSHIP_CHANGE_TIMEOUT: Duration = Duration::from_secs(5);
 
 /// `NodeId` used by [`LinpodxRaft`]. Aliased so callers don't need to import
 /// `BasicNode` directly.
@@ -200,6 +221,69 @@ pub struct RaftStartConfig {
     /// single-node membership of `{node_id}` so the node becomes leader
     /// immediately. Disable for tests that want to drive election manually.
     pub bootstrap_single_node: bool,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum RaftBootstrapDecision {
+    Disabled,
+    Bootstrapper,
+    Joiner,
+}
+
+impl RaftBootstrapDecision {
+    pub fn bootstrap_single_node(self) -> bool {
+        matches!(self, Self::Bootstrapper)
+    }
+}
+
+/// Decide whether this daemon instance may self-bootstrap.
+///
+/// The decision is scoped by whether a real peer transport exists (`multi_node`,
+/// set when `--cluster-raft-advertise` is configured):
+///
+/// * **Single-node** (`multi_node == false`, the placeholder `NoopNetworkFactory`
+///   transport). There is no shared peer transport, so split-brain is
+///   impossible — two such daemons are independent islands, never members of
+///   one cluster. The node bootstraps automatically so `--cluster-raft` alone
+///   keeps its v0.1 behavior of deterministically self-electing a single-node
+///   leader (the `cluster raft leader` / `role` IPC arms depend on this).
+/// * **Multi-node** (`multi_node == true`, real HTTP transport). The contract is
+///   intentionally strict: enabling Raft alone never self-elects. Only an
+///   explicit bootstrapper bit may initialize the single-node membership;
+///   every other node starts blank and waits for the leader's `cluster_join`
+///   -> `add_learner` path. This is what prevents two peers on a shared
+///   transport from forming rival clusters with incompatible terms/logs.
+pub fn decide_raft_bootstrap(
+    raft_enabled: bool,
+    multi_node: bool,
+    explicit_bootstrap: bool,
+) -> RaftBootstrapDecision {
+    if !raft_enabled {
+        RaftBootstrapDecision::Disabled
+    } else if !multi_node {
+        // No shared transport => no split-brain risk => preserve the v0.1
+        // single-node self-elect behavior regardless of the bootstrapper bit.
+        RaftBootstrapDecision::Bootstrapper
+    } else if explicit_bootstrap {
+        RaftBootstrapDecision::Bootstrapper
+    } else {
+        RaftBootstrapDecision::Joiner
+    }
+}
+
+/// Parse the temporary env fallback for the explicit raft bootstrapper bit.
+///
+/// Accepted true values match common CLI/env conventions. Invalid or unset
+/// values are false so accidental multi-bootstrap is avoided.
+pub fn raft_bootstrap_env_enabled() -> bool {
+    std::env::var(RAFT_BOOTSTRAP_ENV)
+        .map(|value| {
+            matches!(
+                value.trim().to_ascii_lowercase().as_str(),
+                "1" | "true" | "yes" | "on"
+            )
+        })
+        .unwrap_or(false)
 }
 
 impl Default for RaftStartConfig {
@@ -823,6 +907,12 @@ pub struct MembershipSnapshot {
     pub current_term: u64,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum MembershipRole {
+    Voter,
+    Learner,
+}
+
 impl RaftNode {
     /// Build a `RaftNode` with the placeholder `NoopNetworkFactory` (single-node
     /// path). Equivalent to `start_with_network(cfg, vote_sink, audit, NoopNetworkFactory)`.
@@ -917,6 +1007,9 @@ impl RaftNode {
         // into MetricSnapshot + audit events for leader transitions.
         let inner_clone = Arc::clone(&inner);
         tokio::spawn(metric_pump(inner_clone, metrics_rx, snap_tx, audit));
+        if !cfg.bootstrap_single_node {
+            spawn_non_bootstrap_guidance(Arc::clone(&inner));
+        }
 
         Ok(Self { inner })
     }
@@ -964,15 +1057,45 @@ impl RaftNode {
         if let Ok(mut map) = self.inner.addr_map.lock() {
             map.insert(id, addr.clone());
         }
-        match self
+        if let Some(role) = self.membership_role(id) {
+            debug!(
+                node_id = id,
+                node_label = %label,
+                addr = %addr,
+                role = ?role,
+                "raft.add_learner idempotent rejoin"
+            );
+            return Ok(());
+        }
+        let add = self
             .inner
             .raft
-            .add_learner(id, BasicNode::new(addr.clone()), true)
-            .await
-        {
-            Ok(_) => Ok(()),
-            Err(e) => Err(ClusterError::Storage(format!(
-                "raft.add_learner({label}, {addr}) failed: {e}"
+            .add_learner(id, BasicNode::new(addr.clone()), true);
+        match tokio::time::timeout(RAFT_MEMBERSHIP_CHANGE_TIMEOUT, add).await {
+            Ok(Ok(_)) => Ok(()),
+            Ok(Err(e)) => {
+                let msg = e.to_string();
+                if self.membership_role(id).is_some()
+                    || msg.contains("already")
+                    || msg.contains("exist")
+                {
+                    debug!(
+                        node_id = id,
+                        node_label = %label,
+                        addr = %addr,
+                        error = %msg,
+                        "raft.add_learner duplicate treated as idempotent rejoin"
+                    );
+                    Ok(())
+                } else {
+                    Err(ClusterError::Storage(format!(
+                        "raft.add_learner({label}, {addr}) failed: {e}"
+                    )))
+                }
+            }
+            Err(_) => Err(ClusterError::Storage(format!(
+                "raft.add_learner({label}, {addr}) timed out after {}s",
+                RAFT_MEMBERSHIP_CHANGE_TIMEOUT.as_secs()
             ))),
         }
     }
@@ -988,14 +1111,24 @@ impl RaftNode {
         addr: String,
     ) -> std::result::Result<(), ClusterError> {
         let id = node_id_from_string(&label);
+        let prior_role = self.membership_role(id);
         let res = self.add_learner(label.clone(), addr.clone()).await;
         if res.is_ok() {
             if let Some(sink) = self.inner.audit.as_ref() {
+                let event = if prior_role.is_some() {
+                    "raft_learner_rejoined"
+                } else {
+                    "raft_learner_added"
+                };
                 let payload = serde_json::json!({
-                    "event": "raft_learner_added",
+                    "event": event,
                     "node_id": id,
                     "node_label": label,
                     "addr": addr,
+                    "prior_role": prior_role.map(|role| match role {
+                        MembershipRole::Voter => "voter",
+                        MembershipRole::Learner => "learner",
+                    }),
                     "ts": Utc::now().to_rfc3339(),
                 });
                 sink.record(AuditSinkKind::ClusterRaftPromoted, None, None, payload)
@@ -1016,10 +1149,15 @@ impl RaftNode {
         for l in labels {
             ids.insert(node_id_from_string(l));
         }
-        self.inner
-            .raft
-            .change_membership(ids, false)
+        let change = self.inner.raft.change_membership(ids, false);
+        tokio::time::timeout(RAFT_MEMBERSHIP_CHANGE_TIMEOUT, change)
             .await
+            .map_err(|_| {
+                ClusterError::Storage(format!(
+                    "raft.change_membership timed out after {}s",
+                    RAFT_MEMBERSHIP_CHANGE_TIMEOUT.as_secs()
+                ))
+            })?
             .map_err(|e| ClusterError::Storage(format!("raft.change_membership failed: {e}")))?;
         Ok(())
     }
@@ -1077,10 +1215,15 @@ impl RaftNode {
                 "refusing to remove the last voter".into(),
             ));
         }
-        self.inner
-            .raft
-            .change_membership(new_ids, false)
+        let change = self.inner.raft.change_membership(new_ids, false);
+        tokio::time::timeout(RAFT_MEMBERSHIP_CHANGE_TIMEOUT, change)
             .await
+            .map_err(|_| {
+                ClusterError::Storage(format!(
+                    "raft.change_membership remove timed out after {}s",
+                    RAFT_MEMBERSHIP_CHANGE_TIMEOUT.as_secs()
+                ))
+            })?
             .map_err(|e| {
                 ClusterError::Storage(format!("raft.change_membership remove failed: {e}"))
             })?;
@@ -1338,6 +1481,18 @@ impl RaftNode {
         }
     }
 
+    fn membership_role(&self, id: NodeId) -> Option<MembershipRole> {
+        let metrics = self.inner.raft.metrics().borrow().clone();
+        let membership = metrics.membership_config.membership();
+        if membership.voter_ids().any(|voter_id| voter_id == id) {
+            Some(MembershipRole::Voter)
+        } else if membership.learner_ids().any(|learner_id| learner_id == id) {
+            Some(MembershipRole::Learner)
+        } else {
+            None
+        }
+    }
+
     /// Used by [`crate::raft_http`] to dispatch incoming RPCs to the engine.
     pub fn raft(&self) -> &RaftEngine {
         &self.inner.raft
@@ -1408,6 +1563,24 @@ async fn metric_pump(
         }
     }
     debug!("raft metric_pump exited");
+}
+
+fn spawn_non_bootstrap_guidance(inner: Arc<RaftNodeInner>) {
+    tokio::spawn(async move {
+        tokio::time::sleep(NON_BOOTSTRAP_LEADER_GRACE).await;
+        let snap = inner.metrics_rx.borrow().clone();
+        if snap.current_leader.is_none() && snap.server_state != Some(ServerState::Leader) {
+            warn!(
+                node_id = inner.config.node_id,
+                node_label = %inner.config.node_label,
+                advertise = %inner.config.advertise_addr,
+                grace_secs = NON_BOOTSTRAP_LEADER_GRACE.as_secs(),
+                bootstrap_flag = "--cluster-raft-bootstrap",
+                bootstrap_env = RAFT_BOOTSTRAP_ENV,
+                "raft: non-bootstrap node has not received leader contact; start exactly one fresh cluster node with --cluster-raft-bootstrap (or LINPODX_CLUSTER_RAFT_BOOTSTRAP=1), then run cluster_join against that leader for this node so it can be added as a learner"
+            );
+        }
+    });
 }
 
 // ---------------------------------------------------------------------------
@@ -1536,6 +1709,50 @@ mod tests {
             let id = node_id_from_string(label);
             assert!(id >= 2, "label {label} -> {id} must be >=2");
         }
+    }
+
+    #[test]
+    fn raft_bootstrap_decision_requires_explicit_bootstrapper_in_multi_node() {
+        // raft disabled -> always Disabled regardless of the other bits.
+        assert_eq!(
+            decide_raft_bootstrap(false, false, false),
+            RaftBootstrapDecision::Disabled
+        );
+        assert_eq!(
+            decide_raft_bootstrap(false, true, true),
+            RaftBootstrapDecision::Disabled
+        );
+        // Multi-node: only the explicit bootstrapper bit self-elects; every
+        // other node starts blank as a Joiner.
+        assert_eq!(
+            decide_raft_bootstrap(true, true, false),
+            RaftBootstrapDecision::Joiner
+        );
+        assert_eq!(
+            decide_raft_bootstrap(true, true, true),
+            RaftBootstrapDecision::Bootstrapper
+        );
+    }
+
+    #[test]
+    fn raft_bootstrap_decision_single_node_always_bootstraps() {
+        // No shared transport (single-node placeholder): preserve v0.1
+        // self-elect behavior whether or not the bootstrapper bit is set.
+        assert_eq!(
+            decide_raft_bootstrap(true, false, false),
+            RaftBootstrapDecision::Bootstrapper
+        );
+        assert_eq!(
+            decide_raft_bootstrap(true, false, true),
+            RaftBootstrapDecision::Bootstrapper
+        );
+    }
+
+    #[test]
+    fn raft_bootstrap_decision_controls_single_node_initialize() {
+        assert!(!RaftBootstrapDecision::Disabled.bootstrap_single_node());
+        assert!(!RaftBootstrapDecision::Joiner.bootstrap_single_node());
+        assert!(RaftBootstrapDecision::Bootstrapper.bootstrap_single_node());
     }
 
     #[tokio::test]
@@ -1837,6 +2054,38 @@ mod tests {
             *recs
         );
         drop(recs);
+        node.shutdown().await;
+    }
+
+    #[tokio::test]
+    async fn add_learner_with_audit_is_idempotent_for_existing_member() {
+        let audit = Arc::new(CountingAudit::default());
+        let node = RaftNode::start(
+            fast_cfg(1, "alpha"),
+            None,
+            Some(audit.clone() as Arc<dyn AuditSink>),
+        )
+        .await
+        .expect("start");
+        wait_for(Duration::from_secs(2), || {
+            node.current_role() == LeaderState::Leader
+        })
+        .await;
+
+        node.add_learner_with_audit("alpha".into(), "127.0.0.1:18787".into())
+            .await
+            .expect("existing member rejoin should be a no-op");
+
+        let labels = node.known_labels();
+        assert!(labels.contains(&"alpha".to_string()));
+        let promoted_count = audit
+            .records
+            .lock()
+            .await
+            .iter()
+            .filter(|k| matches!(k, AuditSinkKind::ClusterRaftPromoted))
+            .count();
+        assert_eq!(promoted_count, 1, "rejoin audit must be recorded once");
         node.shutdown().await;
     }
 

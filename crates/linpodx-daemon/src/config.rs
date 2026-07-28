@@ -97,6 +97,14 @@ pub struct DaemonConfig {
     #[arg(long, env = "LINPODX_CLUSTER_RAFT_ADVERTISE")]
     pub cluster_raft_advertise: Option<String>,
 
+    /// Phase 28 — in a MULTI-node cluster, exactly one fresh node must be
+    /// started with this bit to self-elect as the initial leader; every other
+    /// node starts as a blank follower and joins via `cluster join`. Single
+    /// node deployments ignore this and always self-bootstrap (no shared
+    /// transport, so no split-brain risk).
+    #[arg(long, env = "LINPODX_CLUSTER_RAFT_BOOTSTRAP")]
+    pub cluster_raft_bootstrap: bool,
+
     /// Phase 15 — when set (in addition to `--remote-cert` / `--remote-key` /
     /// `--client-ca`), the WebSocket listener will only accept clients whose
     /// peer certificate's SHA-256 fingerprint is present in the

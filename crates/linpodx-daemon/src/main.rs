@@ -246,8 +246,16 @@ async fn main() -> Result<()> {
             .clone()
             .or_else(|| cfg.remote_listen.clone())
             .unwrap_or_else(|| "127.0.0.1:7878".to_string());
+        // The clap flag and the env var are equivalent; either marks this node
+        // as the multi-node cluster's single initial bootstrapper.
+        let bootstrap_decision = linpodx_cluster::decide_raft_bootstrap(
+            cfg.cluster_raft,
+            multi_node,
+            cfg.cluster_raft_bootstrap || linpodx_cluster::raft_bootstrap_env_enabled(),
+        );
         let vote_sink: Arc<dyn linpodx_cluster::VoteSink> =
             Arc::new(linpodx_cluster::SqliteVoteSink::new(Arc::clone(&db_arc)));
+        let bootstrap_single_node = bootstrap_decision.bootstrap_single_node();
         let raft_cfg = linpodx_cluster::RaftStartConfig {
             node_id: linpodx_cluster::node_id_from_string(&label),
             node_label: label.clone(),
@@ -255,7 +263,7 @@ async fn main() -> Result<()> {
             heartbeat_ms: 250,
             election_timeout_min_ms: 1500,
             election_timeout_max_ms: 3000,
-            bootstrap_single_node: true,
+            bootstrap_single_node,
         };
         let result = if multi_node {
             // Multi-node Raft reuses the remote bearer token so peer RPCs are
@@ -293,6 +301,7 @@ async fn main() -> Result<()> {
                     node_label = %label,
                     advertise = %advertise,
                     multi_node = multi_node,
+                    bootstrap = bootstrap_single_node,
                     "raft leader-elect started"
                 );
                 Some(Arc::new(n))
