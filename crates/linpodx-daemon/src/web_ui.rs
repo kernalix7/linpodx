@@ -127,6 +127,9 @@ pub fn router(
             "/sandbox/auto-encrypt",
             get(get_sandbox_auto_encrypt).put(put_sandbox_auto_encrypt),
         )
+        // Vision-triage fix — Pinned Clients tab table (route additions only,
+        // handler above reuses the existing dispatch arm).
+        .route("/daemon/pinned-clients", get(get_pinned_clients))
         // Phase 26 secret routes
         .route("/secrets", get(get_secrets))
         .route("/secrets/create", post(post_secret_create))
@@ -484,6 +487,16 @@ async fn get_sessions(State(state): State<WebUiState>) -> Response<Body> {
 
 async fn get_sandbox_profiles(State(state): State<WebUiState>) -> Response<Body> {
     dispatch(&state, Method::SandboxProfileList).await
+}
+
+/// `GET /api/v1/daemon/pinned-clients` — vision-triage fix: the Pinned
+/// Clients tab previously had no REST route and fell back to the
+/// `daemon_pin_client_list` JSON-RPC method exclusively. Backed by the same
+/// `Method::DaemonPinClientList` dispatch arm (`dispatch/pin_clients.rs`) so
+/// behavior matches the CLI/WS surface exactly, same pattern as every other
+/// `get_*` handler in this file.
+async fn get_pinned_clients(State(state): State<WebUiState>) -> Response<Body> {
+    dispatch(&state, Method::DaemonPinClientList).await
 }
 
 #[derive(Debug, Deserialize, Default)]

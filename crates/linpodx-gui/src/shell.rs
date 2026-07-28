@@ -101,6 +101,12 @@ pub fn daemon_binary_candidates() -> Vec<PathBuf> {
 /// (bare-name) entry so the OS can resolve it via `$PATH`. Never fails —
 /// worst case returns `linpodx-daemon`.
 pub fn resolve_daemon_binary() -> PathBuf {
+    if let Some(env) = std::env::var_os("LINPODX_DAEMON_BIN") {
+        if !env.is_empty() {
+            return PathBuf::from(env);
+        }
+    }
+
     let candidates = daemon_binary_candidates();
     for c in &candidates {
         // The bare-name last entry has no parent-relative existence check; only

@@ -601,7 +601,7 @@ pub fn DiskUsageView(#[prop(default = Tab::DiskUsage)] tab: Tab) -> impl IntoVie
                             {stat.reclaimable_bytes.filter(|bytes| *bytes > 0).map(|bytes| {
                                 let label = match count {
                                     Some(n) => format!("{} unused item(s)", n),
-                                    None => "CLI fallback required".to_string(),
+                                    None => "CLI only".to_string(),
                                 };
                                 view! {
                                     <div class="disk-reclaim">
@@ -653,7 +653,7 @@ pub fn DiskUsageView(#[prop(default = Tab::DiskUsage)] tab: Tab) -> impl IntoVie
                     .to_string()
             } else if category == PruneCategory::BuildCache {
                 format!(
-                    "Prune unused build cache? No Web UI endpoint exists; confirming copies `{}`.",
+                    "Prune unused build cache? Confirming copies `{}` to your clipboard.",
                     cli_hint(category)
                 )
             } else {

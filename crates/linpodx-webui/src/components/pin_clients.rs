@@ -6,21 +6,26 @@
 //! firing `daemon_pin_client_tofu_expiry_set`.
 //!
 //! Below the status card, a filterable table lists the actually-pinned
-//! clients (`daemon_pin_client_list` — no REST route exists for this yet, so
-//! it goes over the same `/ipc` JSON-RPC socket rather than `ListTable`'s
-//! `fetch_list`). Renders its own `<table>` for that reason, following the
-//! same pattern as `pods.rs` / `stacks.rs`.
+//! clients. Vision-triage fix (2026-07): this now prefers
+//! `GET /api/v1/daemon/pinned-clients` (added alongside this fix, backed by
+//! the existing `Method::DaemonPinClientList` dispatch arm) and falls back to
+//! the `daemon_pin_client_list` JSON-RPC method for daemons running an older
+//! build without that route — same defensive pattern as `plugins.rs`.
+//! Renders its own `<table>` rather than `ListTable`, following the same
+//! pattern as `pods.rs` / `stacks.rs`.
 
 use leptos::prelude::*;
 use serde_json::Value;
 use wasm_bindgen_futures::spawn_local;
 
 use super::icons::Icon;
+use super::illustrations::EmptySpot;
 use crate::api_client::{build_tofu_expiry_body, paths};
+use crate::app::AuthToken;
 use crate::helpers::{
-    humanize_timestamp, parse_tofu_expiry, tofu_countdown_label, tofu_is_expired,
+    humanize_timestamp, parse_tofu_expiry, short_id, tofu_countdown_label, tofu_is_expired,
 };
-use crate::ws::send_rpc;
+use crate::ws::{fetch_list, send_rpc};
 
 #[derive(Clone, Debug)]
 struct TofuStatus {
@@ -73,6 +78,7 @@ impl PinnedClientRow {
 
 #[component]
 pub fn PinnedClientsView() -> impl IntoView {
+    let auth = use_context::<AuthToken>().expect("AuthToken context provided by AppRoot");
     let status: RwSignal<Option<TofuStatus>> = RwSignal::new(None);
     let input = RwSignal::new(String::new());
     let error: RwSignal<Option<String>> = RwSignal::new(None);
@@ -109,8 +115,22 @@ pub fn PinnedClientsView() -> impl IntoView {
 
     let reload_clients = move || {
         clients_loading.set(true);
+        let token = auth.0.get_untracked();
         spawn_local(async move {
-            match send_rpc("daemon_pin_client_list", Value::Null).await {
+            // Prefer the REST route (bearer-gated, matches every other list
+            // panel); fall back to the JSON-RPC method for a daemon running
+            // an older build without `/api/v1/daemon/pinned-clients` mounted
+            // yet. `fetch_list` needs an explicit token even though the
+            // WebSocket path pulls it from `localStorage` itself.
+            let rest_result = match token.as_deref() {
+                Some(t) => Some(fetch_list("daemon/pinned-clients", t).await),
+                None => None,
+            };
+            let outcome = match rest_result {
+                Some(Ok(v)) => Ok(v),
+                _ => send_rpc("daemon_pin_client_list", Value::Null).await,
+            };
+            match outcome {
                 Ok(v) => {
                     let arr = v.as_array().cloned().unwrap_or_default();
                     let parsed = arr.iter().filter_map(PinnedClientRow::from_value).collect();
@@ -126,6 +146,7 @@ pub fn PinnedClientsView() -> impl IntoView {
         if prev.is_some() {
             return;
         }
+        let _ = auth.0.get();
         reload();
         reload_clients();
     });
@@ -268,8 +289,8 @@ pub fn PinnedClientsView() -> impl IntoView {
                         };
                         if filtered.is_empty() {
                             return view! {
-                                <div class="empty-state">
-                                    <span class="empty-state__icon"><Icon name="pin"/></span>
+                                <div class="empty-state empty-state--spot">
+                                    <span class="empty-state__spot"><EmptySpot motif="generic"/></span>
                                     <span class="empty-state__title">"No pinned clients"</span>
                                     <span class="empty-state__hint">
                                         "TOFU-pinned remote clients appear here once a WebSocket client enrolls under --pin-clients."
@@ -280,19 +301,39 @@ pub fn PinnedClientsView() -> impl IntoView {
                         }
                         let now = js_now_secs();
                         let count = filtered.len();
+                        // A single global TOFU badge, computed once from the
+                        // status card above and applied to every row: the
+                        // pinned-client rows don't carry their own per-entry
+                        // TOFU state, but "was this pin-store enrolled under
+                        // an active/expired TOFU window" is still useful
+                        // at-a-glance context next to the fingerprint. `.get()`
+                        // (not `_untracked`) so this table re-renders once the
+                        // status card's own fetch resolves — otherwise the
+                        // badge freezes at whatever `status` held during this
+                        // closure's very first (pre-fetch) run.
+                        let (tofu_label, tofu_cls) = match status.get() {
+                            Some(s) if !s.enabled => ("static".to_string(), "chip chip--neutral"),
+                            Some(s) if tofu_is_expired(s.enabled, s.max_age_secs, s.enabled_at, now) => {
+                                ("TOFU expired".to_string(), "chip chip--error")
+                            }
+                            Some(_) => ("TOFU".to_string(), "chip chip--info"),
+                            None => ("—".to_string(), "chip chip--neutral"),
+                        };
                         let body_rows = filtered
                             .into_iter()
                             .map(|row| {
                                 let enrolled = humanize_timestamp(now, &row.enrolled_at);
+                                let short_fp = short_id(&row.fingerprint);
                                 view! {
                                     <tr>
                                         <td><span class="cell">{row.label.clone()}</span></td>
                                         <td>
                                             <span class="cell-id mono" title=row.fingerprint.clone()>
-                                                {row.fingerprint.clone()}
+                                                {short_fp}
                                             </span>
                                         </td>
                                         <td><span class="cell">{enrolled}</span></td>
+                                        <td><span class=tofu_cls>{tofu_label.clone()}</span></td>
                                     </tr>
                                 }
                             })
@@ -305,6 +346,7 @@ pub fn PinnedClientsView() -> impl IntoView {
                                             <th>"Label"</th>
                                             <th>"Fingerprint"</th>
                                             <th>"Enrolled"</th>
+                                            <th>"TOFU"</th>
                                         </tr>
                                     </thead>
                                     <tbody>{body_rows}</tbody>

@@ -404,7 +404,7 @@ pub fn Settings() -> impl IntoView {
                     <button type="button" class="btn btn--sm btn--ghost" on:click=clear_token>
                         "Clear token"
                     </button>
-                    <span class="rest-hint">"theme toggle lives in the topbar"</span>
+                    <span class="rest-hint">"Theme toggle is in the topbar."</span>
                 </div>
             </div>
 

@@ -3,8 +3,20 @@
 //! Renders the daemon's `plugin_key_list` payload as a card-stack panel with a
 //! "Revoke cluster-wide" button per row. Submitting opens a confirm modal that
 //! issues `plugin_key_revoke_propagate` over the JSON-RPC bridge.
+//!
+//! Vision-triage fix (2026-07): `GET /api/v1/plugin/keys` doesn't exist on
+//! every daemon build (no route mounted -> `http 404`), so `reload` always
+//! falls back to the `plugin_key_list` JSON-RPC method, which does exist.
+//! When *both* surfaces come up empty-handed and the REST leg specifically
+//! 404'd, that's read as "this daemon build doesn't expose plugin key
+//! management" and rendered as an informative illustrated state rather than
+//! a scary error banner — real failures (auth, parse, RPC errors) still hit
+//! the `.error-state` banner. Either way the fetch race is bounded by
+//! `TIMEOUT_MS` so a wedged WebSocket can never leave the skeleton rows
+//! spinning forever.
 
 use std::collections::HashMap;
+use std::future::Future;
 
 use leptos::prelude::*;
 use serde_json::Value;
@@ -16,6 +28,28 @@ use crate::api_client::{build_revoke_cluster_body, paths};
 use crate::app::AuthToken;
 use crate::helpers::plugin_propagation_label;
 use crate::ws::{fetch_list, send_rpc};
+
+/// Upper bound on how long `reload` waits for a response before giving up on
+/// the skeleton and surfacing an error state. Chosen generously — normal
+/// round-trips complete in well under a second — because the only job of this
+/// timeout is to guarantee forward progress, not to be a tight SLA.
+const TIMEOUT_MS: i32 = 8_000;
+
+/// Resolve after `ms` milliseconds. Built on `Window::set_timeout` + a
+/// `js_sys::Promise` rather than pulling in a timer crate — `web_sys`'s
+/// `Window` feature is already a dependency. Never panics: if there is no
+/// global `window` (not expected in a browser build) the promise simply never
+/// resolves, which is equivalent to "no timeout" for that call site.
+fn delay_ms(ms: i32) -> impl Future<Output = ()> {
+    let promise = js_sys::Promise::new(&mut |resolve, _reject| {
+        if let Some(window) = web_sys::window() {
+            let _ = window.set_timeout_with_callback_and_timeout_and_arguments_0(&resolve, ms);
+        }
+    });
+    async move {
+        let _ = wasm_bindgen_futures::JsFuture::from(promise).await;
+    }
+}
 
 #[derive(Clone, Debug)]
 struct KeyRow {
@@ -71,6 +105,11 @@ pub fn PluginsView() -> impl IntoView {
     let auth = use_context::<AuthToken>().expect("AuthToken context provided by AppRoot");
     let rows: RwSignal<Vec<KeyRow>> = RwSignal::new(Vec::new());
     let error: RwSignal<Option<String>> = RwSignal::new(None);
+    // Set when the REST leg specifically 404'd and the RPC fallback also came
+    // up empty — read as "this daemon build doesn't expose plugin key
+    // management" rather than a genuine failure. Mutually exclusive with
+    // `error`.
+    let not_enabled = RwSignal::new(false);
     let pending_revoke: RwSignal<Option<(String, String)>> = RwSignal::new(None);
     let propagation: RwSignal<HashMap<(String, String), Propagation>> =
         RwSignal::new(HashMap::new());
@@ -85,19 +124,23 @@ pub fn PluginsView() -> impl IntoView {
             Some(t) => t,
             None => {
                 error.set(Some("set a bearer token to load plugin keys".into()));
+                not_enabled.set(false);
                 loading.set(false);
                 return;
             }
         };
-        spawn_local(async move {
+        loading.set(true);
+        error.set(None);
+        not_enabled.set(false);
+
+        let fetch = async move {
             match fetch_list("plugin/keys", &token).await {
                 Ok(v) => {
                     let arr = if let Value::Array(a) = v { a } else { vec![v] };
                     let parsed: Vec<KeyRow> = arr.iter().filter_map(KeyRow::from_value).collect();
                     rows.set(parsed);
-                    error.set(None);
                 }
-                Err(_) => {
+                Err(rest_err) => {
                     // Fall back to the JSON-RPC method if the REST list isn't
                     // mounted yet (the daemon ships both surfaces). `Value::Null`,
                     // not `json!({})` — see `ws::send_rpc`'s doc comment: this is
@@ -111,13 +154,37 @@ pub fn PluginsView() -> impl IntoView {
                             let parsed: Vec<KeyRow> =
                                 arr.iter().filter_map(KeyRow::from_value).collect();
                             rows.set(parsed);
-                            error.set(None);
                         }
-                        Err(e) => error.set(Some(e)),
+                        Err(rpc_err) => {
+                            if rest_err == "http 404" {
+                                not_enabled.set(true);
+                            } else {
+                                error.set(Some(rpc_err));
+                            }
+                        }
                     }
                 }
             }
             loading.set(false);
+        };
+
+        spawn_local(async move {
+            futures::pin_mut!(fetch);
+            let timeout = delay_ms(TIMEOUT_MS);
+            futures::pin_mut!(timeout);
+            match futures::future::select(fetch, timeout).await {
+                futures::future::Either::Left(_) => {}
+                futures::future::Either::Right((_, remaining_fetch)) => {
+                    if loading.get_untracked() {
+                        error.set(Some("timed out waiting for the daemon to respond".into()));
+                        loading.set(false);
+                    }
+                    // Let the original fetch keep running in the background —
+                    // if it eventually resolves it still updates the view
+                    // instead of being silently dropped.
+                    remaining_fetch.await;
+                }
+            }
         });
     };
 
@@ -232,6 +299,19 @@ pub fn PluginsView() -> impl IntoView {
                 })
                 .collect_view()
                 .into_any();
+        }
+        if not_enabled.get() {
+            return view! {
+                <div class="empty-state empty-state--spot">
+                    <span class="empty-state__spot"><EmptySpot motif="generic"/></span>
+                    <span class="empty-state__title">"Plugin key management is not enabled on this daemon"</span>
+                    <span class="empty-state__hint">
+                        "This daemon build doesn't expose the plugin key registry over the Web UI. "
+                        "Check "<code>"linpodx plugin key list"</code>" from the CLI, or upgrade the daemon to a build with plugin signing support."
+                    </span>
+                </div>
+            }
+            .into_any();
         }
         let items = rows.get();
         if items.is_empty() {
