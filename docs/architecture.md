@@ -182,6 +182,39 @@ sequenceDiagram
     Note over Ax: Token bucket per session<br/>after mTLS (defence in depth)
 ```
 
+### 2.6 Desktop shell: `WebUiEnsure` local Web UI flow
+
+```mermaid
+sequenceDiagram
+    participant T as linpodx-gui (Tauri shell)
+    participant S as daemon Unix socket
+    participant L as local loopback listener (127.0.0.1:0)
+    T->>S: Version (probe)
+    alt daemon unreachable
+        T->>T: spawn `linpodx-daemon --fork` detached, poll socket up to 10s
+    end
+    T->>S: WebUiEnsure {}
+    alt first call this daemon lifetime
+        S->>L: bind ephemeral port + mint bearer token
+        S->>S: spawn axum router (/api/v1/*, /ui/*, /pty/:bridge_id) — TLS + pinning disabled
+        S-->>T: WebUiEnsureResponse {url, token, started: true}
+    else already running
+        S-->>T: cached WebUiEnsureResponse {url, token, started: false}
+    end
+    T->>T: navigate webview to "{url}/ui?token={token}"
+```
+
+`linpodx-gui` (Phase 24, Tauri 2) carries no container-management UI of its own —
+it is a thin shell that resolves the daemon socket (`$LINPODX_SOCKET` →
+`$XDG_RUNTIME_DIR/linpodx.sock` → `/tmp/linpodx-$UID.sock`), auto-spawns the
+daemon if the socket is dead, and points the webview at the daemon-served
+`linpodx-webui` leptos SPA. The local listener opened by `WebUiEnsure` is
+independent of `--remote-listen`: always plaintext, always loopback, and
+reuses the same axum router the remote WebSocket path serves (§2.5) with TLS
+and client-cert pinning turned off. It is idempotent — the first call binds
+and returns `started = true`; every later call in the same daemon lifetime
+returns the cached `(url, token)` pair with `started = false`.
+
 ## 3. Persistence
 
 SQLite is the durability store. Migrations live under
@@ -287,15 +320,31 @@ mutations into `CreateOptions`).
 `linpodx-cluster` now hosts a real Raft state machine on top of the Phase 9
 gossip layer:
 
-- `AppData` carries three variants: `Noop`, `ProposeContainer`, and
-  `RemoveContainer`. The in-memory state is a
-  `BTreeMap<(node_id, container_id), ContainerSummary>` that is rebuilt from
-  the snapshot payload on `install_snapshot`.
+- `AppData` carries four variants: `ProposeContainer`, `RemoveContainer`,
+  `RevokePluginKey` (§5.3), and the backward-compat `Noop` sentinel (kept so a
+  daemon rolled back to an older binary can still drain its in-memory log via
+  `#[serde(other)]` instead of panicking on an unknown discriminant). The
+  in-memory state is a `BTreeMap<(node_id, container_id), ContainerSummary>`
+  that is rebuilt from the snapshot payload on `install_snapshot`.
 - `RaftHttpFactory` exposes `/append`, `/vote`, and `/snapshot` over axum and
   `reqwest` for inter-node traffic; gossip and Raft membership sync every five
   seconds (`raft_membership_sync_round`).
 - `ClusterContainerView` prefers the Raft state once `last_applied > 0` and
   falls back to the gossip aggregate otherwise (backward compatible).
+
+**Bootstrap contract (as currently audited, v0.1).** `RaftConfig` defaults
+`bootstrap_single_node: true`, and node ids 0/1 are reserved — id `1` is
+always the single-node bootstrap identity, so a freshly started daemon with no
+peers self-elects deterministically without a separate provisioning step.
+There is **no persisted application state machine**: `MemStore` is in-memory
+plus opportunistic SQLite persistence of the vote only (`raft_state`,
+migration 0014); a daemon restart resets the cluster to bootstrap, which is
+acceptable for v0.1 because `ClusterLeaderElected` is re-audited on every
+fresh round. A dedicated multi-node "exactly one bootstrapper" arbitration
+protocol (beyond today's single-node-only default) has not landed as of this
+writing — treat `bootstrap_single_node` as an opt-in flag operators must
+coordinate manually across a multi-node deployment, not as a race-free
+elected contract.
 
 The Kubernetes adapter gained a write side: `create_pod`, `delete_pod`,
 `create_namespace`, and `scale_deployment` (JSON merge patch on the
@@ -326,3 +375,28 @@ daemon's `/assets/*` route can serve the bundle on air-gapped hosts.
 `oci_tar.rs` walks the `podman save` output (manifest.json + per-layer
 tar.gz, with `.wh.*` whiteout markers skipped) to produce a file-level
 `diff_v2` response, replacing the Phase 7 layer-list summary.
+
+## 6. Testing
+
+Most of the 113 daemon dispatch arms are otherwise only exercised behind
+podman-gated `#[ignore]` integration tests under `tests/`, so plain `cargo
+test --workspace` never ran their bodies — argv assembly, JSON parsing, event
+publication, and audit payloads all went unverified in CI.
+
+`crates/linpodx-daemon/src/dispatch/mock_podman.rs` closes that gap with a
+**fake-podman harness**: a tiny shell script stands in for the `podman`
+binary (the same `PodmanConfig{binary: <script>}` seam `linpodx-runtime`'s
+volume tests proved out first), and the harness builds a real `Dispatcher`
+via `DispatcherBuilder` whose podman handle — and the raw `podman_bin` path
+the `SystemDf` overlay shells out to — both point at that script. The script
+inspects `$1`/`$2` and emits fixtures whose shapes were captured from a live
+`podman` (5.8.2) run on the dev host, so the arms run through the public
+`Dispatcher::dispatch` entry point end-to-end without ever touching a real
+container runtime.
+
+Because `linpodx-daemon` is a binary-only crate (no `lib` target), an
+integration test under `tests/` cannot name `Dispatcher`; the harness
+therefore lives as an in-crate `#[cfg(test)]` module (declared from
+`dispatch/containers.rs`) and runs unconditionally — no `#[ignore]` — under
+`cargo test -p linpodx-daemon` alongside the existing dispatch unit tests.
+It is a test-only seam: zero production behaviour changes.
