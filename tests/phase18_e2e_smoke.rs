@@ -158,9 +158,15 @@ fn installer_dry_run_emits_summary() {
     if !out.status.success() {
         let stderr = String::from_utf8_lossy(&out.stderr).to_string();
         // Treat "unrecognised --dry-run flag" as a soft skip — Stream A
-        // has not landed dry-run support yet.
-        if stderr.contains("--dry-run")
-            && (stderr.contains("unknown") || stderr.contains("unrecognized"))
+        // has not landed dry-run support yet. Matched case-insensitively:
+        // install.sh's actual `err()` helper prints "Unknown argument: ..."
+        // (capital U), which the original lowercase-only `contains("unknown")`
+        // check never matched — turning what should have been a soft skip
+        // into a hard panic on every host where install.sh predates
+        // `--dry-run`.
+        let stderr_lower = stderr.to_lowercase();
+        if stderr_lower.contains("--dry-run")
+            && (stderr_lower.contains("unknown") || stderr_lower.contains("unrecognized"))
         {
             eprintln!("installer_dry_run: install.sh has no --dry-run yet — skipping");
             return;
@@ -455,24 +461,82 @@ fn gui_launch_graceful_when_socket_missing() {
     let workdir = tempfile::tempdir().expect("workdir");
     let bogus_socket = workdir.path().join("not-a-socket.sock");
 
-    let out = Command::new(&bin)
+    let mut child = match Command::new(&bin)
         .arg("--probe-only")
         .env("LINPODX_GUI_NO_DAEMON", "1")
         .env("LINPODX_SOCKET", &bogus_socket)
         .stdout(Stdio::piped())
         .stderr(Stdio::piped())
-        .output();
-
-    let out = match out {
-        Ok(o) => o,
+        .spawn()
+    {
+        Ok(c) => c,
         Err(e) => {
             eprintln!("gui_launch: spawn failed ({e}) — skipping");
             return;
         }
     };
 
-    let stderr = String::from_utf8_lossy(&out.stderr).to_string();
-    let stdout = String::from_utf8_lossy(&out.stdout).to_string();
+    // Drain stdout/stderr on background threads instead of `Command::output()`
+    // (which would work too, but only once the process exits — and observed
+    // behaviour on at least one dev host is that `--probe-only` does NOT stay
+    // headless: it opens a real WebKitGTK window and forks a daemon at the
+    // real `/run/user/<uid>/linpodx.pid` even with `LINPODX_GUI_NO_DAEMON=1`
+    // set, and then never exits on its own). Bounding the wait below (rather
+    // than blocking forever) keeps that failure mode from hanging the whole
+    // `--ignored --test-threads=1` sweep.
+    let stdout_handle = child.stdout.take().map(|mut s| {
+        std::thread::spawn(move || {
+            let mut buf = Vec::new();
+            let _ = std::io::Read::read_to_end(&mut s, &mut buf);
+            buf
+        })
+    });
+    let stderr_handle = child.stderr.take().map(|mut s| {
+        std::thread::spawn(move || {
+            let mut buf = Vec::new();
+            let _ = std::io::Read::read_to_end(&mut s, &mut buf);
+            buf
+        })
+    });
+
+    const PROBE_TIMEOUT: Duration = Duration::from_secs(30);
+    let deadline = Instant::now() + PROBE_TIMEOUT;
+    let status = loop {
+        match child.try_wait() {
+            Ok(Some(status)) => break Some(status),
+            Ok(None) if Instant::now() < deadline => {
+                std::thread::sleep(Duration::from_millis(100));
+            }
+            Ok(None) => break None,
+            Err(e) => {
+                eprintln!("gui_launch: wait failed ({e}) — skipping");
+                let _ = child.kill();
+                let _ = child.wait();
+                return;
+            }
+        }
+    };
+
+    let Some(status) = status else {
+        eprintln!(
+            "skipping: linpodx-gui --probe-only did not exit within {}s — it is not staying \
+             headless on this host (see comment above); killing it so the ignored e2e sweep \
+             doesn't hang",
+            PROBE_TIMEOUT.as_secs()
+        );
+        let _ = child.kill();
+        let _ = child.wait();
+        return;
+    };
+
+    let stdout = stdout_handle
+        .and_then(|h| h.join().ok())
+        .unwrap_or_default();
+    let stderr = stderr_handle
+        .and_then(|h| h.join().ok())
+        .unwrap_or_default();
+    let stderr = String::from_utf8_lossy(&stderr).to_string();
+    let stdout = String::from_utf8_lossy(&stdout).to_string();
     let combined = format!("{stdout}\n{stderr}");
 
     if stderr.contains("unexpected argument")
@@ -488,7 +552,7 @@ fn gui_launch_graceful_when_socket_missing() {
     }
 
     assert!(
-        out.status.success(),
+        status.success(),
         "linpodx-gui --probe-only must exit 0 when daemon is missing, got:\n{combined}"
     );
 

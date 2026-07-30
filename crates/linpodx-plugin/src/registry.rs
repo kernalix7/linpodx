@@ -232,7 +232,7 @@ impl PluginRegistry {
     /// by concatenating each `Vec` field. Plugins that trap are logged at warn and skip
     /// the merge entirely.
     ///
-    /// **Security**: each plugin's payload is passed through [`sanitize_injector_payload`]
+    /// **Security**: each plugin's payload is passed through `sanitize_injector_payload`
     /// before merging. A plugin may add env vars and extra labels, but any entry that would
     /// weaken container confinement (`seccomp=unconfined`, `label=disable`,
     /// `apparmor=unconfined`, `--privileged`, `--cap-add=ALL`, raw `--security-opt`, host
