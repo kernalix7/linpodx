@@ -7,6 +7,7 @@ on:
       - "**/Cargo.toml"
       - "**/Cargo.lock"
       - "deny.toml"
+      - ".cargo/audit.toml"
       - ".github/workflows/audit.yml"
   pull_request:
     branches: [main]
@@ -14,6 +15,7 @@ on:
       - "**/Cargo.toml"
       - "**/Cargo.lock"
       - "deny.toml"
+      - ".cargo/audit.toml"
   schedule:
     # Daily at 03:00 UTC.
     - cron: "0 3 * * *"
@@ -37,7 +39,11 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
+      # `cargo deny check` runs all four checks (advisories/bans/licenses/sources).
+      # Do NOT pass --workspace/--all-features here: cargo-deny >= 0.18 removed those
+      # flags, and `[graph] all-features = true` in deny.toml already covers them.
+      # Keeping the argument list empty means CI runs exactly what `cargo deny check`
+      # runs locally.
       - uses: EmbarkStudios/cargo-deny-action@v2
         with:
           command: check
-          arguments: --workspace --all-features

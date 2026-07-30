@@ -1,7 +1,15 @@
 # cargo-audit configuration — waivers MUST mirror deny.toml [advisories].ignore.
-# Used by the GitHub Actions `rustsec/audit-check` workflow (.github/workflows/audit.yml)
-# and by anyone running `cargo audit` from the project root. Update both files
-# together when adding or removing a waiver.
+# Used by the GitHub Actions `rustsec/audit-check` workflow (.github/workflows/audit.yml
+# and the `audit` job in ci.yml) and by anyone running `cargo audit` from the project
+# root. Update both files together when adding or removing a waiver.
+#
+# `rustsec/audit-check` fails the job on informational warnings (unmaintained / unsound /
+# notice), not just on vulnerabilities — so every accepted informational advisory has to
+# be listed here as well as in deny.toml, with the same rationale.
+#
+# The two files are intentionally near-identical. The one asymmetry is marked
+# AUDIT-ONLY below: cargo-audit reads Cargo.lock verbatim, while cargo-deny resolves
+# the feature graph, so a few lock-only entries are invisible to cargo-deny.
 
 [advisories]
 ignore = [
@@ -10,12 +18,11 @@ ignore = [
     # hickory-proto 0.25 O(n^2) message-encoding CPU exhaustion — egress filter only
     # serves queries from sandbox containers (loopback / Podman network).
     "RUSTSEC-2026-0119",
-    # rsa 0.9 Marvin timing sidechannel — pulled by sqlx-mysql in Cargo.lock only;
-    # workspace sqlx disables all default features so sqlx-mysql is not compiled.
+    # AUDIT-ONLY. rsa 0.9 Marvin timing sidechannel — pulled by sqlx-mysql, which is
+    # present in Cargo.lock but never compiled: the workspace sqlx dependency disables
+    # default features and enables only `sqlite`. cargo-deny's feature-resolved graph
+    # therefore does not contain rsa at all, which is why deny.toml has no such entry.
     "RUSTSEC-2023-0071",
-    # lru 0.12 IterMut Stacked-Borrows violation — GUI font cache only, not in
-    # the security path.
-    "RUSTSEC-2026-0002",
     # backoff unmaintained — transitive via kube-runtime; will drop at kube ≥0.99.
     "RUSTSEC-2025-0012",
     # instant unmaintained — transitive via parking_lot 0.11 + backoff.
@@ -28,4 +35,44 @@ ignore = [
     # serial unmaintained since 2017 — transitive via portable-pty (interactive
     # `linpodx exec -it` only).
     "RUSTSEC-2017-0008",
+
+    # ---------------------------------------------------------------------------
+    # gtk-rs GTK3 bindings (0.18.x) — archived upstream, "No safe upgrade available".
+    # Reached only through the Tauri 2 shell (tao / wry / muda → tauri → linpodx-gui).
+    # WebKitGTK 4.1 is a GTK3 library and is the only WebKit ABI our target distros
+    # ship, so GTK3 is load-bearing for linpodx-gui. Unmaintained notices, not CVEs.
+    # Delete all ten when tauri/wry move to WebKitGTK 6 (GTK4).
+    "RUSTSEC-2024-0411", # gdkwayland-sys 0.18.2
+    "RUSTSEC-2024-0412", # gdk 0.18.2
+    "RUSTSEC-2024-0413", # atk 0.18.2
+    "RUSTSEC-2024-0414", # gdkx11-sys 0.18.2
+    "RUSTSEC-2024-0415", # gtk 0.18.2
+    "RUSTSEC-2024-0416", # atk-sys 0.18.2
+    "RUSTSEC-2024-0417", # gdkx11 0.18.2
+    "RUSTSEC-2024-0418", # gdk-sys 0.18.2
+    "RUSTSEC-2024-0419", # gtk3-macros 0.18.2
+    "RUSTSEC-2024-0420", # gtk-sys 0.18.2
+
+    # proc-macro-error 1.0.4 unmaintained — build-time only, via glib-macros 0.18.5
+    # (part of the GTK3 stack above). Never linked into a shipped binary.
+    "RUSTSEC-2024-0370",
+    # proc-macro-error2 2.0.1 unmaintained (author confirmed 2026-06, no patched
+    # release) — build-time only, via leptos_macro + reactive_stores_macro
+    # (linpodx-webui). Resolution is upstream leptos dropping it.
+    "RUSTSEC-2026-0173",
+
+    # rust-unic family 0.9.0 unmaintained (whole open-i18n org, no patched release) —
+    # reached only via urlpattern 0.3.0 → tauri-utils, Tauri's own asset/IPC URL
+    # matcher. The shell only ever loads the fixed localhost origin served by the
+    # daemon, so no untrusted URL reaches it. Pure Unicode table lookups.
+    "RUSTSEC-2025-0075", # unic-char-range 0.9.0
+    "RUSTSEC-2025-0080", # unic-common 0.9.0
+    "RUSTSEC-2025-0081", # unic-char-property 0.9.0
+    "RUSTSEC-2025-0098", # unic-ucd-version 0.9.0
+    "RUSTSEC-2025-0100", # unic-ucd-ident 0.9.0
+
+    # glib 0.18.5 unsound `VariantStrIter` iterators (patched only in glib 0.20, which
+    # is GTK4-only, so it is pinned by gtk 0.18). The affected functions are
+    # unreachable from linpodx: no crate references `glib::` at all.
+    "RUSTSEC-2024-0429",
 ]

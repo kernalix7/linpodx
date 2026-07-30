@@ -41,6 +41,64 @@ ignore = [
     # (interactive `linpodx exec -it`). portable-pty upstream is tracking serialport
     # migration; only the PTY proxy path is affected.
     "RUSTSEC-2017-0008",
+
+    # ---------------------------------------------------------------------------
+    # gtk-rs GTK3 bindings (0.18.x) — the whole gtk3-rs family was archived upstream
+    # with "No safe upgrade is available!"; gtk4-rs is a different, incompatible ABI.
+    # These arrive ONLY through the Tauri 2 desktop shell:
+    #   gdkwayland-sys / gdkx11 / gdkx11-sys → tao + wry → tauri-runtime-wry → tauri
+    #   atk / atk-sys / gdk / gdk-sys / gtk / gtk-sys / gtk3-macros → gtk → muda + tao
+    # WebKitGTK 4.1 (webkit2gtk-4.1) is the only WebKit ABI shipped by every distro we
+    # target, and it is a GTK3 library — so GTK3 is load-bearing for linpodx-gui and
+    # cannot be dropped without abandoning the Tauri shell (Phase 25 GUI direction).
+    # These are "unmaintained" notices, not exploitable vulnerabilities: no CVE, no
+    # advisory with a patched range. Re-evaluate when tauri/wry move to WebKitGTK 6
+    # (GTK4), at which point every entry below must be deleted.
+    "RUSTSEC-2024-0411", # gdkwayland-sys 0.18.2
+    "RUSTSEC-2024-0412", # gdk 0.18.2
+    "RUSTSEC-2024-0413", # atk 0.18.2
+    "RUSTSEC-2024-0414", # gdkx11-sys 0.18.2
+    "RUSTSEC-2024-0415", # gtk 0.18.2
+    "RUSTSEC-2024-0416", # atk-sys 0.18.2
+    "RUSTSEC-2024-0417", # gdkx11 0.18.2
+    "RUSTSEC-2024-0418", # gdk-sys 0.18.2
+    "RUSTSEC-2024-0419", # gtk3-macros 0.18.2
+    "RUSTSEC-2024-0420", # gtk-sys 0.18.2
+
+    # proc-macro-error 1.0.4 — unmaintained, "No safe upgrade is available!".
+    # Build-time only (proc-macro dependency of glib-macros 0.18.5, itself part of the
+    # GTK3 stack above). Never linked into a shipped binary, so it has no runtime
+    # attack surface; it disappears together with the GTK3 waivers.
+    "RUSTSEC-2024-0370",
+    # proc-macro-error2 2.0.1 — unmaintained (author confirmed 2026-06); the fork of
+    # RUSTSEC-2024-0370 is dead too and there is no patched release. Build-time only,
+    # via leptos_macro 0.7.9 + reactive_stores_macro (linpodx-webui). Resolution is
+    # upstream leptos migrating to manyhow / proc-macro2-diagnostics.
+    "RUSTSEC-2026-0173",
+
+    # rust-unic family 0.9.0 — the whole open-i18n/rust-unic org is unmaintained with
+    # no patched release. Reached only through urlpattern 0.3.0 → tauri-utils, i.e.
+    # Tauri's URL-pattern matcher for its own asset/IPC scheme; linpodx never feeds
+    # untrusted URLs into it (the shell loads a fixed localhost origin served by the
+    # daemon). Pure Unicode table lookups — no unsafe, no network, no filesystem.
+    # Resolution is upstream tauri-utils moving urlpattern onto icu_properties.
+    "RUSTSEC-2025-0075", # unic-char-range 0.9.0
+    "RUSTSEC-2025-0080", # unic-common 0.9.0
+    "RUSTSEC-2025-0081", # unic-char-property 0.9.0
+    "RUSTSEC-2025-0098", # unic-ucd-version 0.9.0
+    "RUSTSEC-2025-0100", # unic-ucd-ident 0.9.0
+
+    # NOTE — two advisories are waived in .cargo/audit.toml but deliberately NOT here,
+    # because cargo-deny does not consider them applicable and listing them would only
+    # produce a permanent `advisory-not-detected` warning:
+    #   * RUSTSEC-2023-0071 (rsa, Marvin timing sidechannel) — sqlx-mysql is in
+    #     Cargo.lock but never compiled (workspace sqlx = default-features = false,
+    #     features = ["sqlite"]), so rsa is absent from the feature-resolved graph.
+    #   * RUSTSEC-2024-0429 (glib 0.18.5, unsound VariantStrIter) — cargo-deny matches
+    #     the advisory's `[affected.functions]` criteria and reports "no crate matched";
+    #     linpodx has no `glib::` reference anywhere under crates/, so the affected
+    #     iterators are genuinely unreachable. cargo-audit is function-blind and does
+    #     report it, hence the audit-side waiver.
 ]
 
 [licenses]
