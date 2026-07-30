@@ -3,6 +3,8 @@
 //!
 //! Run with: `cargo test --workspace -- --ignored`
 
+mod common;
+
 use assert_cmd::Command as AssertCommand;
 use std::path::Path;
 use std::process::{Command, Stdio};
@@ -42,7 +44,7 @@ fn spawn_daemon(workdir: &TempDir) -> (DaemonGuard, std::path::PathBuf) {
         .get_program()
         .to_owned();
 
-    let child = Command::new(bin)
+    let mut child = Command::new(bin)
         .arg("--socket")
         .arg(&socket)
         .arg("--db")
@@ -57,6 +59,7 @@ fn spawn_daemon(workdir: &TempDir) -> (DaemonGuard, std::path::PathBuf) {
         .stderr(Stdio::piped())
         .spawn()
         .expect("spawn daemon");
+    common::drain_piped_output(&mut child);
 
     let guard = DaemonGuard { child };
     if !wait_for_socket(&socket, Duration::from_secs(15)) {
@@ -78,6 +81,10 @@ fn cli(socket: &Path) -> AssertCommand {
 #[ignore]
 fn images_lifecycle() {
     let workdir = tempfile::tempdir().expect("workdir");
+    if !common::host_podman_available() {
+        return;
+    }
+
     let (_g, socket) = spawn_daemon(&workdir);
 
     // ls on empty store.
@@ -93,20 +100,10 @@ fn images_lifecycle() {
     let v: serde_json::Value = serde_json::from_slice(&out.stdout).expect("ls json");
     assert!(v.as_array().map(|a| a.is_empty()).unwrap_or(false));
 
-    // pull alpine.
-    let out = cli(&socket)
-        .args(["images", "pull", "docker.io/library/alpine:latest"])
-        .output()
-        .expect("pull");
-    assert!(
-        out.status.success(),
-        "pull failed: {}",
-        String::from_utf8_lossy(&out.stderr)
-    );
-    let id = String::from_utf8(out.stdout)
-        .expect("pull stdout")
-        .trim()
-        .to_string();
+    // pull alpine, bounded so offline registries cannot hang the ignored sweep.
+    let Some(id) = common::pull_daemon_test_image(&socket) else {
+        return;
+    };
     assert!(
         id.starts_with("sha256:") || id.len() >= 12,
         "expected an image id, got '{id}'"
@@ -125,7 +122,7 @@ fn images_lifecycle() {
 
     // inspect should give us back the image.
     let out = cli(&socket)
-        .args(["images", "inspect", "docker.io/library/alpine:latest"])
+        .args(["images", "inspect", common::TEST_IMAGE])
         .output()
         .expect("inspect");
     assert!(
@@ -138,7 +135,7 @@ fn images_lifecycle() {
 
     // rm by tag (force, in case it's referenced).
     cli(&socket)
-        .args(["images", "rm", "-f", "docker.io/library/alpine:latest"])
+        .args(["images", "rm", "-f", common::TEST_IMAGE])
         .assert()
         .success();
 
@@ -155,6 +152,10 @@ fn images_lifecycle() {
 #[ignore]
 fn volumes_lifecycle() {
     let workdir = tempfile::tempdir().expect("workdir");
+    if !common::host_podman_available() {
+        return;
+    }
+
     let (_g, socket) = spawn_daemon(&workdir);
 
     // create.
@@ -191,6 +192,10 @@ fn volumes_lifecycle() {
     let v: serde_json::Value = serde_json::from_slice(&out.stdout).expect("inspect json");
     assert_eq!(v.get("name").and_then(|s| s.as_str()), Some("demo-vol"));
 
+    if !common::ensure_daemon_test_image(&socket) {
+        return;
+    }
+
     // mount into a container that exits immediately.
     cli(&socket)
         .args([
@@ -199,7 +204,7 @@ fn volumes_lifecycle() {
             "demo-vmounter",
             "-v",
             "demo-vol:/data",
-            "docker.io/library/alpine:latest",
+            common::TEST_IMAGE,
             "true",
         ])
         .assert()
@@ -244,6 +249,10 @@ fn volumes_lifecycle() {
 #[ignore]
 fn networks_lifecycle() {
     let workdir = tempfile::tempdir().expect("workdir");
+    if !common::host_podman_available() {
+        return;
+    }
+
     let (_g, socket) = spawn_daemon(&workdir);
 
     // create.
@@ -292,6 +301,10 @@ fn networks_lifecycle() {
         Some("10.99.0.0/24")
     );
 
+    if !common::ensure_daemon_test_image(&socket) {
+        return;
+    }
+
     // attach a container — exits quickly.
     cli(&socket)
         .args([
@@ -300,7 +313,7 @@ fn networks_lifecycle() {
             "demo-netter",
             "--network",
             "demo-net",
-            "docker.io/library/alpine:latest",
+            common::TEST_IMAGE,
             "true",
         ])
         .assert()
@@ -337,7 +350,15 @@ fn networks_lifecycle() {
 #[ignore]
 fn port_mapping() {
     let workdir = tempfile::tempdir().expect("workdir");
+    if !common::host_podman_available() {
+        return;
+    }
+
     let (_g, socket) = spawn_daemon(&workdir);
+
+    if !common::ensure_daemon_test_image(&socket) {
+        return;
+    }
 
     // Create a container with a published port. We don't actually start a server in it — just
     // verify the publish flag round-trips through the CLI → IPC → podman → inspect path.
@@ -351,7 +372,7 @@ fn port_mapping() {
             "demo-port",
             "-p",
             "18080:8080/tcp",
-            "docker.io/library/alpine:latest",
+            common::TEST_IMAGE,
             "sleep",
             "5",
         ])

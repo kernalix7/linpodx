@@ -9,6 +9,8 @@
 //! `cargo test --workspace -- --list --ignored` output instead of being
 //! invisible.
 
+mod common;
+
 use assert_cmd::Command as AssertCommand;
 use std::path::Path;
 use std::process::{Command, Stdio};
@@ -48,7 +50,7 @@ fn spawn_daemon(workdir: &TempDir) -> (ChildGuard, std::path::PathBuf) {
         .get_program()
         .to_owned();
 
-    let child = Command::new(bin)
+    let mut child = Command::new(bin)
         .arg("--socket")
         .arg(&socket)
         .arg("--db")
@@ -63,6 +65,7 @@ fn spawn_daemon(workdir: &TempDir) -> (ChildGuard, std::path::PathBuf) {
         .stderr(Stdio::piped())
         .spawn()
         .expect("spawn daemon");
+    common::drain_piped_output(&mut child);
 
     let guard = ChildGuard { child };
     if !wait_for_socket(&socket, Duration::from_secs(15)) {
@@ -112,14 +115,22 @@ fn poll_until_terminal(socket: &Path, job_id: &str) -> Option<String> {
 #[ignore = "Phase 2E — requires runtime-team `snapshot job start/status` IPC + Podman ≥ 4.6.0 with commit support; soft-skips when placeholder Error::Runtime is returned"]
 fn snapshot_job_lifecycle() {
     let workdir = tempfile::tempdir().expect("workdir");
+    if !common::host_podman_available() {
+        return;
+    }
+
     let (_guard, socket) = spawn_daemon(&workdir);
+
+    if !common::ensure_daemon_test_image(&socket) {
+        return;
+    }
 
     cli(&socket)
         .args([
             "run",
             "--name",
             "snap-async-target",
-            "docker.io/library/alpine:latest",
+            common::TEST_IMAGE,
             "sleep",
             "60",
         ])

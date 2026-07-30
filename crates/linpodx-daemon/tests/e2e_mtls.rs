@@ -5,6 +5,8 @@
 //! `#[ignore]` because it transitively needs the daemon binary (which needs
 //! Podman to start). Run with `cargo test -p linpodx-daemon --test e2e_mtls -- --ignored --test-threads=1`.
 
+mod common;
+
 use assert_cmd::Command as AssertCommand;
 use std::path::Path;
 use std::process::{Command, Stdio};
@@ -82,6 +84,10 @@ fn write_ca_and_leaf(
 #[ignore]
 fn mtls_version_call_roundtrips() {
     let workdir = tempfile::tempdir().expect("tempdir");
+    if !common::host_podman_available() {
+        return;
+    }
+
     let certdir = workdir.path().join("certs");
     std::fs::create_dir_all(&certdir).unwrap();
 
@@ -149,7 +155,7 @@ fn mtls_version_call_roundtrips() {
         .expect("locate linpodx-daemon")
         .get_program()
         .to_owned();
-    let child = Command::new(&bin)
+    let mut child = Command::new(&bin)
         .arg("--socket")
         .arg(&socket)
         .arg("--db")
@@ -172,6 +178,7 @@ fn mtls_version_call_roundtrips() {
         .stderr(Stdio::piped())
         .spawn()
         .expect("spawn daemon");
+    common::drain_piped_output(&mut child);
     let _guard = DaemonGuard { child };
 
     assert!(
@@ -206,6 +213,10 @@ fn mtls_version_call_roundtrips() {
 #[ignore]
 fn mtls_rejects_client_without_cert() {
     let workdir = tempfile::tempdir().expect("tempdir");
+    if !common::host_podman_available() {
+        return;
+    }
+
     let certdir = workdir.path().join("certs");
     std::fs::create_dir_all(&certdir).unwrap();
 
@@ -248,7 +259,7 @@ fn mtls_rejects_client_without_cert() {
         .expect("locate linpodx-daemon")
         .get_program()
         .to_owned();
-    let child = Command::new(&bin)
+    let mut child = Command::new(&bin)
         .arg("--socket")
         .arg(&socket)
         .arg("--db")
@@ -271,6 +282,7 @@ fn mtls_rejects_client_without_cert() {
         .stderr(Stdio::piped())
         .spawn()
         .expect("spawn daemon");
+    common::drain_piped_output(&mut child);
     let _guard = DaemonGuard { child };
 
     assert!(

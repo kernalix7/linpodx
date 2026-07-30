@@ -5,6 +5,8 @@
 //! Podman to start successfully — `Version` succeeds because the daemon refuses to
 //! boot without `podman`).
 
+mod common;
+
 use assert_cmd::Command as AssertCommand;
 use std::path::Path;
 use std::process::{Command, Stdio};
@@ -37,6 +39,10 @@ fn wait_for_socket(socket: &Path, timeout: Duration) -> bool {
 fn remote_version_call_roundtrips() {
     // Re-spawn with a fixed loopback port so we know what to point the CLI at.
     let workdir = tempfile::tempdir().expect("tempdir");
+    if !common::host_podman_available() {
+        return;
+    }
+
     let socket = workdir.path().join("linpodx.sock");
     let db = workdir.path().join("state.db");
     let pod_root = workdir.path().join("podman-root");
@@ -48,7 +54,7 @@ fn remote_version_call_roundtrips() {
         .expect("locate linpodx-daemon")
         .get_program()
         .to_owned();
-    let child = Command::new(&bin)
+    let mut child = Command::new(&bin)
         .arg("--socket")
         .arg(&socket)
         .arg("--db")
@@ -65,6 +71,7 @@ fn remote_version_call_roundtrips() {
         .stderr(Stdio::piped())
         .spawn()
         .expect("spawn daemon");
+    common::drain_piped_output(&mut child);
     let _guard = DaemonGuard { child };
 
     assert!(
@@ -94,6 +101,10 @@ fn remote_version_call_roundtrips() {
 #[ignore]
 fn remote_rejects_bad_token() {
     let workdir = tempfile::tempdir().expect("tempdir");
+    if !common::host_podman_available() {
+        return;
+    }
+
     let socket = workdir.path().join("linpodx.sock");
     let db = workdir.path().join("state.db");
     let pod_root = workdir.path().join("podman-root");
@@ -105,7 +116,7 @@ fn remote_rejects_bad_token() {
         .expect("locate linpodx-daemon")
         .get_program()
         .to_owned();
-    let child = Command::new(&bin)
+    let mut child = Command::new(&bin)
         .arg("--socket")
         .arg(&socket)
         .arg("--db")
@@ -122,6 +133,7 @@ fn remote_rejects_bad_token() {
         .stderr(Stdio::piped())
         .spawn()
         .expect("spawn daemon");
+    common::drain_piped_output(&mut child);
     let _guard = DaemonGuard { child };
 
     assert!(

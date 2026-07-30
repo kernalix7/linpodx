@@ -5,6 +5,8 @@
 //! All tests use a disposable `--root` and `--runroot` so the user's real
 //! Podman state is never touched.
 
+mod common;
+
 use linpodx_common::ipc::CreateOptions;
 use linpodx_runtime::podman::{Podman, PodmanConfig};
 use std::time::Duration;
@@ -25,7 +27,10 @@ fn podman() -> (Podman, TempDir, TempDir) {
 #[ignore]
 async fn check_succeeds() {
     let (p, _r, _rr) = podman();
-    let v = p.check().await.expect("podman check");
+    let Ok(v) = p.check().await else {
+        eprintln!("skipping: podman not available");
+        return;
+    };
     assert!(!v.is_empty());
     eprintln!("detected podman version: {v}");
 }
@@ -34,16 +39,17 @@ async fn check_succeeds() {
 #[ignore]
 async fn full_lifecycle_alpine() {
     let (p, _r, _rr) = podman();
-    p.check().await.expect("podman check");
+    if !common::podman_available(&p).await {
+        return;
+    }
 
-    // Pull alpine into the disposable root.
-    p.pull("docker.io/library/alpine:latest")
-        .await
-        .expect("pull alpine");
+    if !common::ensure_runtime_test_image(&p).await {
+        return;
+    }
 
     // Create a detached container that sleeps a short while.
     let opts = CreateOptions {
-        image: "docker.io/library/alpine:latest".into(),
+        image: common::TEST_IMAGE.into(),
         name: Some("linpodx-int-test".into()),
         command: vec!["sleep".into(), "30".into()],
         env: vec![],

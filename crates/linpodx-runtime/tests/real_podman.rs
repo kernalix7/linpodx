@@ -23,6 +23,8 @@
 //!    `axum-server`'s `tls-rustls-no-provider` listener, so a passing
 //!    parse here means the WS handshake material is sane.
 
+mod common;
+
 use linpodx_common::ipc::CreateOptions;
 use linpodx_runtime::podman::{Podman, PodmanConfig};
 use linpodx_runtime::snapshot as runtime_snapshot;
@@ -42,20 +44,6 @@ fn podman_and_roots() -> (Podman, TempDir, TempDir) {
     (p, root, runroot)
 }
 
-/// Skip-if-no-podman helper — mirrors the `skipped_for_placeholder()`
-/// pattern from `tests/phase18_e2e_smoke.rs`. Returns `true` when the
-/// host has no usable `podman` binary so the test can short-circuit
-/// cleanly instead of producing a confusing failure deep in the body.
-async fn podman_available(podman: &Podman) -> bool {
-    match podman.check().await {
-        Ok(_) => true,
-        Err(e) => {
-            eprintln!("skipping: podman not available ({e})");
-            false
-        }
-    }
-}
-
 /// Point `XDG_DATA_HOME` at a fresh tempdir so the encrypted store
 /// (`<XDG_DATA_HOME>/linpodx/snapshots/encrypted/...`) is per-test.
 fn isolated_data_home() -> TempDir {
@@ -70,17 +58,16 @@ async fn snapshot_encryption_disk_round_trip() {
     let (podman, _root, _runroot) = podman_and_roots();
     let _data_home = isolated_data_home();
 
-    if !podman_available(&podman).await {
+    if !common::podman_available(&podman).await {
         return;
     }
-    podman
-        .pull("docker.io/library/alpine:latest")
-        .await
-        .expect("pull alpine");
+    if !common::ensure_runtime_test_image(&podman).await {
+        return;
+    }
 
     // Create + start a short-lived container we can commit from.
     let opts = CreateOptions {
-        image: "docker.io/library/alpine:latest".into(),
+        image: common::TEST_IMAGE.into(),
         name: Some("linpodx-runtime-real-encrypt".into()),
         command: vec!["sleep".into(), "10".into()],
         detach: true,
@@ -222,16 +209,15 @@ async fn mtls_cert_generate_produces_valid_pem_material() {
 async fn podman_run_alpine_echo_round_trip() {
     let (podman, _root, _runroot) = podman_and_roots();
 
-    if !podman_available(&podman).await {
+    if !common::podman_available(&podman).await {
         return;
     }
-    podman
-        .pull("docker.io/library/alpine:latest")
-        .await
-        .expect("pull alpine");
+    if !common::ensure_runtime_test_image(&podman).await {
+        return;
+    }
 
     let opts = CreateOptions {
-        image: "docker.io/library/alpine:latest".into(),
+        image: common::TEST_IMAGE.into(),
         name: Some("linpodx-runtime-real-echo".into()),
         command: vec!["echo".into(), "hi".into()],
         detach: false,

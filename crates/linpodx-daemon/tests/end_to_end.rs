@@ -4,6 +4,8 @@
 //! Marked `#[ignore]` because it requires Podman (>= MIN_PODMAN_VERSION) on the
 //! host. Run explicitly with `cargo test --workspace -- --ignored`.
 
+mod common;
+
 use assert_cmd::Command as AssertCommand;
 use std::path::Path;
 use std::process::{Command, Stdio};
@@ -45,7 +47,7 @@ fn spawn_daemon(workdir: &TempDir) -> (DaemonGuard, std::path::PathBuf) {
         .get_program()
         .to_owned();
 
-    let child = Command::new(bin)
+    let mut child = Command::new(bin)
         .arg("--socket")
         .arg(&socket)
         .arg("--db")
@@ -60,6 +62,7 @@ fn spawn_daemon(workdir: &TempDir) -> (DaemonGuard, std::path::PathBuf) {
         .stderr(Stdio::piped())
         .spawn()
         .expect("spawn daemon");
+    common::drain_piped_output(&mut child);
 
     let guard = DaemonGuard { child };
 
@@ -83,6 +86,10 @@ fn cli(socket: &Path) -> AssertCommand {
 #[ignore]
 fn end_to_end_alpine_lifecycle() {
     let workdir = tempfile::tempdir().expect("workdir");
+    if !common::host_podman_available() {
+        return;
+    }
+
     let (_guard, socket) = spawn_daemon(&workdir);
 
     // version: client + daemon should agree on IPC version.
@@ -104,13 +111,17 @@ fn end_to_end_alpine_lifecycle() {
     let listed: serde_json::Value = serde_json::from_slice(&out.stdout).expect("ps json");
     assert!(listed.as_array().map(|a| a.is_empty()).unwrap_or(false));
 
+    if !common::ensure_daemon_test_image(&socket) {
+        return;
+    }
+
     // run a short-lived alpine container.
     let out = cli(&socket)
         .args([
             "run",
             "--name",
             "linpodx-e2e",
-            "docker.io/library/alpine:latest",
+            common::TEST_IMAGE,
             "sleep",
             "30",
         ])

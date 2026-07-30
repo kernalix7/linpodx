@@ -2,6 +2,8 @@
 //! `#[ignore]`-gated (requires Podman ≥ 4.6.0). Run via:
 //!   cargo test --workspace -- --ignored --test-threads=1
 
+mod common;
+
 use assert_cmd::Command as AssertCommand;
 use std::path::Path;
 use std::process::{Command, Stdio};
@@ -41,7 +43,7 @@ fn spawn_daemon(workdir: &TempDir) -> (ChildGuard, std::path::PathBuf) {
         .get_program()
         .to_owned();
 
-    let child = Command::new(bin)
+    let mut child = Command::new(bin)
         .arg("--socket")
         .arg(&socket)
         .arg("--db")
@@ -56,6 +58,7 @@ fn spawn_daemon(workdir: &TempDir) -> (ChildGuard, std::path::PathBuf) {
         .stderr(Stdio::piped())
         .spawn()
         .expect("spawn daemon");
+    common::drain_piped_output(&mut child);
 
     let guard = ChildGuard { child };
     if !wait_for_socket(&socket, Duration::from_secs(15)) {
@@ -77,7 +80,15 @@ fn cli(socket: &Path) -> AssertCommand {
 #[ignore]
 fn snapshot_lifecycle() {
     let workdir = tempfile::tempdir().expect("workdir");
+    if !common::host_podman_available() {
+        return;
+    }
+
     let (_guard, socket) = spawn_daemon(&workdir);
+
+    if !common::ensure_daemon_test_image(&socket) {
+        return;
+    }
 
     // Start a long-running container so podman commit has something to snapshot.
     cli(&socket)
@@ -85,7 +96,7 @@ fn snapshot_lifecycle() {
             "run",
             "--name",
             "snap-target",
-            "docker.io/library/alpine:latest",
+            common::TEST_IMAGE,
             "sleep",
             "60",
         ])

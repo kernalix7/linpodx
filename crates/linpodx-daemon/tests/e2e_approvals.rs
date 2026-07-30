@@ -5,6 +5,8 @@
 //! Each test spawns the daemon plus an in-process auto-responder that subscribes,
 //! waits for an approval_request notification, and replies with a fixed decision.
 
+mod common;
+
 use assert_cmd::Command as AssertCommand;
 use linpodx_common::approval::ApprovalRequest;
 use linpodx_common::ipc::{
@@ -56,7 +58,7 @@ fn spawn_daemon(workdir: &TempDir, profiles_dir: &Path) -> (ChildGuard, std::pat
         .get_program()
         .to_owned();
 
-    let child = Command::new(bin)
+    let mut child = Command::new(bin)
         .arg("--socket")
         .arg(&socket)
         .arg("--db")
@@ -73,6 +75,7 @@ fn spawn_daemon(workdir: &TempDir, profiles_dir: &Path) -> (ChildGuard, std::pat
         .stderr(Stdio::piped())
         .spawn()
         .expect("spawn daemon");
+    common::drain_piped_output(&mut child);
 
     let guard = ChildGuard { child };
     if !wait_for_socket(&socket, Duration::from_secs(15)) {
@@ -176,9 +179,17 @@ async fn spawn_auto_responder(
 #[ignore]
 fn approval_granted_path() {
     let workdir = tempfile::tempdir().expect("workdir");
+    if !common::host_podman_available() {
+        return;
+    }
+
     let profiles_dir = tempfile::tempdir().expect("profiles dir");
     write_profile(profiles_dir.path(), "gated", GATED_PROFILE);
     let (_guard, socket) = spawn_daemon(&workdir, profiles_dir.path());
+
+    if !common::ensure_daemon_test_image(&socket) {
+        return;
+    }
 
     let rt = tokio::runtime::Runtime::new().unwrap();
     let responder = rt.block_on(spawn_auto_responder(socket.clone(), true));
@@ -194,7 +205,7 @@ fn approval_granted_path() {
             "gated",
             "-v",
             "/tmp:/host_tmp",
-            "docker.io/library/alpine:latest",
+            common::TEST_IMAGE,
             "true",
         ])
         .assert()
@@ -237,6 +248,10 @@ fn approval_granted_path() {
 #[ignore]
 fn approval_denied_path() {
     let workdir = tempfile::tempdir().expect("workdir");
+    if !common::host_podman_available() {
+        return;
+    }
+
     let profiles_dir = tempfile::tempdir().expect("profiles dir");
     write_profile(profiles_dir.path(), "gated", GATED_PROFILE);
     let (_guard, socket) = spawn_daemon(&workdir, profiles_dir.path());
@@ -254,7 +269,7 @@ fn approval_denied_path() {
             "gated",
             "-v",
             "/tmp:/host_tmp",
-            "docker.io/library/alpine:latest",
+            common::TEST_IMAGE,
             "true",
         ])
         .output()
@@ -288,6 +303,10 @@ fn approval_denied_path() {
 #[ignore]
 fn approval_no_listener() {
     let workdir = tempfile::tempdir().expect("workdir");
+    if !common::host_podman_available() {
+        return;
+    }
+
     let profiles_dir = tempfile::tempdir().expect("profiles dir");
     write_profile(profiles_dir.path(), "gated", GATED_PROFILE);
     let (_guard, socket) = spawn_daemon(&workdir, profiles_dir.path());
@@ -302,7 +321,7 @@ fn approval_no_listener() {
             "gated",
             "-v",
             "/tmp:/host_tmp",
-            "docker.io/library/alpine:latest",
+            common::TEST_IMAGE,
             "true",
         ])
         .output()
@@ -334,9 +353,17 @@ fn approval_no_listener() {
 #[ignore]
 fn approval_chain_intact_after_round_trip() {
     let workdir = tempfile::tempdir().expect("workdir");
+    if !common::host_podman_available() {
+        return;
+    }
+
     let profiles_dir = tempfile::tempdir().expect("profiles dir");
     write_profile(profiles_dir.path(), "gated", GATED_PROFILE);
     let (_guard, socket) = spawn_daemon(&workdir, profiles_dir.path());
+
+    if !common::ensure_daemon_test_image(&socket) {
+        return;
+    }
 
     let rt = tokio::runtime::Runtime::new().unwrap();
     let responder = rt.block_on(spawn_auto_responder(socket.clone(), true));
@@ -351,7 +378,7 @@ fn approval_chain_intact_after_round_trip() {
             "gated",
             "-v",
             "/tmp:/host_tmp",
-            "docker.io/library/alpine:latest",
+            common::TEST_IMAGE,
             "true",
         ])
         .assert()

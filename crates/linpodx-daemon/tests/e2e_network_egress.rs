@@ -4,6 +4,8 @@
 //! Real DNS-proxy enforcement (NXDOMAIN for non-allowlisted) requires the
 //! runtime team's hickory-DNS proxy and is exercised in the runtime crate.
 
+mod common;
+
 use assert_cmd::Command as AssertCommand;
 use std::path::Path;
 use std::process::{Command, Stdio};
@@ -43,7 +45,7 @@ fn spawn_daemon(workdir: &TempDir, profiles_dir: &Path) -> (ChildGuard, std::pat
         .get_program()
         .to_owned();
 
-    let child = Command::new(bin)
+    let mut child = Command::new(bin)
         .arg("--socket")
         .arg(&socket)
         .arg("--db")
@@ -60,6 +62,7 @@ fn spawn_daemon(workdir: &TempDir, profiles_dir: &Path) -> (ChildGuard, std::pat
         .stderr(Stdio::piped())
         .spawn()
         .expect("spawn daemon");
+    common::drain_piped_output(&mut child);
 
     let guard = ChildGuard { child };
     if !wait_for_socket(&socket, Duration::from_secs(15)) {
@@ -89,6 +92,10 @@ fn write_profile(dir: &Path, name: &str, body: &str) {
 #[ignore]
 fn network_egress_set_status_roundtrip() {
     let workdir = tempfile::tempdir().expect("workdir");
+    if !common::host_podman_available() {
+        return;
+    }
+
     let profiles_dir = workdir.path().join("profiles");
     write_profile(
         &profiles_dir,

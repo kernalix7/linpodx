@@ -35,6 +35,19 @@ where
     }
 }
 
+async fn loopback_port_available(port: u16) -> bool {
+    match tokio::net::TcpListener::bind(format!("127.0.0.1:{port}")).await {
+        Ok(listener) => {
+            drop(listener);
+            true
+        }
+        Err(err) => {
+            eprintln!("skipping: loopback TCP port {port} unavailable ({err})");
+            false
+        }
+    }
+}
+
 #[tokio::test]
 async fn single_node_leader_elect_via_public_api() {
     let node = RaftNode::start(fast_cfg(1, "alpha", 17820), None, None)
@@ -84,6 +97,10 @@ async fn role_get_response_shape_compiles() {
 #[ignore = "spins up an axum listener; run with -- --ignored --test-threads=1"]
 async fn raft_http_router_serves_against_real_listener() {
     use axum::Router;
+
+    if !loopback_port_available(17826).await {
+        return;
+    }
 
     let node = Arc::new(
         RaftNode::start(fast_cfg(1, "alpha", 17825), None, None)
@@ -184,6 +201,12 @@ async fn three_node_bringup_via_real_http_factory() {
     use axum::Router;
     use chrono::Utc;
     use linpodx_cluster::{node_id_from_string, PeerInfo, PeerStatus, RaftHttpFactory};
+
+    for port in 17840..=17842 {
+        if !loopback_port_available(port).await {
+            return;
+        }
+    }
 
     // Three nodes on adjacent loopback ports. Each runs:
     //   1. A RaftNode constructed with the production HTTP network factory.

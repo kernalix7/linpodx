@@ -2,6 +2,8 @@
 //! `#[ignore]`-gated (requires Podman ≥ 4.6.0). Run via:
 //!   cargo test --workspace -- --ignored --test-threads=1
 
+mod common;
+
 use assert_cmd::Command as AssertCommand;
 use std::path::Path;
 use std::process::{Command, Stdio};
@@ -45,7 +47,7 @@ fn spawn_daemon(workdir: &TempDir, profiles_dir: &Path) -> (ChildGuard, std::pat
         .get_program()
         .to_owned();
 
-    let child = Command::new(bin)
+    let mut child = Command::new(bin)
         .arg("--socket")
         .arg(&socket)
         .arg("--db")
@@ -62,6 +64,7 @@ fn spawn_daemon(workdir: &TempDir, profiles_dir: &Path) -> (ChildGuard, std::pat
         .stderr(Stdio::piped())
         .spawn()
         .expect("spawn daemon");
+    common::drain_piped_output(&mut child);
 
     let guard = ChildGuard { child };
     if !wait_for_socket(&socket, Duration::from_secs(15)) {
@@ -99,6 +102,10 @@ read_only_rootfs: true
 #[ignore]
 fn sandbox_apply_allow() {
     let workdir = tempfile::tempdir().expect("workdir");
+    if !common::host_podman_available() {
+        return;
+    }
+
     let profiles_dir = tempfile::tempdir().expect("profiles dir");
     write_profile(profiles_dir.path(), "strict", STRICT_PROFILE);
     let (_guard, socket) = spawn_daemon(&workdir, profiles_dir.path());
@@ -123,6 +130,10 @@ fn sandbox_apply_allow() {
         "expected strict profile in list, got {v}"
     );
 
+    if !common::ensure_daemon_test_image(&socket) {
+        return;
+    }
+
     // Run a container under the profile.
     cli(&socket)
         .args([
@@ -131,7 +142,7 @@ fn sandbox_apply_allow() {
             "sb-allow",
             "--sandbox",
             "strict",
-            "docker.io/library/alpine:latest",
+            common::TEST_IMAGE,
             "true",
         ])
         .assert()
@@ -187,6 +198,10 @@ fn sandbox_apply_allow() {
 #[ignore]
 fn sandbox_apply_deny() {
     let workdir = tempfile::tempdir().expect("workdir");
+    if !common::host_podman_available() {
+        return;
+    }
+
     let profiles_dir = tempfile::tempdir().expect("profiles dir");
     write_profile(profiles_dir.path(), "strict", STRICT_PROFILE);
     let (_guard, socket) = spawn_daemon(&workdir, profiles_dir.path());
@@ -201,7 +216,7 @@ fn sandbox_apply_deny() {
             "strict",
             "-v",
             "/etc:/conf",
-            "docker.io/library/alpine:latest",
+            common::TEST_IMAGE,
             "true",
         ])
         .output()
@@ -240,12 +255,19 @@ fn sandbox_apply_deny() {
 #[ignore]
 fn audit_chain_verify_and_tamper() {
     let workdir = tempfile::tempdir().expect("workdir");
+    if !common::host_podman_available() {
+        return;
+    }
+
     let profiles_dir = tempfile::tempdir().expect("profiles dir");
     write_profile(profiles_dir.path(), "strict", STRICT_PROFILE);
     let (_guard, socket) = spawn_daemon(&workdir, profiles_dir.path());
 
     // Generate some audit traffic: list + apply + deny.
     cli(&socket).args(["sandbox", "list"]).assert().success();
+    if !common::ensure_daemon_test_image(&socket) {
+        return;
+    }
     cli(&socket)
         .args([
             "run",
@@ -253,7 +275,7 @@ fn audit_chain_verify_and_tamper() {
             "vc-1",
             "--sandbox",
             "strict",
-            "docker.io/library/alpine:latest",
+            common::TEST_IMAGE,
             "true",
         ])
         .assert()
