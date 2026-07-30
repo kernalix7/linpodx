@@ -168,7 +168,7 @@ impl MetricsCollector {
     /// running when the daemon booted) and stops collectors whose container is
     /// no longer running (their `podman stats` loop would otherwise poll a dead
     /// container forever, since a direct `podman stop` never routes through
-    /// [`stop_for`]). Idempotent — safe to call on a fixed interval.
+    /// [`Self::stop_for`]). Idempotent — safe to call on a fixed interval.
     ///
     /// Matching is prefix-tolerant in both directions so a collector keyed by a
     /// short id (or name) is not spuriously pruned when the list surface returns

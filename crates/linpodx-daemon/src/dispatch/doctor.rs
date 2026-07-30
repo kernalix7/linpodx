@@ -1,5 +1,5 @@
 //! Phase 18 Stream C — doctor check helpers. Each `check_*` returns a
-//! [`responses::DoctorCheck`] with a stable id, label, outcome, optional
+//! [`DoctorCheck`] with a stable id, label, outcome, optional
 //! `detail` (human-readable status detail), and optional `fix_hint`.
 //!
 //! Helpers are deliberately small + side-effect free (read env / fs / spawn
